@@ -1,0 +1,4 @@
+interface:
+  display_name: "Turborepo Prune Standalone"
+  short_description: "Prune으로 앱 subset 추출 후 단일 프로젝트로 독립화"
+  default_prompt: "Use this skill to extract a target app from a Turborepo with turbo prune, then optionally inline local packages into a standalone project with import/path updates and handoff checks."
