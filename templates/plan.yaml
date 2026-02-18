@@ -1,0 +1,41 @@
+# ==============================================================================
+# [Input] User Requirements
+# 사용자는 이 부분만 작성하거나, 스크립트를 통해 입력합니다.
+# ==============================================================================
+plan:
+  features:
+    # 예시 (스크립트가 덮어씌우거나 추가하는 영역)
+    # - name: "기능 이름"
+    #   scenarios:
+    #     - "시나리오 1"
+    #     - "시나리오 2"
+
+# ==============================================================================
+# [System] Context Injection
+# 스크립트가 현재 모노레포의 패키지 목록과 위치 정보를 여기에 주입합니다.
+# ==============================================================================
+spec_context:
+  current_location: "{{CURRENT_SCOPE}}"  # 예: @feature/auth (현재 폴더)
+  available_packages: []                 # 예: [@domain/user, @ui/kit, ...]
+
+# ==============================================================================
+# [Output] LLM Analysis & Execution Plan
+# LLM이 위 정보를 바탕으로 아래 내용을 채웁니다.
+# ==============================================================================
+analysis:
+  summary: ""        # 전체 계획 요약
+  
+  # [Main Scope] 이 기능의 주체가 되는 패키지 (보통 current_location과 동일)
+  scope: ""          
+  
+  # [Impact Scope] 이 기능을 위해 수정해야 하는 다른 패키지들 (도메인, 유틸 등)
+  impact_scope: []   # 예: ["@domain/user", "@domain/payment"]
+
+tasks:
+  # [Tasks] 실행 가능한 작업 목록 (Wave 순서 고려)
+  - id: "t-1"
+    name: "Task Name"
+    type: "feat"     # feat | fix | refactor | domain
+    target: ""       # 작업이 수행될 패키지 (예: @domain/user)
+    description: "구체적인 작업 내용"
+    related_features: [] # 관련된 user feature 이름

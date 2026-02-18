@@ -1,0 +1,28 @@
+name: "{{PACKAGE_NAME}}"
+
+description: |
+#이 패키지의 역할을 간단히 설명
+
+structure:
+- src/
+
+# 하위 폴더 추가
+
+dependencies: []
+
+# 모노레포 내부 패키지
+# 예: - "@myapp/domain"
+
+lib: []
+
+# 외부 라이브러리
+# 예: - "prisma: ^5.0.0"
+
+rule:
+# 이 패키지의 작성 규칙
+# 예: - "외부 라이브러리 사용 금지"
+
+feature: []
+
+# 완료된 기능 (자동 업데이트)
+# 예: - "User 인증"
