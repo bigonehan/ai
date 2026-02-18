@@ -24,6 +24,9 @@
 
 ### Core Rules
 - For feature additions/changes, `jj` usage is mandatory.
+- Before starting any work, check whether the current directory is a `jj` repo; if not, initialize one first (`jj git init --colocate` or equivalent).
+- When work starts, creating a dedicated workspace is mandatory (`jj workspace` flow).
+- When work is completed, merging the workspace change back is mandatory before finalization.
 - Use `jj new` to split logical units of work into separate changes.
 - Use `jj workspace` when you need physical workspace isolation for high-risk structural work.
 
@@ -68,3 +71,6 @@ jj git push
 - Default shell is `fish`.
 - When shell-dependent commands are needed, execute them with `fish -ic`.
 - Mandatory final notification command should be run in fish context (example: `fish -ic 'nf -m "<task-name> complete"'`).
+
+## Function Naming Rule
+- Functions that only coordinate branching/order flow should use the \`flow_\` prefix.
