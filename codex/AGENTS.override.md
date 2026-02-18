@@ -29,32 +29,29 @@
 - When work is completed, merging the workspace change back is mandatory before finalization.
 - Use `jj new` to split logical units of work into separate changes.
 - Use `jj workspace` when you need physical workspace isolation for high-risk structural work.
+- Do not run `jj st`, `jj log`, `jj diff`, or `jj workspace list` before root validation.
+- Before every `jj` command, run: `set target (flow_ensure_jj_repo_for_cwd (pwd)); cd $target`.
+- If root validation fails, stop immediately and do not continue with any `jj` command.
 
 ### Decision Guide
 1. **Small / localized change**: Use `jj new`.
 2. **High-risk structural change**: Use `jj workspace`.
 
 ### Standard Flow (Small / Localized)
-1. Check status:
+1. Ensure repo root from current working directory:
 ```bash
-jj st
-jj log -n 10
+set target (flow_ensure_jj_repo_for_cwd (pwd)); cd $target
 ```
 2. Create a change:
 ```bash
 jj new -m "feat(scope): summary"
 ```
 3. Implement and verify with project checks.
-4. Confirm diff:
-```bash
-jj st
-jj diff
-```
-5. Finalize:
+4. Finalize:
 ```bash
 jj describe -m "feat(scope): summary"
 ```
-6. If remote sync is needed:
+5. If remote sync is needed:
 ```bash
 jj git fetch
 jj rebase -d trunk
