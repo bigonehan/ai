@@ -10,6 +10,11 @@ version: improved-2026-02-18-v2
 - 사용자 요청에 `도메인 생성` 문구가 포함되면 반드시 실행한다.
 - `도메인 설계`, `domain create`, `domain 제안`도 동일 트리거로 처리한다.
 
+## Input Source Rule
+- 외부 Skill/plan 문서를 추가로 읽으려 하지 않는다.
+- 현재 요청에서 전달된 spec.yaml의 프로젝트 정의(name, description, framework, rule)를 최우선 근거로 사용한다.
+- 프로젝트 정의와 features/tasks 정보를 바탕으로 필요한 domain, task.rule, tasks를 보강한다.
+
 ## Goal
 - 기능 목록을 **최소 개수 도메인**으로 수렴시킨다.
 - 먼저 상위 단일 도메인(umbrella)을 제시하고, 분해 근거가 있을 때만 분리한다.

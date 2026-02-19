@@ -26,6 +26,12 @@ version: 2026-02-18-unified
 - `mono` 명령으로 `tasks.yaml`을 만들고 TODO 생성/검토/구현까지 이어간다.
 - 필요 시 tmux 병렬 pane을 열어 작업을 분산한다.
 
+## Shared Skill Dependency
+- 공통 규칙은 `/home/tree/ai/skills/feature_architecture_rules/SKILL.md`를 반드시 함께 적용한다.
+- 이 스킬에서는 bootstrap/orchestration 규칙만 다루고, 함수 네이밍/port-adapter 규칙은 공통 스킬을 따른다.
+- 여기서 공통 스킬은 `/home/tree/ai/skills/feature_architecture_rules/SKILL.md`를 의미한다.
+- 공통 스킬 파일을 읽지 못하면 fallback으로 아래 최소 규칙을 적용한다: `stage_`/`flow_`/`input_` 네이밍, `<domain>_port` 파일명, 기능 추가 전 `rg` 사전 점검.
+
 ## Mandatory Constraint
 - 사용자 입력의 `ㅇㅇ`(언어/프레임워크)을 최우선 제약으로 사용한다.
 - LLM은 구현/파일 구조/코드 예시에서 `ㅇㅇ`를 반드시 준수한다.

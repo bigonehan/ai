@@ -70,4 +70,6 @@ jj git push
 - Mandatory final notification command should be run in fish context (example: `fish -ic 'nf -m "<task-name> complete"'`).
 
 ## Function Naming Rule
-- Functions that only coordinate branching/order flow should use the \`flow_\` prefix.
+- Functions that only coordinate branching/order flow should use the `flow_` prefix.
+- `flow_` is only for orchestration boundaries (stage transitions, branching sequence, top-level runtime flow).
+- Utility/operation functions (parse, load, build, create, update, extract, send, transform) must not use `flow_`.
