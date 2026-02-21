@@ -9,3 +9,8 @@
 
 ## 2026-02-18 - 작업한일
 - /home/tree/ai/codex/AGENTS.override.md에 jj 필수 절차 강화: 작업 시작 전 repo 확인/생성, 시작 시 workspace 생성, 완료 시 merge 의무화
+
+## 2026-02-21 - 작업한일
+- 기능 추가 요청 전용 `add-function` 스킬 신설 (`add-function/SKILL.md`)
+- `plan-code`의 핵심 게이트(Absolute Sequence, Hard Guardrails, Pre-Implementation Gate) 내용을 복사해 포함
+- 설계 문서 선행 후 구현하는 워크플로와 최소 변경/검증 체크리스트를 기능 추가 컨텍스트에 맞게 정리

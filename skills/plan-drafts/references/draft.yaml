@@ -1,0 +1,14 @@
+rule: []           # 프로젝트 전용 규칙 목록
+features:
+  domain: []       # 제공하는 도메인 리스트
+task:
+  - name: ""       # 작업 이름
+    type: ""       # action | calc
+    domain: []     # 현재 기능이 영향을 받는 도메인
+    depends_on: [] # 의존하는 함수/작업
+    scope:
+      - ""         # 수정하거나 생성할 파일 경로 (루트 기준)
+    rule:
+      - ""         # 구현 시 명시해야 하는 규칙
+    step:
+      - ""        

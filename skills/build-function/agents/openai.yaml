@@ -1,4 +1,0 @@
-interface:
-  display_name: "Plan Architecture"
-  short_description: "코드 구현 전 요구사항을 구조화하고 아키텍처 계획을 수립하는 코딩 스킬"
-  default_prompt: "Analyze requirements, design architecture, then implement code by following plan-architecture rules."
