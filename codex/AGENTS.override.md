@@ -6,6 +6,22 @@
 - Definition of done: run the project’s tests/lint (or stated check) and report results.
 - Trivial tasks (<= ~10 LOC, 1 file, clear): skip long planning; still follow “minimal change + verify”.
 
+## Meta Operation Override
+### Priority Branch (Highest First)
+1. If the request is a meta-operation file change, do not trigger `plan-project-code` or `add-function`.
+2. If it is not a meta-operation file change and the request is code implementation/modification/creation, apply normal `plan-project-code`/`add-function` trigger rules.
+
+### Meta Operation Scope
+- `AGENTS*` files (`AGENTS.md`, `AGENTS.override`, `AGENTS.override.md`, etc.)
+- All skill definition files (`**/SKILL.md`)
+- Policy/text updates for config files (`*config*`, `settings*`, `*.yaml`, `*.yml`, `*.toml`, `*.json`)
+- Documentation files (`*.md`, `*.txt`)
+- Simple wording fixes without code behavior change
+
+### Enforcement
+- For meta-operation file edits, apply minimal changes only to the requested docs/settings.
+- Do not force `references/problem-analysis.md` or `./project/project.md` gating for meta-operation edits.
+
 ## Skill Trigger Gate (Mandatory)
 - Before any exploration/editing command, scan the latest user prompt for skill triggers (explicit skill names, architecture/design wording, external docs/URLs referenced for implementation).
 - If a trigger matches a mandatory design-first skill (e.g. `coding-design-pipeline` / `plan-code`), freeze implementation and run the required design workflow first (`plan.md` creation/confirmation) before code changes.
@@ -34,7 +50,7 @@
 - Without `.project/scenario.md`, do not start implementation.
 
 ## Mandatory Final Notification
-- When final work is fully completed, run `nf -m "${작업명} complete"` exactly once.
+- When final work is fully completed, run `/home/tree/Config/data/fish/functions/notify.fish -m "${작업명} complete"` exactly once.
 
 ## Completion Log Rule (Feature Addition)
 - Whenever a feature addition is fully completed, append a completion record to `./.agents/log.md`.
@@ -44,8 +60,9 @@
 ## Shell Default Rule
 - Default shell is `fish`.
 - If a task can be solved directly with `rg`/`rg --files`/`sd` (and optional `xargs`), run it without wrapping in `fish -ic` or `bash -c`.
-- Use `fish -ic` only when `rg`-centric direct commands are insufficient and shell-dependent behavior is required.
-- Mandatory final notification command should be run in fish context (example: `fish -ic 'nf -m "<task-name> complete"').
+- For directory/file listing, prefer direct `eza` execution (fallback: `ls`) without shell wrapping.
+- Use `fish -ic` only when direct commands (`rg`/`sd`/`eza`/`ls`) are insufficient and shell-dependent behavior is required.
+- Mandatory final notification command should be executed directly (example: `/home/tree/Config/data/fish/functions/notify.fish -m "<task-name> complete"`).
 
 ## Scripting Language Rule
 - For search/filter/simple substitution, prefer direct Rust CLI usage: `rg`, `rg --files`, `sd`.

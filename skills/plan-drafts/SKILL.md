@@ -4,8 +4,9 @@ description: "./project/project.md를 바탕으로 draft.yaml을 생성하는 sk
 ---
 
 # 기본 규칙 
-1. task의 이름은 snake_case를 따른다.
-2. 전체 복사하지 않는다
+- 코드명/명령명 네이밍은 공통 규칙 `/home/tree/ai/skills/feature_architecture_rules/SKILL.md`를 따른다.
+- task의 이름은 snake_case를 따른다.
+- 전체 복사하지 않는다
 # task 분리 기준
 - task의 갯수는  `./.project/project.md`에서`## features` 항목보다 많거나 더 적을 수 있다.
 - 함께 성공하거나 함께 실패해야 하는 동작은 하나의 task로 묶는다

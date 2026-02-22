@@ -20,6 +20,8 @@ description: 프로젝트에 특정 기능을 추가할 때 사용하는 스킬.
 - 위 순서 전에는 코드 편집/의존성 설치/빌드/테스트를 시작하지 않는다.
 
 ## Hard Guardrails
+- 코드명/명령명 네이밍은 공통 규칙 `/home/tree/ai/skills/feature_architecture_rules/SKILL.md`를 따른다.
+
 - 설계 우선 트리거가 활성화된 턴에서는 `./project/project.md` 생성 전까지 코드 편집/의존성 설치/빌드를 시작하지 않는다.
 - 구현 요청이 함께 있어도 순서는 고정한다: `설계 확정 -> project.md 저장 -> 구현`.
 - 구현 단계로 넘어갈 때는 사용자에게 `project.md 기준으로 구현 단계 전환`을 1문장으로 명시한다.

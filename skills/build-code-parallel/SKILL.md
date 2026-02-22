@@ -15,6 +15,9 @@ description: "task 단일 객체를 받아 참조 파일을 바탕으로 코드�
 
 # 구현 규칙
 
+## 네이밍 규칙
+- 코드명/명령명 네이밍은 공통 규칙 `/home/tree/ai/skills/feature_architecture_rules/SKILL.md`를 따른다.
+
 ## 참조 순서
 1. `.project/project.md`에서 프로젝트 언어, 스택, 도메인, 규칙을 확인한다
 2. `.project/drafts_list.yaml`에서 전체 기능 목록과 의존관계를 확인한다

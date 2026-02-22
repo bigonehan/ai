@@ -15,6 +15,7 @@ description: 모호함을 제거해 구조화된 프로젝트 설계 파일을 (
 - 해석이 여러 개면 → 제시하고 선택받기, 혼자 결정하지 않는다
 - 더 단순한 방법이 보이면 → 말하기
 - 불명확하면 → 멈추고 질문하기
+- 코드명/명령명 네이밍은 공통 규칙 `/home/tree/ai/skills/feature_architecture_rules/SKILL.md`를 따른다.
 
 ## Absolute Sequence
 - 한 줄 입력을 받아 최소한의 QA로`현재폴더/.project/project.md` 파일을 생성한다. 
