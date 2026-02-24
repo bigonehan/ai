@@ -60,3 +60,26 @@ description: 모호함을 제거해 구조화된 프로젝트 설계 파일을 (
 ## 완성 후
 설계문이 완성되면 구현 전환 절차를 아래 순서로 수행한다.
 사용자에게 `plan-drafts-code` 단계로 전환할것인지 묻고, 아래 명령을 실행한다
+
+## Domains Output Contract
+- `# Domains`는 반드시 `references/project.md`의 형식을 따른다.
+- 요약형 문장(`제안 도메인`, `근거`, `책임`)으로 대체하지 않는다.
+- 출력은 아래 블록 반복 형식만 허용한다.
+
+```markdown
+### domain
+- **name**: `<domain_name>`
+- **description**: `<설명>`
+- **state**: `<상태 목록>`
+- **action**: `<동작 목록>`
+- **rule**:
+  - `<규칙>`
+- **variable**:
+  - `<변수>`
+```
+
+- domain 내용 산출 시에는 `build_domain` 스킬 판단 결과를 사용하되, 결과 표현은 위 구조로 정규화한다.
+
+## Template Copy Rule
+- `references/project.md`를 템플릿으로 사용할 때는 대상 경로(`./.project/project.md`)에 먼저 복사한다.
+- 복사된 파일에서 설명문/예시/주석을 제거한 뒤, 속성값만 채워 수정한다.

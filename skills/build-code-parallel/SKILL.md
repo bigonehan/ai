@@ -1,5 +1,5 @@
 ---
-name: buil-code-parallel
+name: build-code-parallel
 description: "task 단일 객체를 받아 참조 파일을 바탕으로 코드를 구현하는 skill. CLI 병렬 실행 함수에 의해 task마다 독립적으로 호출된다."
 ---
 
@@ -36,7 +36,6 @@ description: "task 단일 객체를 받아 참조 파일을 바탕으로 코드�
 - 인자 mutation을 금지한다
 - 외부 I/O, 로깅, 시간/랜덤은 액션 레이어로 격리한다
 - 액션 함수는 조립과 오케스트레이션만 수행하고 계산은 별도 함수로 분리한다
-- 분기/순서만 제어하는 함수 이름은 `flow_` 접두사를 사용한다
 
 ## step 처리
 - 작업 시작시 `jj workspace`를 생성
@@ -46,7 +45,7 @@ description: "task 단일 객체를 받아 참조 파일을 바탕으로 코드�
 - 한 번에 작업할 수 있는 최소한의 단위로 수행한다
 - 실행 실패 또는 대기시간 초과 시 `./.project/log.md` 기록 후 실패 처리
 - 전체 완료 후 작업을 했던 `drafts.yaml`이 들어있는  폴더를 `.project/clear/` 로 이동 
-- `./.project/drafts_list.yaml`에서 `planned`에 있는 같은 기능을 `featured`로 이동 
+- `./.project/drafts_list.yaml`에서 `planned`에 있는 같은 기능을 `features`로 이동 
 
 ## 금지 사항
 - 불필요한 파일 생성 금지

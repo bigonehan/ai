@@ -49,3 +49,25 @@ type은 아래 기준으로 판단한다:
 # 출력물
 1. `./.project/feature/생성된 폴더/draft.yaml`이 여러개 생성이 된다 
 2. 생성된 폴더는 여기서 `project.md` 의 `features` 항목의 기능을 함수명으로 요약한 것을 말한다. 
+
+## Prompt Output Contract
+- draft 생성/보강 프롬프트의 규칙은 코드에 하드코딩하지 않고 이 스킬을 참조한다.
+- 템플릿 YAML/Markdown(`references/draft.yaml`, `references/drafts_list.yaml`)을 사용할 때는 대상 경로에 먼저 복사하고, 파일 내 주석/예시를 제거한 뒤 값만 수정한다.
+- `create-draft`, `add-draft`, `add-function`의 최종 출력 형식은 아래를 따른다.
+  - 1줄: `FEATURE_NAME: <snake_case>`
+  - YAML 본문: `draft.yaml` 스키마 준수
+- `FEATURE_NAME` 규칙은 `/home/tree/ai/skills/feature-name-prompt-rules/SKILL.md`를 우선 적용한다.
+
+## Draft YAML Validation Rules
+- `task.rule`은 자동검증 가능한 식으로 작성한다.
+  - 예: `file_exists(path) == true`, `key == value`, `matches(pattern)`
+- `contracts`는 구조화된 제약으로 작성한다.
+  - `key: expr` 또는 `key=expr` + 비교 연산자
+- 필수 필드 누락 금지:
+  - `type(calc/action)`, `domain`, `scope`, `step`, `rule`, `contracts`
+
+## Add-Plan Rules
+- `.project/tasks_list.yaml`의 `planned`는 기본 3~7개를 목표로 작성한다.
+- key는 영문 소문자 `snake_case(동사_명사)`만 사용한다.
+- `features`와 중복되는 key는 금지한다.
+- 출력은 설명문 없이 YAML 본문만 허용한다.
