@@ -1,17 +1,17 @@
-rule: []           # 프로젝트 전용 규칙 목록
+rule: []
 features:
-  domain: []       # 제공하는 도메인 리스트
+  domain: []
+  flow: []
 task:
-  - name: ""       # 작업 이름
-    type: ""       # action | calc
-    domain: []     # 현재 기능이 영향을 받는 도메인
-    depends_on: [] # 의존하는 함수/작업
+  - name: ""
+    type: ""
+    domain: []
+    depends_on: []
     scope:
-      - ""         # 수정하거나 생성할 파일 경로 (루트 기준)
+      - ""
     rule:
-      - ""         # 구현 시 명시해야 하는 규칙
+      - ""
     step:
-      - ""         # 기능이 구현하는 절차 
-    rule: []
-    touches: []      # 기능이 건드리는 파일 
-    contract: []     # 공유 계약(예: 이벤트 타입, DTO, OpenAPI 등) 변경 여부/대상
+      - ""
+    touches: []
+    contracts: []
