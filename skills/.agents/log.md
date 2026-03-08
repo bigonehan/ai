@@ -12,5 +12,9 @@
 
 ## 2026-02-21 - 작업한일
 - 기능 추가 요청 전용 `add-function` 스킬 신설 (`add-function/SKILL.md`)
-- `plan-code`의 핵심 게이트(Absolute Sequence, Hard Guardrails, Pre-Implementation Gate) 내용을 복사해 포함
+- 기존 설계 스킬의 핵심 게이트(Absolute Sequence, Hard Guardrails, Pre-Implementation Gate) 내용을 복사해 포함
 - 설계 문서 선행 후 구현하는 워크플로와 최소 변경/검증 체크리스트를 기능 추가 컨텍스트에 맞게 정리
+
+## 2026-03-04 - 작업한일
+- 스킬 문서의 구현 시작 고지 문구에서 레거시 계획 스킬 표현을 제거하고 중립 문구로 교체
+- `/home/tree/ai/skills/.project/scenario.md`의 레거시 계획 스킬 표기를 제거해 명칭 의존성 정리

@@ -11,18 +11,17 @@ description: 구조 개선 구현 전에 가상 시나리오로 실행 흐름을
 - 구조 개선 구현 요청(아키텍처, 프로세스, 실행 흐름, 단계 재설계)일 때 사용한다.
 
 ## Mandatory Output
-- 출력 형식은 한 줄 리스트로 고정한다.
-- 각 줄은 아래 축약형 문장으로 작성한다.
-  - `<입력/명령>를 읽고 -> <파일 생성/수정/처리>`
-- 설명은 입력/수정/생성되는 파일 중심으로 작성한다.
-- 영문 파이프 형식(`command | files touched | derived result`)은 내부 참고용으로만 두고, 사용자 출력은 축약형 문장을 우선한다.
+- 출력 형식은 줄 단위 `a -> b` 고정이다.
+- 각 단계는 반드시 한 줄씩 분리해 작성한다.
+- `a`에는 입력/명령/읽는 파일, `b`에는 생성/수정/처리 결과를 작성한다.
+- 영문 파이프 형식(`command | files touched | derived result`)은 내부 참고용으로만 사용하고 사용자 출력에는 쓰지 않는다.
 
 
 ## Output Examples
-- `input.txt를 orc로 읽고 -> .project/mobile-todo/blueprint.yaml 생성`
-- `.project/mobile-todo/blueprint.yaml을 읽고 -> .project/mobile-todo/project.yaml, .project/mobile-todo/tasks.yaml 생성`
-- `.project/mobile-todo/tasks.yaml을 읽고 -> .project/mobile-todo/todos.yaml 생성/갱신`
-- `.project/mobile-todo/todos.yaml을 읽고 -> task scope 코드 파일 처리`
+- `input.txt -> .project/mobile-work/blueprint.yaml 생성`
+- `.project/mobile-work/blueprint.yaml -> .project/mobile-work/project.yaml, .project/mobile-work/tasks.yaml 생성`
+- `.project/mobile-work/tasks.yaml -> .project/mobile-work/work-items.yaml 생성/갱신`
+- `.project/mobile-work/work-items.yaml -> task scope 코드 파일 처리`
 
 ## Minimal Flow
 1. 요청을 실행 가능한 단계로 분해한다.
