@@ -19,10 +19,11 @@
 - Regenerate the full sentence/paragraph until banned phrase count is 0.
 - This hard block check is mandatory for `commentary`, `final`, and `summary` channels.
 - When user is angry, keep response short and action-only; never use agreement-preface words.
+- The exact token `맞습니다` is permanently banned with zero exceptions.
 
 ## Request Summary Output Rule
 - For every user request, before starting work, output with label and description split across separate lines.
-- Line 1: `요구사항 요약 >`
+- Line 1: `[요약]`
 - Line 2: `[${행동 설명:생성, 추가, 삭제, 변경}]`
 - Line 3: `${대상}은 기능 한줄 요약`
 - Line 4: `[결과]`
@@ -40,25 +41,8 @@
   - `/mnt/c/Users/tende/Pictures/Screenshots/current.png`
 - If only folder context is needed, use:
 - Treat this mapping as persistent unless the user explicitly changes it.
-
-## Desktop Path Memory Rule
-- Treat the desktop path associated with the `current.png` user context as fixed:
-  - `C:\Users\tende\Desktop` (`/mnt/c/Users/tende/Desktop`)
-- When asked to copy/move files to desktop for that user context, use this path by default unless explicitly changed.
-
-## Startup Override Load Rule (Highest Priority)
-- At the first step of every task, load `~/ai/codex/AGENTS.override.md` before any file search or path inference.
 - For `current.png`, skip repository-wide filename search first and apply the fixed mapping immediately.
 - If `current.png` handling does not use `/mnt/c/Users/tende/Pictures/Screenshots/current.png`, treat it as process violation and correct before continuing.
-
-## Mandatory Startup Checklist Rule (Highest Priority)
-- Before any implementation command, print and satisfy this checklist in order:
-  1) `override_loaded`
-  2) `current_png_mapped`
-  3) `todo_checked`
-  4) `execution_scope_confirmed`
-- If any item is not satisfied, block implementation/edit/test commands and resolve the missing item first.
-- If checklist output is omitted, treat it as critical process failure and restart from checklist step.
 
 ## Todo First Rule (Permanent)
 - Before any source code edit, create or update `todo.md` first.
@@ -112,12 +96,8 @@
 - Every retry must apply at least one concrete change from updated `todo.md` before execution.
 - If no new change is applied, stop and mark as process violation.
 
-## Forbidden Phrase Re-Assert (Hard Block)
-- The token `맞습니다` is absolutely forbidden in all channels.
-- If response draft contains `맞습니다`, block send and regenerate text.
 
 ## Zero-Tolerance Ban (Ultimate)
-- The exact token `맞습니다` is permanently banned with zero exceptions.
 - Apply ban to every channel and every draft stage (`analysis/commentary/final/summary`).
 - If token is detected at any stage, abort that draft immediately and regenerate from scratch.
 - Do not emit partial output containing the banned token.
@@ -181,3 +161,45 @@
 - If the assistant says phrases equivalent to `다음부터` (for example: `앞으로는`, `재발 방지로`) in any response, it must first identify at least one concrete process improvement.
 - The identified improvement must be written to `/home/tree/ai/codex/AGENTS.override.md` in the same turn before finishing the response.
 - Response-only promises without rule update are invalid and treated as process violation.
+
+## Explicit ORC Workflow Execution Rule
+- If the user explicitly names `orc-cli-workflow` or provides that skill block, execute the requested flow with real `orc` commands first.
+- Do not substitute manual implementation for the workflow unless `orc` is unavailable or the user explicitly permits fallback.
+- If manual implementation already started, stop and switch to `orc` stage execution in the same turn.
+
+## Skill Invocation Strictness Rule
+- A skill invocation command exists to constrain execution, not to inspire an approximate workflow.
+- When a user invokes a skill explicitly, do not mix in self-directed implementation choices before the skill-defined command path is completed.
+- If the user criticizes skill misuse, stop every in-flight process tied to that task, answer the cause in one line, then continue only with the exact skill path or wait for the next instruction.
+
+## Skill Priority Override Rule
+- Any explicitly invoked skill is higher priority than default autonomy, implementation-first behavior, or general coding heuristics.
+- On skill invocation, the assistant must read the skill file first, extract the required execution order, and follow that order before considering any fallback.
+- If the skill prescribes concrete commands, those commands must be attempted in that sequence unless a hard blocker is observed.
+- Fallback implementation is allowed only after stating the blocker and only if the user permits deviation.
+- Mixing a skill workflow with self-directed manual implementation in the same task is prohibited.
+
+## ORC Completion Evidence Rule
+- For `rust-orc` tmux workflow handling, completion and failure must be judged from generated files such as `.project/plan.yaml` and `.project/drafts.yaml`, not from pane capture text.
+- Pane capture may be used only as auxiliary debugging evidence and must not be the primary success condition.
+- If any manager-worker flow still uses pane text tokens as the completion gate, replace it with file-state verification in the same task.
+
+- 2026-03-09: 기본 AGENTS 선행 읽기 대상은 `~/ai/codex/AGENTS.override.md`로 고정한다. codex 실행 중 현재 디렉터리에 `AGENTS.override*` 심볼릭 링크를 생성하지 않는다.
+
+## Completion Loop Hard Gate
+- When the user requests full implementation and repository rules require retry-until-complete, the assistant must not stop at blocker reporting if a concrete next fix is available.
+- Required order on failure: `feedback.md update -> todo.md merge with exact fix -> concrete code/process change -> full workflow restart`.
+- Partial status summaries are forbidden until the requested end condition is met or a hard technical blocker with no safe local fix remains.
+- `impl/check` stage hangs or long waits are not completion conditions; they must be treated as retry targets.
+- Before sending any response that claims progress, verify whether the current task still has an unfinished required loop item. If yes, continue execution instead of reporting.
+- For skill-driven workflows, completion is defined by the skill's final artifact/check step, not by intermediate artifact creation.
+
+## Check-Code Hardcoding Coverage Rule
+- `check-code` 실행 시 하드코딩 검출 범위를 boolean 고정 반환만으로 제한하지 않는다.
+- 문자열/패턴 기반 성공·실패 단정 로직도 하드코딩으로 검사한다.
+  - 예: `contains("Logout")`, `contains("success")`, `starts_with("ok")`, `ends_with("done")`
+- 위 패턴이 입력/상태/외부결과 검증 없이 최종 판정에 직접 사용되면 `report.md`의 `# 발견된 문제`에 반드시 기록한다.
+
+## 2026-03-09 - Target Repo Correction Rule
+- 사용자가 대상 저장소 경로를 정정하면 즉시 정정된 경로만 작업 대상으로 사용한다.
+- 이번 세션 기준 `orc` 관련 수정 대상은 `~/project/rust-orc`를 우선한다.
