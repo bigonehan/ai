@@ -17,9 +17,13 @@
 - Responses must start directly with outcome/action, without acknowledgement-preface wording.
 - If the final draft response contains any banned phrase, do not send it.
 - Regenerate the full sentence/paragraph until banned phrase count is 0.
-- This hard block check is mandatory for `commentary`, `final`, and `summary` channels.
+- This hard block check is mandatory for every channel and every draft stage (`analysis`, `commentary`, `final`, `summary`).
 - When user is angry, keep response short and action-only; never use agreement-preface words.
 - The exact token `맞습니다` is permanently banned with zero exceptions.
+- Before sending any response, run a final text gate for the exact token `맞습니다`.
+- If the token is detected at any stage, abort that draft immediately and regenerate from scratch.
+- Do not emit partial output containing the banned token.
+- Violation is treated as critical process failure.
 
 ## Request Summary Output Rule
 - For every user request, before starting work, output with label and description split across separate lines.
@@ -43,6 +47,10 @@
 - Treat this mapping as persistent unless the user explicitly changes it.
 - For `current.png`, skip repository-wide filename search first and apply the fixed mapping immediately.
 - If `current.png` handling does not use `/mnt/c/Users/tende/Pictures/Screenshots/current.png`, treat it as process violation and correct before continuing.
+- Always open `/mnt/c/Users/tende/Pictures/Screenshots/current.png` first.
+- Do not run repository-wide search (`rg --files ... current.png`) before this direct open.
+- If the file does not exist at that fixed path, report that exact path is missing and ask only for replacement path/file.
+- This protocol is mandatory in every session and has higher priority than convenience search.
 
 ## Todo First Rule (Permanent)
 - Before any source code edit, create or update `todo.md` first.
@@ -63,27 +71,27 @@
   1) 문제 제시 + 작업 단계 + 검증 기준 설정후 `todo.md` 생성
   2) 해결책 시도
   3) 검증 실행
-  4) 실패 시  `feedback.md` 생성후 이를 바탕으로 `todo.md`를 재설계
+  4) 실패 시  `.project/feedback.md` 생성후 이를 바탕으로 `todo.md`를 재설계
   5) 재 정비된 `todo.md` 문서를 바탕으로 처음부터 전체 재시작
-- On failure, write/update `feedback.md` and append retry reason to `todo.md` before restarting.
+- On failure, write/update `.project/feedback.md` and append retry reason to `todo.md` before restarting.
 - Do not stop at intermediate logs only; continue until pass or max retry reached.
 
 ## Rule-First Enforcement (Highest Priority)
-- On any new user behavioral instruction, update `AGENTS.override.md` first before running commands or editing source.
+- On any new user behavioral instruction, update `/home/tree/ai/codex/AGENTS.override.md` first before running commands or editing source.
 - If execution already started, stop running process first, write rule, then resume work.
 - This rule has higher priority than implementation speed.
 
 ## Temp Auto Loop Rule (Permanent)
-- When user requests `orc cli` validation in `/home/tree/temp`, run iterative loop with this order:
+- When user requests `rw cli` validation in `/home/tree/temp`, run iterative loop with this order:
   1) write/update `todo.md`
   2) remove and recreate `/home/tree/temp`
-  3) run `orc auto` for requested app
-  4) if failed, write `/home/tree/temp/feedback.md` with 문제/미해결점
+  3) run `rw auto` for requested app
+  4) if failed, write `/home/tree/temp/.project/feedback.md` with 문제/미해결점
   5) reflect feedback into next todo and restart from step 1
 - Keep looping until verification passes or hard technical blocker is confirmed.
 
 ## Feedback->Todo Merge Rule (Highest Priority)
-- After any failure, write/update `feedback.md` first with `문제` and `미해결점`.
+- After any failure, write/update `.project/feedback.md` first with `문제` and `미해결점`.
 - Then update `todo.md` by merging prior todo + new feedback deltas.
 - The updated `todo.md` must include:
   - new/changed problem statements
@@ -95,19 +103,6 @@
 - Retry is not a blind rerun.
 - Every retry must apply at least one concrete change from updated `todo.md` before execution.
 - If no new change is applied, stop and mark as process violation.
-
-
-## Zero-Tolerance Ban (Ultimate)
-- Apply ban to every channel and every draft stage (`analysis/commentary/final/summary`).
-- If token is detected at any stage, abort that draft immediately and regenerate from scratch.
-- Do not emit partial output containing the banned token.
-- Violation is treated as critical process failure.
-
-## No-`맞습니다` Output Gate (Hard Block)
-- Before sending any response, run a final text gate for the exact token `맞습니다`.
-- If found once, sending is blocked; rewrite the full response and re-check until count is 0.
-- This gate is mandatory even when user explicitly requests that token.
-
 ## Failure-Solution Mandatory Rule (Highest Priority)
 - If any failure cause is detected, `todo.md` must be updated with a concrete fix for that exact cause before next run.
 - `todo.md` update is invalid if it only repeats the problem without actionable solution steps.
@@ -151,12 +146,6 @@
 - "이건 지적이다" 유형 입력은 분석-only 응답을 금지하고 즉시 수정/실행/검증 순서로 진행한다.
 - 동일 턴에서 규칙 반영과 구현을 모두 수행한다.
 
-## Current PNG Zero-Miss Protocol (Hard Block)
-- When user says `current.png`, always open `/mnt/c/Users/tende/Pictures/Screenshots/current.png` first.
-- Do not run repository-wide search (`rg --files ... current.png`) before this direct open.
-- If the file does not exist at that fixed path, report that exact path is missing and ask only for replacement path/file.
-- This protocol is mandatory in every session and has higher priority than convenience search.
-
 ## "다음부터" Improvement Logging Rule (Highest Priority)
 - If the assistant says phrases equivalent to `다음부터` (for example: `앞으로는`, `재발 방지로`) in any response, it must first identify at least one concrete process improvement.
 - The identified improvement must be written to `/home/tree/ai/codex/AGENTS.override.md` in the same turn before finishing the response.
@@ -185,10 +174,11 @@
 - If any manager-worker flow still uses pane text tokens as the completion gate, replace it with file-state verification in the same task.
 
 - 2026-03-09: 기본 AGENTS 선행 읽기 대상은 `~/ai/codex/AGENTS.override.md`로 고정한다. codex 실행 중 현재 디렉터리에 `AGENTS.override*` 심볼릭 링크를 생성하지 않는다.
+- 2026-03-10: repo별 추가 규칙은 해당 repo의 `AGENTS.md`에만 병합한다. 현재 작업 디렉터리에 `AGENTS.override` 또는 `AGENTS.override.md`를 새 파일로 만들지 않는다.
 
 ## Completion Loop Hard Gate
 - When the user requests full implementation and repository rules require retry-until-complete, the assistant must not stop at blocker reporting if a concrete next fix is available.
-- Required order on failure: `feedback.md update -> todo.md merge with exact fix -> concrete code/process change -> full workflow restart`.
+- Required order on failure: `.project/feedback.md update -> todo.md merge with exact fix -> concrete code/process change -> full workflow restart`.
 - Partial status summaries are forbidden until the requested end condition is met or a hard technical blocker with no safe local fix remains.
 - `impl/check` stage hangs or long waits are not completion conditions; they must be treated as retry targets.
 - Before sending any response that claims progress, verify whether the current task still has an unfinished required loop item. If yes, continue execution instead of reporting.
@@ -203,3 +193,53 @@
 ## 2026-03-09 - Target Repo Correction Rule
 - 사용자가 대상 저장소 경로를 정정하면 즉시 정정된 경로만 작업 대상으로 사용한다.
 - 이번 세션 기준 `orc` 관련 수정 대상은 `~/project/rust-orc`를 우선한다.
+
+## 2026-03-10 - Provider Scope Rule
+- 사용자가 provider 주입 경로를 직접 지적하면, 해당 작업은 provider 분기와 직결된 최소 변경부터 우선 처리한다.
+- project type, registry, asset 정리는 provider 연결 수정에 직접 필요한 범위만 함께 바꾸고, 비직결 확장은 금지한다.
+
+## 2026-03-10 - Wrapper Removal Rule
+- 사용자가 코드상 불필요한 중간 wrapper 함수 제거를 지시하면, 먼저 zero-behavior wrapper 후보를 찾고 직접 호출로 인라인 가능한 함수부터 제거한다.
+- 경로 계산/환경 복사처럼 의미 전달 외 동작이 없는 단일 반환 wrapper는 우선 제거 대상으로 본다.
+- 제거 범위는 호출부 직결 파일로 제한하고, 의미 있는 검증/정규화 함수는 유지한다.
+
+## 2026-03-10 - CLI Naming Rule
+- 사용자가 CLI 명령 이름을 정정하면, 이후 사용자 노출 기본 명령명은 정정된 이름으로 통일한다.
+- 이번 세션 기준 기본 CLI 명령명은 `rw`다.
+- help, README, 예시 명령, 응답 본문에서 기본 표기는 `rw`를 우선 사용한다.
+
+## 2026-03-10 - ORC Process Improvement Log Rule
+- 구현 작업이 모두 끝난 뒤 현재 ORC 과정의 병목 또는 개선점이 식별되면 `.project/feedback.md`의 `#개선필요` 섹션에 항목을 추가한다.
+- 최종 보고 전 `.project/feedback.md`에 `#개선필요` 헤더 존재 여부를 확인하고, 없으면 생성 후 내용을 append 한다.
+- 내용은 대기 구간, owner 전달 누락, timeout/heartbeat 개선처럼 실제 관찰된 프로세스 개선점만 기록한다.
+- 이미 이번 턴에서 반영한 수정 사항 설명은 쓰지 않는다. 아직 남아 있는 병목, 구조적 혼선, 다음에 손봐야 할 개선 후보만 기록한다.
+- 사용자가 구현 완료 후 현재 `orc` 과정의 병목이나 개선점을 함께 남기라고 지시하면, 최종 검증이 끝난 뒤 `.project/feedback.md`에 `#개선필요` 섹션을 포함해 기록한다.
+- 이 섹션에는 이번 작업 중 실제로 관찰한 병목, 불안정 지점, 또는 다음 재시도 없이 바로 적용 가능한 개선 후보만 적는다.
+- 기능 구현 보고를 끝내기 전에 `.project/feedback.md` 반영 여부를 확인한다.
+- 사용자가 `.project/feedback.md` 작성 기준을 정정하면, 관련 skill 문서와 `.project/feedback.md` 규칙을 같은 턴에 함께 갱신한다.
+- `.project/feedback.md` 개선 섹션의 표준 헤더는 `#개선필요`로 고정한다.
+- `.project/feedback.md`에 `#개선필요`를 추가할 때는 이미 반영이 끝난 변경 설명을 적지 않는다.
+- 개선 섹션에는 앞으로 더 손봐야 할 지점, 반복 병목, 재시도 시 줄여야 할 낭비만 남긴다.
+
+## 2026-03-10 - Template Generation Rule
+- 사용자가 template 기반 생성을 지시하면 `assets/presets/<type>/templates/*` 원본 파일을 읽고, 해당 주석/placeholder를 해석해 값을 채우라는 prompt 경로로만 생성한다.
+- md/yaml 생성 로직에서 문자열 배열/인라인 텍스트 조합으로 최종 파일 내용을 하드코딩하는 방식을 금지한다.
+- type별 차이는 공통 service interface 뒤의 template loader/parser/prompt selector로만 표현한다.
+- 재시도 시 기존 하드코딩 생성 코드는 제거 또는 template 기반 service 호출로 치환해야 한다.
+
+## 2026-03-10 - Compatibility Cleanup Rule
+- 사용자가 변경을 지시하면 호환 전용 분기나 유지 경로를 우선 고려하지 않는다.
+- 기존 동작을 바꾸는 요청은 현재 기준으로 직접 수정하고, compatibility-only 코드는 같은 변경에서 제거한다.
+- alias, fallback, 이전 타입 변환, 이중 경로 지원처럼 호환만을 위한 코드는 기본적으로 삭제 대상으로 본다.
+
+## 2026-03-10 - Action Log Trace Rule
+- 사용자가 오류 해결 중 동작 기록을 남기라고 지시하면, 구현과 검증 동안 저장소의 `log.md`에 단계별 실행 기록을 append 한다.
+- 기록 최소 단위는 `시각`, `동작`, `대상`, `결과` 4항목이다.
+- 같은 오류가 다시 발생하면 새 항목에 이전 항목 참조 또는 `반복` 표시를 남겨 재발 여부를 식별한다.
+- 최종 보고 전에 이번 턴에서 남긴 `log.md` 항목으로 반복 실패 여부를 한 번 요약 점검한다.
+
+## 2026-03-10 - Global Voice Input Rule
+- 사용자가 text input 전반에 음성 입력을 붙이라고 지시하면, 저장소의 모든 단일행 input과 multiline textarea 사용처를 전수 조사해 공통 음성 입력 경로로 연결한다.
+- 구현은 개별 화면마다 중복 로직을 복사하지 않고 공용 voice input component 또는 hook을 우선 사용한다.
+- 검증은 최소 1개 이상의 실제 UI 경로에서 `버튼 클릭 -> 녹음 시작 -> transcript 반영 -> input value 갱신`을 확인하고, `rg`로 적용 범위를 점검한다.
+- generic text locator로 버튼을 찾지 말고 각 입력 제어 옆 음성 버튼은 고유 `data-testid` 또는 안정적인 aria-label 규칙을 가진다.
