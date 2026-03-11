@@ -1,29 +1,11 @@
 # Agents Override Rules
 
+## Mandatory Completion Notification Rule
+- 완료 후에는 `nf -m "<task-name> complete"`를 실행한다.
+
 ## Absolute Phrase Ban Rule
-- The assistant must never use agreement-preface phrases in any response.
-- Absolute forbidden phrases:
-  - `맞습니다`
-  - `맞아요`
-  - `인식했습니다`
-  - `알겠습니다`
-  - `네, 맞습니다`
-  - `맞습니다.`
-  - `네 맞습니다`
-  - `그렇습니다`
-- This ban applies to all channels, all contexts, and all response lengths.
-- Pre-send guard: before every response, scan final text for banned phrases.
-- If any banned phrase appears, rewrite the sentence and re-check before sending.
-- Responses must start directly with outcome/action, without acknowledgement-preface wording.
-- If the final draft response contains any banned phrase, do not send it.
-- Regenerate the full sentence/paragraph until banned phrase count is 0.
-- This hard block check is mandatory for every channel and every draft stage (`analysis`, `commentary`, `final`, `summary`).
-- When user is angry, keep response short and action-only; never use agreement-preface words.
-- The exact token `맞습니다` is permanently banned with zero exceptions.
-- Before sending any response, run a final text gate for the exact token `맞습니다`.
-- If the token is detected at any stage, abort that draft immediately and regenerate from scratch.
-- Do not emit partial output containing the banned token.
-- Violation is treated as critical process failure.
+- 모든 채널에서 동의/확인 서두 없이 바로 결과부터 말하고, 금지 표현 `맞습니다`, `맞아요`, `인식했습니다`, `알겠습니다`, `네, 맞습니다`, `맞습니다.`, `네 맞습니다`, `그렇습니다`는 쓰지 않는다.
+- 전송 직전 금지 표현을 다시 검사하고 하나라도 있으면 전체 문장을 다시 쓴다.
 
 ## Request Summary Output Rule
 - For every user request, before starting work, output with label and description split across separate lines.
@@ -35,22 +17,11 @@
 - Keep this output concise and always place it immediately before implementation.
 
 ## File Path Display Rule (Output)
-- In change reports and file references, display paths in abbreviated form using only parent folder + filename.
-- Format: `.../<parent>/<file>`
-- Example: `/home/tree/home/template/web/blog/main.tsx` -> `.../blog/main.tsx`
-- Apply this formatting rule to `commentary`, `final`, and `summary` outputs.
+- 경로 표기는 `commentary`, `final`, `summary`에서 항상 `.../<parent>/<file>` 축약형만 사용한다.
 
 ## Screenshot Path Memory Rule
-- When the user says `current.png`, resolve it to this fixed directory by default:
-  - `/mnt/c/Users/tende/Pictures/Screenshots/current.png`
-- If only folder context is needed, use:
-- Treat this mapping as persistent unless the user explicitly changes it.
-- For `current.png`, skip repository-wide filename search first and apply the fixed mapping immediately.
-- If `current.png` handling does not use `/mnt/c/Users/tende/Pictures/Screenshots/current.png`, treat it as process violation and correct before continuing.
-- Always open `/mnt/c/Users/tende/Pictures/Screenshots/current.png` first.
-- Do not run repository-wide search (`rg --files ... current.png`) before this direct open.
-- If the file does not exist at that fixed path, report that exact path is missing and ask only for replacement path/file.
-- This protocol is mandatory in every session and has higher priority than convenience search.
+- `current.png`는 기본적으로 `/mnt/c/Users/tende/Pictures/Screenshots/current.png`로 바로 처리하고, 저장소 전체 검색은 사용자 후속 요청이 있을 때만 한다.
+- 해당 파일이 없으면 그 정확한 경로가 비어 있다고만 말하고 대체 경로를 요청한다.
 
 ## Todo First Rule (Permanent)
 - Before any source code edit, create or update `todo.md` first.
@@ -80,6 +51,10 @@
 - On any new user behavioral instruction, update `/home/tree/ai/codex/AGENTS.override.md` first before running commands or editing source.
 - If execution already started, stop running process first, write rule, then resume work.
 - This rule has higher priority than implementation speed.
+
+## Search Scope Lock Rule
+- 검색 요청은 사용자가 지정한 파일/문구/경로 범위에서 가장 좁은 직접 검색만 먼저 실행하고, 첫 답변에는 존재 여부·정확한 hit 위치·검색 범위만 적는다.
+- 정확한 문자열이 주어졌으면 exact match만 수행하고, 0건이면 0건으로 끝낸다. 유사 문구·의미 확장·원인 추적은 후속 요청이 있을 때만 한다.
 
 ## Temp Auto Loop Rule (Permanent)
 - When user requests `rw cli` validation in `/home/tree/temp`, run iterative loop with this order:
@@ -211,6 +186,19 @@
 ## 2026-03-10 - ORC Process Improvement Log Rule
 - 구현 작업이 모두 끝난 뒤 현재 ORC 과정의 병목 또는 개선점이 식별되면 `.project/feedback.md`의 `#개선필요` 섹션에 항목을 추가한다.
 - 최종 보고 전 `.project/feedback.md`에 `#개선필요` 헤더 존재 여부를 확인하고, 없으면 생성 후 내용을 append 한다.
+
+## 2026-03-11 - Script Episode Draft Canonical Rule
+- script episode 설계도 canonical 파일은 `./episode/S{season}E{episode}_draft.yaml`이다.
+- `drafts.yaml`은 개별 episode 시놉시스/설계도 역할을 가지며 `state`, `highlight`, `speak`, `step`, `rules`를 포함한다.
+- `plan.yaml`은 작업중인 episode draft들의 상태/대상 목록을 관리하는 문서로 사용한다.
+- detail page에서는 legacy `episode pane`을 제거하고, `drafts pane`이 episode 목록 선택/생성/수정/impl/check/view/delete 흐름의 단일 진입점이 된다.
+- script 관련 template/schema 변경은 반드시 `templates 파일 갱신 -> 호출 함수 참조 갱신 -> UI/API 수정` 순서로 진행한다.
+- 2026-03-11 추가: 위 episode blueprint 규칙은 `script` 전용이 아니라 episode blueprint를 사용하는 `ad`, `video`, `script` 전체에 동일 적용한다.
+- episode blueprint 관련 형식 판단이 필요하면 코드의 현재 직렬화보다 `assets/presets/*/templates` 아래 최신 템플릿을 source of truth로 우선 사용한다.
+
+## 2026-03-11 - Mobile Delete Button Position Rule
+- mobile project page의 `삭제하기` 고정 버튼은 하단 브라우저 UI와 겹치지 않게 기본 하단 여백보다 더 위에 배치한다.
+- 데스크톱 이상 레이아웃의 버튼 위치는 유지하고, small viewport에서만 위치를 올리는 최소 변경을 우선 적용한다.
 - 내용은 대기 구간, owner 전달 누락, timeout/heartbeat 개선처럼 실제 관찰된 프로세스 개선점만 기록한다.
 - 이미 이번 턴에서 반영한 수정 사항 설명은 쓰지 않는다. 아직 남아 있는 병목, 구조적 혼선, 다음에 손봐야 할 개선 후보만 기록한다.
 - 사용자가 구현 완료 후 현재 `orc` 과정의 병목이나 개선점을 함께 남기라고 지시하면, 최종 검증이 끝난 뒤 `.project/feedback.md`에 `#개선필요` 섹션을 포함해 기록한다.
@@ -218,14 +206,45 @@
 - 기능 구현 보고를 끝내기 전에 `.project/feedback.md` 반영 여부를 확인한다.
 - 사용자가 `.project/feedback.md` 작성 기준을 정정하면, 관련 skill 문서와 `.project/feedback.md` 규칙을 같은 턴에 함께 갱신한다.
 - `.project/feedback.md` 개선 섹션의 표준 헤더는 `#개선필요`로 고정한다.
+
+## 2026-03-11 - Create Project Path Sync Rule
+- create project form에서는 `Project name` 입력이 바뀔 때마다 현재 선택된 부모 경로 기준으로 `project path` 마지막 segment를 새 이름 기반 폴더명으로 다시 만든다.
+- 경로 브라우저나 수동 입력으로 부모 경로를 바꾼 뒤에도 다음 이름 변경 시 마지막 segment는 새 이름으로 다시 붙는다.
+- create 검증은 `name 입력 -> path last segment 자동 갱신 -> create click -> 실제 폴더/.project/project.md 생성` 순서로 확인한다.
+
+## 2026-03-11 - YAML Change Order Rule
+- 사용자가 YAML 구조 변경 순서를 지정하면, 같은 턴 구현 순서는 반드시 `templates 폴더 수정 -> 호출 함수의 속성 참조 갱신 -> 추가 수정(UI/동작/검증)` 순서를 따른다.
+- `drafts.yaml`, `draft_first.yaml`, `draft_item.yaml`, `project.md`처럼 템플릿이 기준인 구조 변경은 먼저 템플릿 계약을 바꾼 뒤 런타임 참조와 UI를 맞춘다.
+- 중간 단계에서 구버전 필드명을 유지하는 임시 우회 분기는 추가하지 않는다.
 - `.project/feedback.md`에 `#개선필요`를 추가할 때는 이미 반영이 끝난 변경 설명을 적지 않는다.
 - 개선 섹션에는 앞으로 더 손봐야 할 지점, 반복 병목, 재시도 시 줄여야 할 낭비만 남긴다.
+
+## 2026-03-11 - Repo Rule Placement Rule
+- 저장소 전용 동작 규칙은 global override가 아니라 해당 저장소의 `AGENTS.md`에만 기록한다.
+- `.../codex/AGENTS.override.md`에는 여러 저장소에 공통으로 적용되는 규칙만 남긴다.
 
 ## 2026-03-10 - Template Generation Rule
 - 사용자가 template 기반 생성을 지시하면 `assets/presets/<type>/templates/*` 원본 파일을 읽고, 해당 주석/placeholder를 해석해 값을 채우라는 prompt 경로로만 생성한다.
 - md/yaml 생성 로직에서 문자열 배열/인라인 텍스트 조합으로 최종 파일 내용을 하드코딩하는 방식을 금지한다.
 - type별 차이는 공통 service interface 뒤의 template loader/parser/prompt selector로만 표현한다.
 - 재시도 시 기존 하드코딩 생성 코드는 제거 또는 template 기반 service 호출로 치환해야 한다.
+
+## 2026-03-10 - Legacy Reference Path Removal Rule
+- 사용자가 특정 legacy reference 경로 제거를 지시하면 해당 경로 계열 흔적을 전부 제거 대상으로 본다.
+- 제거 범위에는 repo 코드, repo 문서, repo 로그, skill reference 자산, help/응답용 문구가 포함된다.
+- 새로운 구현이나 규칙에서 제거된 legacy reference 경로를 다시 만들거나 참조하지 않는다.
+- 기능 설계 산출물은 현재 기준 문서 경로만 사용하고, 제거된 legacy reference 경로로의 호환 유지 코드는 두지 않는다.
+
+## 2026-03-10 - Home Log No-Touch On Replace Rule
+- 사용자가 치환, 일괄 치환, 문자열 교체를 지시할 때 `~/.agents/log.md`는 수정 대상에서 항상 제외한다.
+- 치환 범위 산정 중 `~/.agents/log.md`가 검색 결과에 보여도 건드리지 않는다.
+- 사용자가 별도로 `~/.agents/log.md` 자체 수정까지 명시한 경우에만 예외로 본다.
+
+## 2026-03-10 - Script Type Canonical Rule
+- 사용자가 project type 이름을 정정하면 이후 canonical project type은 정정된 이름만 사용한다.
+- 이번 세션 기준 `write` project type의 canonical 이름은 `script`다.
+- preset 경로, project_type 값, UI/API 라벨, 테스트 fixture, prompt/template 참조는 `script`로 통일하고 `write` 전용 canonical 경로는 제거한다.
+- 호환 alias나 이중 분기를 남기지 말고 현재 기준 이름으로 직접 치환한다.
 
 ## 2026-03-10 - Compatibility Cleanup Rule
 - 사용자가 변경을 지시하면 호환 전용 분기나 유지 경로를 우선 고려하지 않는다.
@@ -241,5 +260,26 @@
 ## 2026-03-10 - Global Voice Input Rule
 - 사용자가 text input 전반에 음성 입력을 붙이라고 지시하면, 저장소의 모든 단일행 input과 multiline textarea 사용처를 전수 조사해 공통 음성 입력 경로로 연결한다.
 - 구현은 개별 화면마다 중복 로직을 복사하지 않고 공용 voice input component 또는 hook을 우선 사용한다.
+
+## 2026-03-11 - Temp Test Project Cleanup Rule
+- 사용자가 테스트 중 생성한 임시 project 정리를 지시하면, 이후 해당 저장소의 검증 경로는 성공 종료 시 임시 project 등록과 임시 디렉터리를 함께 삭제해야 한다.
+- web e2e/통합 테스트에서 `project-load`로 등록한 임시 project는 `project-delete` API 또는 동등한 정리 경로로 제거한다.
+- 임시 디렉터리는 프로젝트 삭제 뒤 `fs.rmSync(..., { recursive: true, force: true })` 등으로 정리한다.
+- 검증 보고에는 임시 project cleanup 실행 여부를 함께 적는다.
+
+## 2026-03-11 - Script Output Format Rule
+- 사용자가 reference script를 바탕으로 script 출력 형식 규칙 문서를 만들라고 지시하면 `assets/presets/script/rules` 아래에 형식 지시사항과 짧은 예시가 함께 있는 파일을 추가한다.
+- script draft 구현 prompt는 장면 문서를 쓰기 전에 그 규칙 파일을 반드시 읽고 prompt 입력에 함께 포함한다.
+- 형식 규칙 파일은 장면 헤더, 지문, 대사, 인서트/전환 표기 같은 문서 형식을 담당하고, 코드에는 예시 문장을 하드코딩하지 않는다.
+
+## 2026-03-10 - Script Episode Draft Structure Rule
+- 사용자가 script episode 구조를 정정하면 script 타입 draft 생성은 `first`, `middle`, `final` episode 역할을 구분하는 canonical 구조만 사용한다.
+- `plan.yaml`에는 최소한 `planned/work/complete` 상태와 이야기의 큰 위기, 목적, 주인공 결핍 속성이 포함되어야 한다.
+- `drafts.yaml` item에는 episode 역할, 등장 캐릭터, 등장 배경, 갈등, ending 계열 메타가 공통으로 들어가야 한다.
+- 1화용 script draft는 일반 episode draft와 분리된 `draft_first.yaml` 템플릿을 사용하고, `강한 오프닝 이미지`, `세계관과 주인공 결핍 소개`, `핵심 인물 배치`, `발화 사건`, `주인공 연결`, `룰과 갈등 확장`, `엔딩 훅`을 강제 필드로 포함한다.
+- script 타입의 draft/draft_item/plan 생성·정규화 함수는 위 구조를 주입하고, 중간 episode와 마지막 episode는 공통 episode 필드 위에 각 역할별 필수 항목만 추가한다.
+- script episode 설계도 파일의 canonical 경로는 `.project/drafts.yaml`이 아니라 `./episode/S{season}E{episode}_draft.yaml`이다.
+- script episode 설계도에서 `trigger_event`, `conflict_expansion`, `ending_hook`, `conflict`는 배열이 아니라 단일 문자열 필드로 유지한다.
 - 검증은 최소 1개 이상의 실제 UI 경로에서 `버튼 클릭 -> 녹음 시작 -> transcript 반영 -> input value 갱신`을 확인하고, `rg`로 적용 범위를 점검한다.
 - generic text locator로 버튼을 찾지 말고 각 입력 제어 옆 음성 버튼은 고유 `data-testid` 또는 안정적인 aria-label 규칙을 가진다.
+- 2026-03-11: project page 초기 로딩 UI 변경 작업은 skeleton 표시만 추가하지 말고 `초기 렌더 -> /api/projects fetch -> 상태 갱신 -> 실제 프로젝트 카드 렌더` 경로까지 함께 검증한다.

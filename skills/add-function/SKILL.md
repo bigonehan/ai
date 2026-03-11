@@ -12,28 +12,11 @@ description: 프로젝트에 특정 기능을 추가할 때 사용하는 스킬.
 - 단, 요청 대상이 메타 운영/문서성 수정이면 이 스킬을 트리거하지 않는다. 범위: `AGENTS*`, `**/SKILL.md`, 설정/구성 파일(`*config*`, `settings*`, `*.yaml`, `*.yml`, `*.toml`, `*.json`), 문서 파일(`*.md`, `*.txt`), 단순 단어 치환/문구 교정.
 - 트리거가 애매하면 구현을 시작하지 말고 기능 범위(추가 대상/완료 조건)를 1문장으로 확인한다.
 
-## Absolute Sequence (Mandatory)
-- `add-function`에서는 아래 분기 순서를 고정한다.
-  1) `./.project/project.md` 존재 여부와 요청 feature 포함 여부 확인
-  2) 포함됨: 구현 시작
-  3) `./.project/project.md` 작성/최신화 -> 계획 요약 공유 -> 구현 단계 진입
-- 위 순서 전에는 코드 편집/의존성 설치/빌드/테스트를 시작하지 않는다.
-
-## Hard Guardrails
+## Implementation Gate
 - 코드명/명령명 네이밍은 공통 규칙 `/home/tree/ai/skills/rule-naming/SKILL.md`를 따른다.
-
-- 설계 우선 트리거가 활성화된 턴에서는 `./.project/project.md` 생성 전까지 코드 편집/의존성 설치/빌드를 시작하지 않는다.
-- 구현 요청이 함께 있어도 순서는 고정한다: `설계 확정 -> project.md 저장 -> 구현`.
-- 구현 단계로 넘어갈 때는 사용자에게 `project.md 기준으로 구현 단계 전환`을 1문장으로 명시한다.
-- `./.project/project.md`가 이미 있고 요청 feature가 project에 명시되어 있으면 설계 스킬 재실행 없이 구현으로 진행한다.
-- 중간에 구현을 먼저 시작했음을 감지하면 즉시 중단하고, 누락된 `project.md`를 먼저 작성한 뒤 재개한다.
-
-## Pre-Implementation Gate
-- 아래 분기 조건이 충족되기 전에는 구현 금지:
-  1) 공통: 모호함 해소 완료
-  2) 공통: `./.project/project.md` 파일 존재 + 요청 feature 확인 완료
-  3) `project.md` 미존재/미포함인 경우에만 `./.project/project.md` 작성/최신화 완료
-  4) 공통: 완료 기준(검증 항목) 문서화 완료
+- 구현 전 순서는 고정한다: 모호함 해소 -> `./.project/project.md` 존재/feature 포함 확인 -> 필요 시 `project.md` 작성·최신화 + 검증 기준 문서화 -> `project.md 기준으로 구현 단계 전환` 1문장 공유 -> 구현.
+- 위 게이트 전에는 코드 편집/의존성 설치/빌드/테스트를 시작하지 않고, 중간 선행 구현이 감지되면 `project.md`를 먼저 채운 뒤 재개한다.
+- `./.project/project.md`가 이미 있고 요청 feature가 project에 명시되어 있으면 설계 스킬 재실행 없이 바로 구현으로 진행한다.
 
 ## 기능 추가 작업 규칙
 - 기존 코드 구조/스타일을 우선 재사용한다.
