@@ -2,6 +2,12 @@
 
 ## Mandatory Completion Notification Rule
 - 완료 후에는 `nf -m "<task-name> complete"`를 실행한다.
+- 최종 응답 직전에는 현재 저장소 규칙과 override의 notification 항목을 다시 확인하고, 완료 보고보다 먼저 `nf -m` 실행 여부를 체크한다.
+
+## Completion Notification Hard Gate
+- 저장소 규칙이나 override에 completion notification 요구가 있으면, `nf -m` 성공 실행 전에는 완료 보고를 금지한다.
+- 완료 직전 체크 순서는 고정한다: `notification rule re-read -> nf -m 실행 -> 종료 코드 확인 -> final 응답`.
+- 이 순서를 건너뛴 completion 응답은 process violation으로 간주하고, 같은 유형 재발 방지 규칙을 즉시 override에 추가한다.
 
 ## Absolute Phrase Ban Rule
 - 모든 채널에서 동의/확인 서두 없이 바로 결과부터 말하고, 금지 표현 `맞습니다`, `맞아요`, `인식했습니다`, `알겠습니다`, `네, 맞습니다`, `맞습니다.`, `네 맞습니다`, `그렇습니다`는 쓰지 않는다.
@@ -207,6 +213,16 @@
 - 사용자가 `.project/feedback.md` 작성 기준을 정정하면, 관련 skill 문서와 `.project/feedback.md` 규칙을 같은 턴에 함께 갱신한다.
 - `.project/feedback.md` 개선 섹션의 표준 헤더는 `#개선필요`로 고정한다.
 
+## 2026-03-12 - Detail Chat Topic Reset Rule
+- detail chat에서 current topic이 다음 topic으로 넘어가면, 직전 topic의 결정 내용은 즉시 project 파일 반영 경로에 저장한다.
+- topic 전환 직후에는 기존 message history를 이어쓰지 않고 새 session/message list로 다시 시작한다.
+- 구현 검증은 `topic 결정 -> project 파일 반영 -> session 메시지 초기화 -> 다음 topic 새 대화 시작` 순서의 실제 실행 경로로 확인한다.
+
+## 2026-03-12 - Temp Project Cleanup Rule
+- 테스트나 재현용으로 `/tmp` 또는 임시 registry에 project를 생성한 경우, 성공/실패와 무관하게 검증 종료 단계에서 해당 임시 project 디렉터리와 registry entry를 모두 삭제한다.
+- Playwright/helper가 임시 project를 자동 로드한 경우에도 `cleanupTempProject` 또는 동등한 정리 경로가 실제로 실행됐는지 확인하고, 누락 시 같은 턴에 테스트/helper를 수정한다.
+- 최종 응답 전에는 `남은 임시 project 0개`를 직접 확인한 뒤에만 완료로 간주한다.
+
 ## 2026-03-11 - Create Project Path Sync Rule
 - create project form에서는 `Project name` 입력이 바뀔 때마다 현재 선택된 부모 경로 기준으로 `project path` 마지막 segment를 새 이름 기반 폴더명으로 다시 만든다.
 - 경로 브라우저나 수동 입력으로 부모 경로를 바꾼 뒤에도 다음 이름 변경 시 마지막 segment는 새 이름으로 다시 붙는다.
@@ -222,6 +238,20 @@
 ## 2026-03-11 - Repo Rule Placement Rule
 - 저장소 전용 동작 규칙은 global override가 아니라 해당 저장소의 `AGENTS.md`에만 기록한다.
 - `.../codex/AGENTS.override.md`에는 여러 저장소에 공통으로 적용되는 규칙만 남긴다.
+
+## 2026-03-12 - Explicit Persistence Instruction Sync Rule
+- 사용자가 chat 확정값의 저장/재진입 이어받기, 수정 후 자동 재생성처럼 명시 동작을 정정하면, 구현 전에 이 요구를 대상 저장소 `AGENTS.md`에 같은 턴 즉시 반영한다.
+- 확정값은 자동생성과 별도 경로의 수동 입력처럼 취급해야 하며, 재진입 시 이미 저장된 값은 완료 항목으로 간주하는 구현을 우선한다.
+- item 단위 수정 후 후속 LLM 재생성 요구가 있으면 해당 item 범위만 다시 맞추고 전체 초기화는 금지한다.
+
+## 2026-03-12 - Episode Draft Split Action Rule
+- episode drafts pane에서 `project.md -> blueprint 메타(item 제외)` 채우기, `draft_item` 생성/수정, `draft_item 기반 write`는 하나의 버튼/모달로 합치지 않는다.
+- 각 단계는 별도 버튼과 별도 modal state를 가져야 하며, modal 안에서 해당 단계 값 수정이 가능해야 한다.
+- `draft_item` 생성 단계가 `write`를 자동 시작하면 안 되고, `write` 단계는 현재 저장된 `draft_item`만 기준으로 실행해야 한다.
+
+## 2026-03-12 - Term Definition Sync Rule
+- 사용자가 서사 용어 의미를 직접 정정하면, 구현 전에 그 정의를 대상 저장소 `AGENTS.md`에 같은 턴 즉시 반영한다.
+- prompt/rule/template 자산이 그 용어를 쓰고 있으면 최소 변경으로 같은 정의를 함께 갱신한다.
 
 ## 2026-03-10 - Template Generation Rule
 - 사용자가 template 기반 생성을 지시하면 `assets/presets/<type>/templates/*` 원본 파일을 읽고, 해당 주석/placeholder를 해석해 값을 채우라는 prompt 경로로만 생성한다.
@@ -266,6 +296,8 @@
 - web e2e/통합 테스트에서 `project-load`로 등록한 임시 project는 `project-delete` API 또는 동등한 정리 경로로 제거한다.
 - 임시 디렉터리는 프로젝트 삭제 뒤 `fs.rmSync(..., { recursive: true, force: true })` 등으로 정리한다.
 - 검증 보고에는 임시 project cleanup 실행 여부를 함께 적는다.
+- 테스트 파일 내부 `finally` 정리만으로 종료하지 않는다. 최종 검증 직후 추가로 registry(`configs/project.yaml` 등)와 임시 루트(`/tmp` 등)를 sweep해 `pw-`, `playwright-`, 테스트 prefix project 잔존 여부를 직접 확인하고 남아 있으면 즉시 삭제한다.
+- cleanup 누락 지적이 한 번이라도 나온 저장소에서는 이후 모든 검증 종료 단계에 `잔존 항목 검색 -> 강제 삭제 -> 재검색 0건 확인`을 반드시 포함한다.
 
 ## 2026-03-11 - Script Output Format Rule
 - 사용자가 reference script를 바탕으로 script 출력 형식 규칙 문서를 만들라고 지시하면 `assets/presets/script/rules` 아래에 형식 지시사항과 짧은 예시가 함께 있는 파일을 추가한다.
@@ -283,3 +315,29 @@
 - 검증은 최소 1개 이상의 실제 UI 경로에서 `버튼 클릭 -> 녹음 시작 -> transcript 반영 -> input value 갱신`을 확인하고, `rg`로 적용 범위를 점검한다.
 - generic text locator로 버튼을 찾지 말고 각 입력 제어 옆 음성 버튼은 고유 `data-testid` 또는 안정적인 aria-label 규칙을 가진다.
 - 2026-03-11: project page 초기 로딩 UI 변경 작업은 skeleton 표시만 추가하지 말고 `초기 렌더 -> /api/projects fetch -> 상태 갱신 -> 실제 프로젝트 카드 렌더` 경로까지 함께 검증한다.
+- 2026-03-12: detail chat은 진입 시 `project.md`, `drafts.yaml`, 관련 blueprint/task 파일의 현재 값을 기준으로 결정 완료 항목을 다시 계산하고, 파일 기준 결정 상태가 하나라도 바뀌었으면 이전 대화 이력을 재사용하지 않고 새 session으로 시작한다.
+- 2026-03-12: script detail chat의 skip 판정은 `project.md` 원문 섹션(`후킹/주인공/등장인물/목표/복선/전환/결말/scene/speak/규칙/제약 조건/에피소드`)과 blueprint/template 파일의 실제 채워진 값을 직접 기준으로 해야 하며, UI detail pane에 값이 보이는 항목은 chat badge에서도 decided로 건너뛰어야 한다.
+- 2026-03-12: 사용자가 별도 해제 지시를 하지 않는 한, 작업 완료 시마다 completion notification을 반드시 `nf -m "<task> complete"` 형식으로 실행한다.
+## 2026-03-12 - UI Completion Verdict Rule
+- UI 요청은 내부 함수, API action, modal 컴포넌트, 테스트 이름이 존재해도 완료로 판정하지 않는다.
+- 완료 판정 최소 기준은 화면 렌더 결과 기준이다: 메인 버튼/액션의 순서, 노출 여부, disabled 조건, 클릭 후 modal 종류, 저장 후 파일/상태 반영이 사용자 요구와 일치해야 한다.
+- `구현했다`, `이미 있다`, `완료됐다`라고 답하기 전에는 실제 렌더 화면 또는 UI 자동화에서 위 항목을 직접 확인해야 한다.
+- UI 관련 검증은 기존 테스트 통과만으로 충분하지 않다. 사용자 요구를 직접 검증하는 assertion이 없으면 테스트를 먼저 추가/수정한 뒤 구현 완료를 선언한다.
+- 스크린샷이 주어진 경우 코드 구조보다 스크린샷의 실제 배치와 노출 상태를 우선 기준으로 삼는다.
+
+## 2026-03-12 - Mobile Detail Chat Fullscreen Rule
+- 사용자가 mobile에서 채팅창 전체화면을 요구한 경우, detail chat modal은 viewport 상단 일부에 걸친 sheet 형태가 아니라 화면 전체를 덮는 full-screen overlay로 떠야 한다.
+- mobile detail chat은 브라우저 safe-area를 포함한 전체 높이를 사용해야 하며, 배경 page가 상단에 보이거나 modal 바깥 여백이 남으면 안 된다.
+
+## 2026-03-12 - Detail Chat Separate Page Rule
+- 사용자가 detail chat을 별도 page로 분리하라고 지시한 저장소에서는 chat을 modal로 이어붙이지 않고, detail 옆 전용 chat 버튼을 통해 별도 page/pane으로 이동시키는 구조를 우선 적용한다.
+- chat page는 detail page 일부 위에 뜨는 overlay가 아니라, 한 화면 전체를 chat 전용 레이아웃이 차지해야 한다.
+- 현재 선택된 project 상태를 기준으로 chat page 내용을 결정해야 하며, 선택 project가 바뀌면 같은 chat page에서도 새 project 기준 세션/화면으로 즉시 전환되어야 한다.
+- chat page가 분리된 뒤에는 detail page 안에 별도 chat 진입 버튼이나 chooser 내부 chat 액션을 남기지 않는다. detail page는 편집/auto만 담당하고 chat 관련 진입은 chat page에서만 처리한다.
+- mobile `detail` page도 `project` page와 동일하게 page 본문 전체를 정상 렌더해야 하며, section이 잘리거나 desktop 전용 레이아웃처럼 깨지면 안 된다.
+- `chat` page에서는 뒤쪽 `project` page가 비치면 안 된다. 전용 page shell이 현재 화면 한 장을 완전히 대체해야 한다.
+- 사용자가 project를 고르지 않은 상태로 `detail` 또는 `chat` page에 들어가면, 목록의 첫 project를 현재 선택 project로 간주하고 같은 기준으로 detail/chat 내용을 연다.
+- `chat` page 상단 pane은 detail page처럼 텍스트 중심으로 보여야 하며, mobile에서 큰 카드/chrome를 중첩해 채팅 본문 시작 위치를 밀어내면 안 된다.
+- mobile `chat` page는 제목/설명 다음 바로 topic 또는 메시지 본문이 보이도록 vertical space를 아껴야 하며, page 안에 다시 page 카드처럼 보이는 이중 래퍼를 두지 않는다.
+- detail page의 각 pane에서 아직 채워지지 않은 속성이 남아 있으면 pane 내부 본문은 blur overlay로 가리고, 그 위에 `chat으로 가기`, `auto`, `직접 입력` 세 액션만 보여 남은 항목을 채우게 해야 한다.
+- 위 overlay의 `chat으로 가기`는 현재 pane target에 맞는 chat page topic으로 이동해야 하고, `auto`/`직접 입력`도 같은 pane target을 기준으로 동작해야 한다.
