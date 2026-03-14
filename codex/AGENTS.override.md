@@ -28,6 +28,13 @@
 ## Screenshot Path Memory Rule
 - `current.png`는 기본적으로 `/mnt/c/Users/tende/Pictures/Screenshots/current.png`로 바로 처리하고, 저장소 전체 검색은 사용자 후속 요청이 있을 때만 한다.
 - 해당 파일이 없으면 그 정확한 경로가 비어 있다고만 말하고 대체 경로를 요청한다.
+- 사용자가 `current.png`로 UI 문제를 지적한 턴에서는 test 산출 스크린샷만으로 완료 판정을 내리지 않는다. `current.png`에 보인 레이아웃 실패 조건을 직접 체크리스트로 적고, 수정 후 같은 조건이 사라졌는지 기준으로만 완료를 판단한다.
+- mobile chat page는 첫 화면 진입 직후 메시지/typing/brief 중 최소 하나의 대화 본문 영역이 실제로 보여야 한다. 상단 title, topic, step chip, footer가 세로 공간을 다 먹어 chat body가 첫 화면에서 사라지면 실패다.
+- mobile chat page에서는 전체 step chip 목록이 본문을 밀어내면 안 된다. mobile에서는 `현재/다음` 같은 압축 정보만 우선 노출하고, 전체 step 목록은 본문 가시성을 해치지 않는 보조 경로로만 보여야 한다.
+- 사용자가 `current.png에 있는 것처럼 하라`고 지시하면, 같은 턴의 `current.png`는 문제 예시가 아니라 목표 배치 설계도로 취급한다.
+- 이 경우 완료 기준은 `current.png`와의 레이아웃 유사성`이며, assistant가 스스로 더 낫다고 판단한 배치로 치환하면 안 된다.
+- mobile chat에서 topic 선택 뒤 나오는 kickoff/확정 입력창은 작은 카드처럼 보이면 안 된다. mobile 폭 대부분을 쓰고, 카드의 시작 위치도 화면 상단 쪽에 붙여 `시작` 액션이 fold 위에 오도록 배치한다.
+- yes/no 또는 confirm/cancel 성격의 모든 UI는 기본 순서를 `확인/시작/적용/삭제` 왼쪽, `취소/닫기` 오른쪽으로 통일한다. 기존 구현마다 순서가 섞여 있으면 같은 턴에 전수 점검 후 함께 바로잡는다.
 
 ## Todo First Rule (Permanent)
 - Before any source code edit, create or update `todo.md` first.
@@ -48,8 +55,9 @@
   1) 문제 제시 + 작업 단계 + 검증 기준 설정후 `todo.md` 생성
   2) 해결책 시도
   3) 검증 실행
-  4) 실패 시  `.project/feedback.md` 생성후 이를 바탕으로 `todo.md`를 재설계
-  5) 재 정비된 `todo.md` 문서를 바탕으로 처음부터 전체 재시작
+  4) 실패 또는 새 문제 발견 시 `.project/feedback.md`의 `# 문제`에 항목을 추가/갱신하고 이를 바탕으로 `todo.md`를 재설계
+  5) 해결된 항목은 `.project/feedback.md`의 `# 문제`에서 `# 해결`로 이동
+  6) 재정비된 `todo.md` 문서를 바탕으로 처음부터 전체 재시작
 - On failure, write/update `.project/feedback.md` and append retry reason to `todo.md` before restarting.
 - Do not stop at intermediate logs only; continue until pass or max retry reached.
 
@@ -67,12 +75,14 @@
   1) write/update `todo.md`
   2) remove and recreate `/home/tree/temp`
   3) run `rw auto` for requested app
-  4) if failed, write `/home/tree/temp/.project/feedback.md` with 문제/미해결점
+  4) if failed, write `/home/tree/temp/.project/feedback.md` with `# 문제`, `# 해결`, `#개선필요`
   5) reflect feedback into next todo and restart from step 1
 - Keep looping until verification passes or hard technical blocker is confirmed.
 
 ## Feedback->Todo Merge Rule (Highest Priority)
-- After any failure, write/update `.project/feedback.md` first with `문제` and `미해결점`.
+- After any failure, write/update `.project/feedback.md` first with `# 문제`, `# 해결`, and `#개선필요`.
+- New issues found during planning, implementation, or checking must be appended under `# 문제`.
+- Resolved issues must be moved from `# 문제` to `# 해결`; do not duplicate the same item in both sections.
 - Then update `todo.md` by merging prior todo + new feedback deltas.
 - The updated `todo.md` must include:
   - new/changed problem statements
@@ -127,6 +137,10 @@
 - "이건 지적이다" 유형 입력은 분석-only 응답을 금지하고 즉시 수정/실행/검증 순서로 진행한다.
 - 동일 턴에서 규칙 반영과 구현을 모두 수행한다.
 
+## Persona Diversity Correction Sync Rule
+- 사용자가 detail chat persona 의견이 서로 비슷하다고 정정하면, 같은 턴에 대상 저장소 `AGENTS.md`에 persona별 새 관점 강제 규칙을 먼저 반영한다.
+- 구현은 persona prompt 또는 worker 조합에서 각 persona가 이미 나온 의견과 겹치지 않는 새 관점 1개 이상을 내도록 강제하고, 유사 표현 반복을 성공으로 취급하지 않는다.
+
 ## "다음부터" Improvement Logging Rule (Highest Priority)
 - If the assistant says phrases equivalent to `다음부터` (for example: `앞으로는`, `재발 방지로`) in any response, it must first identify at least one concrete process improvement.
 - The identified improvement must be written to `/home/tree/ai/codex/AGENTS.override.md` in the same turn before finishing the response.
@@ -164,6 +178,197 @@
 - `impl/check` stage hangs or long waits are not completion conditions; they must be treated as retry targets.
 - Before sending any response that claims progress, verify whether the current task still has an unfinished required loop item. If yes, continue execution instead of reporting.
 - For skill-driven workflows, completion is defined by the skill's final artifact/check step, not by intermediate artifact creation.
+
+## 2026-03-13 - Feedback Zero Hard Gate
+- If `.project/feedback.md` has any remaining item under `# 문제`, completion response is blocked.
+- `# 해결` is the resolved-history section. Move items there when they are fixed instead of leaving them in `# 문제`.
+- `#개선필요` is for process improvement notes observed during the current work and does not by itself block completion.
+- Mandatory order: `feedback update -> todo merge with exact fix -> concrete implementation change -> verification rerun -> feedback re-check`.
+- Never treat remaining `# 문제` entries as optional backlog unless the user explicitly says to defer them.
+- Skill completion, test pass, or artifact generation does not override this gate.
+- If this gate is violated once in a turn, stop and fix rules/skill docs first before any further implementation.
+
+## 2026-03-13 - Checklist Guard Mandatory
+- Python one-off guard commands are not allowed as completion gates.
+- Completion gate must use checklist items written in settings files (`AGENTS.override.md` and skill docs).
+- Before final response, the assistant must re-check this checklist and mark every item as satisfied in execution logs:
+  - feedback file has no remaining bullet under `# 문제`
+  - resolved items moved from `# 문제` to `# 해결`
+  - required verification commands finished successfully
+- `#개선필요` entries are retrospective process notes and are allowed to remain.
+- If any checklist item is not satisfied, completion response is forbidden and retry loop must continue immediately.
+
+## 2026-03-13 - Response Preflight Auto-Validation Rule (Highest Priority)
+- Every response in `commentary` and `final` must run preflight validation first. No exceptions.
+- Preflight checklist (auto-enforced):
+  - banned phrase scan passed (`맞습니다`, `네, 맞습니다`, `그렇습니다`, `확인했습니다` 포함 금지어 전부)
+  - completion gate check passed (`feedback` unresolved 0, required verify commands success)
+  - requested skill/order constraints are still satisfied
+- If preflight is not executed, the response must be blocked and replaced with rule-fix execution.
+- If preflight fails, do not explain-only; immediately apply fix and rerun validation before sending text.
+- Treat skipped preflight as process violation and patch this override file first in the same turn before any further work.
+
+## 2026-03-13 - User Report Replay Hard Gate (Highest Priority)
+- If the user reports that a just-implemented feature still fails, stop all unrelated work immediately.
+- Do not run unrelated unit tests first. Reproduce the reported flow first using an execution path that matches user behavior.
+- For tray/UI/event-loop issues, completion is blocked unless this path is verified:
+  - `트리거 입력(예: tray 클릭)` -> `이벤트 수신` -> `핸들러 실행` -> `화면/상태 변화`
+- Unit tests alone cannot close this class of issue. Runtime verification evidence is mandatory.
+- If runtime verification fails, final response is forbidden; continue fix loop until pass.
+
+## 2026-03-13 - rust-response Output Routing Rule (Highest Priority)
+- Before sending any user-facing response, route output through `~/project/rust-response` CLI with a `msg` argument.
+
+## 2026-03-14 - Detail Blur Unlock Rule
+- `project.md` detail pane와 `episode outline` pane의 blur overlay는 모든 핵심 항목이 비어 있는 경우에만 적용한다.
+- 항목이 하나라도 채워진 상태에서는 전체 blur를 유지하지 않는다.
+- 사용자가 `직접 입력`으로 진입하면 남은 항목이 있어도 pane blur 없이 개별 항목을 직접 선택해 수정할 수 있어야 한다.
+
+## 2026-03-14 - Script Detail List Object Rule
+- script detail의 `speak`, `규칙`, `제약 조건`, `등장인물` 편집 UI는 단순 multiline textarea로 두지 않는다.
+- 위 4개 항목은 각 item을 개별 추가/삭제/수정하는 list-object 편집 방식이어야 한다.
+- 저장 시에도 object-list UI에서 수정한 항목 집합이 그대로 `project.md`의 리스트 구조로 반영되어야 한다.
+
+## 2026-03-14 - Detail Pane Order Rule
+- detail page에서 `video pane`은 `episode drafts` 뒤, 즉 detail column의 맨 아래에 둔다.
+- script/video 프로젝트에서 draft_item 기반 작업 흐름이 video pane보다 먼저 보여야 한다.
+
+## 2026-03-14 - Detail Page Root Background Rule
+- `data-testid="detail-page"` 루트 래퍼에는 별도 배경색 클래스를 두지 않는다.
+- detail page 배경은 상위 page shell 또는 개별 pane이 담당하고, 루트는 투명 상태를 유지한다.
+
+## 2026-03-14 - Draft Flow Label Rule
+- draft flow pane 단계명은 현재 작업 의미를 그대로 보여야 한다.
+- `project.md` 단계 label은 `draft detail`, `draft_item` 단계 label은 `scene add`로 표시한다.
+
+## 2026-03-14 - Detail State Badge Rule
+- detail page의 현재 project state badge는 읽기 전용이 아니라 상태 변경 진입점이어야 한다.
+- detail page state 선택 UI에는 `complete`를 포함한 전체 상태 후보가 보여야 한다.
+
+## 2026-03-14 - Character Object Input Rule
+- script detail의 `등장인물` 입력은 단일 문자열 리스트가 아니라 `등장인물 이름 + 설명` 2필드 object 입력이어야 한다.
+- 등장인물 form/editor는 각 row를 두 칸으로 나눠 저장하고, markdown 반영 시에도 이름과 설명이 함께 유지되어야 한다.
+- Direct raw response output is forbidden when `rust-response` CLI is available.
+- `rust-response` must filter banned terms (including `맞습니다`, `네, 맞습니다`, `그렇습니다`, `확인했습니다`) before printing.
+- If CLI output filtering fails, stop response and fix `rust-response` first.
+- Do not print CLI execution logs to the user (for example: `Ran ...`, `Finished ...`, `Running ...` lines).
+- Only the final filtered message text may be shown in user-facing output.
+
+## 2026-03-13 - No Visible rust-response Invocation Rule
+- If calling `rust-response` through a tool would expose command transcript or execution log to the user, that invocation path is forbidden.
+- In that case, do not call `rust-response` in a user-visible tool channel.
+- Use `rust-response` for implementation and verification work, but user-facing output must contain only the final filtered message text and no invocation trace.
+- Showing `Ran ...`, `cargo run ...`, `Finished ...`, `Running ...`, or equivalent wrapper lines is a hard failure of this rule.
+
+## 2026-03-13 - rust-response Console Leak Hard Block
+- If a response would require a visible `cargo run`, `rust-response`, or equivalent CLI transcript in `commentary` or `final`, the assistant must not invoke that CLI through a visible tool path.
+- In this case, respond with plain filtered text directly and preserve the same banned-term constraints without emitting any tool transcript.
+- After any user report of console leakage, the assistant must stop using visible `rust-response` command execution for user-facing output for the rest of the session.
+
+## 2026-03-13 - Response Tool Avoidance Checkpoint
+- At every `tool call -> commentary` and `tool call -> final` transition, explicitly check whether the next user-facing text depends on a developer-tool invocation.
+- If that invocation would expose transcript lines such as `Ran`, `cargo run`, `Finished`, or `Running`, block the response path and emit direct plain text instead.
+
+## 2026-03-14 - Desktop Chat Width Rule
+- 사용자가 desktop chat 가로폭을 지시하면 `chat-page` 주 컨테이너는 가능한 폭을 쓰되 최대 너비를 `1920px`로 제한한다.
+- viewport가 `1920px`보다 넓어도 chat 본문 래퍼는 가운데 정렬된 `max-width: 1920px`를 유지해야 한다.
+- The assistant must not treat output-routing preferences as permission to violate transcript-visibility rules.
+- If the user has already reported the same response-path failure once in the session, no further user-facing response may depend on developer-tool execution output.
+
+## 2026-03-14 - Long-Running ORC Phase Trace Rule
+- 사용자가 진행 로그 부족이나 모호한 대기 보고를 지적하면, 이후 `orc auto`, `bootstrap_code_project`, `init_code_project`, `impl/check` 장기 대기 구간에서는 단순 `응답 대기중` 표현만으로 보고하지 않는다.
+- 30초 이상 걸리는 단계는 보고 전에 현재 부모 stage, 실제 하위 command 또는 LLM 단계, 마지막 완료 stage, 최근 갱신된 파일/로그 중 최소 1개를 직접 확인해야 한다.
+- composite stage(`bootstrap_code_project` 등)가 길어지면 assistant는 내부 세부 단계가 무엇인지 확인한 뒤에만 원인 보고를 할 수 있다.
+- 현재 추적 정보만으로 내부 단계를 식별할 수 없으면, 같은 턴에 먼저 저장소 logging을 보강하고 같은 흐름을 재실행해 추적 가능 상태를 만든다.
+
+## 2026-03-14 - Instruction Priority Hard Gate
+- 사용자 지침, 저장소 `AGENTS.md`, 전역 `AGENTS.override.md`는 assistant의 임의 판단보다 항상 우선한다.
+- assistant는 부분 성공, 산출물 존재, 임시 우회 성공만으로 종료 기준을 재정의할 수 없다.
+- 종료 직전에는 반드시 `feedback.md #문제 0개`, 필수 검증 성공, 규칙 위반 0건을 순서대로 다시 확인한다.
+- 위 조건 중 하나라도 남아 있으면 설명성 종료 응답은 금지되고, 즉시 수정-검증 루프를 계속한다.
+
+## 2026-03-14 - Feedback Followup Agent Rule
+- 작업 완료 시점마다 현재 작업 루트의 `.project/feedback.md`를 먼저 읽는다.
+- `# 문제` 아래에 bullet이 1개라도 남아 있으면 완료 응답은 금지한다.
+- 이 경우 assistant는 반드시 새 tmux pane을 열고, 남은 문제만 전담하는 followup agent를 생성해 그 pane에서 해결 루프를 이어가게 한다.
+- followup agent는 남은 `# 문제`를 입력으로 받아 수정 -> 검증 -> `# 해결` 이동까지 수행해야 하며, `# 문제`가 0개가 될 때까지 종료할 수 없다.
+- followup agent 프롬프트는 반드시 `check-code` skill과 `orc-cli-workflow` skill을 사용하도록 지시해야 한다.
+- assistant는 future turns에서도 completion 직전에 이 followup agent 실행 여부를 기본 점검 항목으로 취급한다.
+- `orc-cli-workflow` 관점에서 check 단계는 메인 pane이 직접 끝내는 단계가 아니라 followup agent를 호출하는 단계다.
+- followup agent는 `orc-cli-workflow` 내부의 `check_code_draft`/feedback 정리/재검증 구간을 전담 수행하는 agent로 취급한다.
+- followup agent의 핵심 책임은 코드 체크 수행, `.project/feedback.md` 갱신, 남은 문제 해결이다.
+- followup agent에 전달하는 pane 명령은 반드시 `feedback을 읽고 새 plan.md를 만든 뒤 문제를 해결하라`는 뜻을 직접 포함해야 한다.
+- followup agent가 동작하는 동안에는 followup용 `plan.md`를 작업 문서로 사용할 수 있다.
+
+## 2026-03-13 - Rule Conflict Resolution Order
+- When two response rules conflict, prefer the rule that prevents user-visible leakage over the rule that requests CLI-based routing.
+- A hidden or non-user-visible validation path may still be used for internal checks, but any visible tool transcript is forbidden.
+- If conflict resolution is not checked before response, the response is blocked until the check is performed.
+
+## 2026-03-13 - Rule Generalization Mandatory
+- If the same failure class appears more than once, do not keep adding narrow per-case rules for each wording, tool, or surface symptom.
+- Replace or merge those patches into one generalized decision rule that covers the whole failure class, with a clear trigger, block condition, and priority.
+- Before appending any new rule, check whether the issue is actually a missing enforcement step, priority mistake, or checkpoint omission. If so, fix that higher-level rule instead of stacking another symptom-level rule.
+- Repeated failure followed by another symptom-specific rule is process failure.
+
+## 2026-03-13 - Global Rule Efficacy Gate
+- A global rule is only valid if it changes behavior across repeated cases without requiring case-by-case amendments.
+- If a user reports that a global rule is becoming meaningless because of repeated micro-rules, stop adding new micro-rules and rewrite the enforcement as a broader invariant or checkpoint.
+- The assistant must explain recurring failure in terms of the broken enforcement mechanism, not just the latest surface example.
+
+## 2026-03-13 - Doc-Only Change Verification Gate
+- If the current turn changes only documentation, rule files, or other non-executable text artifacts such as `*.md`, `AGENTS*`, `SKILL.md`, or prose-only records, do not run code build/test commands or artifact copy steps by default.
+- Repository-wide build/test completion rules apply only when executable code, configuration affecting runtime behavior, or generated deliverables are changed.
+- For doc-only turns, verification must be limited to text-structure checks, reference consistency, and requested file updates unless the user explicitly asks for code verification.
+- Running `cargo test`, `cargo build`, or executable copy steps after a doc-only change is process failure.
+
+## 2026-03-13 - User Instruction Hard Gate Lock (Highest Priority)
+- Any explicit user instruction about priority, order, validation method, output method, or completion criteria is a hard gate, not guidance.
+- Hard gates override default autonomy, implementation habits, unit-test-first habits, convenience shortcuts, and any assistant-chosen workflow.
+- The assistant must not reinterpret, downgrade, defer, partially apply, or replace a hard gate with an equivalent-by-opinion alternative.
+- If multiple rules exist, priority order is fixed:
+  - current turn explicit user instruction
+  - `AGENTS.override.md`
+  - repo `AGENTS.md`
+  - explicitly invoked skill
+  - developer defaults / assistant heuristics
+- If behavior conflicts with this order, stop current work immediately and realign before any further command, edit, or response.
+
+## 2026-03-13 - Rust Build Artifact Exclusion Rule
+- For any Rust project build, packaging, staging, commit, or push workflow, exclude generated artifact directories and files by default.
+- Minimum excluded paths are `target/`, `build/`, and equivalent compiler/package output directories created by Cargo or build scripts unless the user explicitly requests their inclusion.
+- If a Rust workflow would stage or push generated artifacts, stop and remove them from the candidate set before continuing.
+- Build verification may use generated artifacts locally, but repository operations must treat them as non-source outputs by default.
+
+## 2026-03-13 - Stage Transition Re-Read Gate
+- Before each stage transition (`explore -> edit`, `edit -> test`, `test -> report`, `tool call -> final response`), re-read the currently active user hard gates from the current turn and verify they are still being followed.
+- Stage transition is blocked until this re-check is complete.
+- "Read once at start" is invalid. Re-validation is mandatory at every transition.
+
+## 2026-03-13 - Reported Failure Priority Gate
+- If the user reports a specific failure in a just-built feature, that reported path becomes the top-priority blocker.
+- No unrelated tests, refactors, builds, or secondary fixes may run before the reported path is reproduced and fixed.
+- For UI/tray/runtime failures, passing unit tests or static checks must not be used as evidence of completion ahead of direct runtime-path verification.
+
+## 2026-03-13 - No Assistant Priority Substitution Rule
+- The assistant must never replace user-specified validation or execution order with its own preferred order.
+- Examples of forbidden substitutions:
+  - running unit tests before reproducing a user-reported UI failure
+  - treating build success as completion when the user required screenshot/runtime validation
+  - answering with analysis when the user required rule patching first
+- If substitution occurs, patch rules first in the same turn, then resume from the user-specified order.
+
+## 2026-03-13 - Ambiguity Follows User Instruction Rule
+- If any point is ambiguous, prefer the user's explicit instruction over assistant inference.
+- When two reasonable interpretations exist, choose the one that stays closest to the user's wording and stated order.
+- The assistant must not use ambiguity as permission to substitute its own workflow, validation order, or completion standard.
+- If ambiguity remains after local context review, narrow work to the safest interpretation of the user's instruction instead of broadening scope.
+
+## 2026-03-13 - Future Commitment Hard Gate Rule
+- If the assistant is about to say any future-commitment phrase such as `앞으로`, `이제부터`, `다음부터`, it must first add a concrete hard-gate rule to `AGENTS.override.md` in the same turn.
+- Response-only promises are forbidden.
+- The hard-gate rule must describe the exact behavior to enforce and the block condition if it is skipped.
+- If no rule is added first, the future-commitment wording must not be sent.
 
 ## Check-Code Hardcoding Coverage Rule
 - `check-code` 실행 시 하드코딩 검출 범위를 boolean 고정 반환만으로 제한하지 않는다.
@@ -324,6 +529,8 @@
 - `구현했다`, `이미 있다`, `완료됐다`라고 답하기 전에는 실제 렌더 화면 또는 UI 자동화에서 위 항목을 직접 확인해야 한다.
 - UI 관련 검증은 기존 테스트 통과만으로 충분하지 않다. 사용자 요구를 직접 검증하는 assertion이 없으면 테스트를 먼저 추가/수정한 뒤 구현 완료를 선언한다.
 - 스크린샷이 주어진 경우 코드 구조보다 스크린샷의 실제 배치와 노출 상태를 우선 기준으로 삼는다.
+- 스크린샷이 주어진 UI 작업은 자동화 테스트 외에 실제 스크린샷 캡처를 다시 수행하고 `이미지 확인`이 끝나기 전에는 완료 판정을 금지한다.
+- 스크린샷 기반 UI 검증에서는 `스크린샷 재현 경로`, `캡처 파일`, `post-change screenshot`, `이미지 확인`, `배치 차이`를 작업 중 문서에 남겨야 한다.
 
 ## 2026-03-12 - Mobile Detail Chat Fullscreen Rule
 - 사용자가 mobile에서 채팅창 전체화면을 요구한 경우, detail chat modal은 viewport 상단 일부에 걸친 sheet 형태가 아니라 화면 전체를 덮는 full-screen overlay로 떠야 한다.
@@ -341,3 +548,10 @@
 - mobile `chat` page는 제목/설명 다음 바로 topic 또는 메시지 본문이 보이도록 vertical space를 아껴야 하며, page 안에 다시 page 카드처럼 보이는 이중 래퍼를 두지 않는다.
 - detail page의 각 pane에서 아직 채워지지 않은 속성이 남아 있으면 pane 내부 본문은 blur overlay로 가리고, 그 위에 `chat으로 가기`, `auto`, `직접 입력` 세 액션만 보여 남은 항목을 채우게 해야 한다.
 - 위 overlay의 `chat으로 가기`는 현재 pane target에 맞는 chat page topic으로 이동해야 하고, `auto`/`직접 입력`도 같은 pane target을 기준으로 동작해야 한다.
+- mobile detail/page overlay와 pane 내부 액션줄은 viewport 폭을 넘기면 안 된다. 좌우 잘림이나 horizontal scroll이 생기면 레이아웃 불합격으로 본다.
+- mobile chat/page text도 viewport 폭을 넘기면 안 된다. 제목, 설명, badge, 메시지 bubble, 버튼 라벨은 truncate가 아니라 줄바꿈 또는 축약 규칙으로 화면 안에 남아야 한다.
+- 사용자가 `current.png`를 기준으로 mobile kickoff 입력창 배치를 다시 맞추라고 하면, 시작창 내부 제목/설명보다 입력 영역 크기와 첫 액션 가시성을 우선 기준으로 삼는다.
+- mobile chat의 음성 녹음 버튼은 textarea/input의 옆 칸을 차지하는 inline 배치로 두지 않는다. 입력 wrapper 위에 떠 있는 floating anchor로 분리해 pane 크기 조정과 독립적으로 같은 자리를 유지해야 한다.
+- 사용자가 mobile kickoff voice 버튼 위치를 다시 지시하면, 버튼은 input wrapper의 오른쪽 아래 absolute anchor로 둔다.
+- mobile kickoff의 `시작/취소`는 카드 중간이 아니라 화면 기준 맨 아래 action bar에 둔다.
+- mobile kickoff에는 textarea wrapper까지 합쳐 이중 카드/이중 배경을 두지 않는다. 노란 바탕 보조 카드 없이 단일 흰색 창 하나만 보여야 한다.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feedback Followup Agent"
+  short_description: "feedback 기반 plan.md와 code check로 잔여 문제 해결"
+  default_prompt: "Use this skill as the `orc-cli-workflow` check stage. In a new tmux pane, read `.project/feedback.md`, create a new `plan.md`, use `check-code` and `orc-cli-workflow`, update `.project/feedback.md`, and keep solving until all remaining `# 문제` bullets move to `# 해결`."
