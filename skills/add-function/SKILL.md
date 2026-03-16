@@ -8,15 +8,14 @@ description: 프로젝트에 특정 기능을 추가할 때 사용하는 스킬.
 프로젝트에 새 기능을 추가하거나 기존 기능에 확장을 붙일 때 사용한다.
 
 ## Trigger
-- `./.project/project.md`가 이미 존재하고 요청 기능(또는 feature)이 project에 명시되어 있으면 설계 재작성 없이 즉시 구현 단계로 진입한다.
+- `./.project/drafts.yaml`가 이미 존재하고 요청 기능(또는 feature) 대상이 draft에 명시되어 있으면 설계 재작성 없이 즉시 구현 단계로 진입한다.
 - 단, 요청 대상이 메타 운영/문서성 수정이면 이 스킬을 트리거하지 않는다. 범위: `AGENTS*`, `**/SKILL.md`, 설정/구성 파일(`*config*`, `settings*`, `*.yaml`, `*.yml`, `*.toml`, `*.json`), 문서 파일(`*.md`, `*.txt`), 단순 단어 치환/문구 교정.
 - 트리거가 애매하면 구현을 시작하지 말고 기능 범위(추가 대상/완료 조건)를 1문장으로 확인한다.
 
 ## Implementation Gate
 - 코드명/명령명 네이밍은 공통 규칙 `/home/tree/ai/skills/rule-naming/SKILL.md`를 따른다.
-- 구현 전 순서는 고정한다: 모호함 해소 -> `./.project/project.md` 존재/feature 포함 확인 -> 필요 시 `project.md` 작성·최신화 + 검증 기준 문서화 -> `project.md 기준으로 구현 단계 전환` 1문장 공유 -> 구현.
-- 위 게이트 전에는 코드 편집/의존성 설치/빌드/테스트를 시작하지 않고, 중간 선행 구현이 감지되면 `project.md`를 먼저 채운 뒤 재개한다.
-- `./.project/project.md`가 이미 있고 요청 feature가 project에 명시되어 있으면 설계 스킬 재실행 없이 바로 구현으로 진행한다.
+- 구현 전 순서는 고정한다: 모호함 해소 -> `./.project/drafts.yaml` 존재/feature 포함 확인 -> 필요 시 `drafts.yaml`에 대상/상태를 정리하고 `feedback.md`에 검증 기준 기록 -> `drafts.yaml 기준으로 구현 단계 전환` 1문장 공유 -> 구현.
+- 위 게이트 전에는 코드 편집/의존성 설치/빌드/테스트를 시작하지 않고, 중간 선행 구현이 감지되면 `drafts.yaml`, `feedback.md`를 먼저 채운 뒤 재개한다.
 
 ## 기능 추가 작업 규칙
 - 기존 코드 구조/스타일을 우선 재사용한다.

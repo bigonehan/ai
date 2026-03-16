@@ -12,12 +12,8 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 ## 기본 규칙
 - 자동 연쇄 호출에 의존하지 않는다. 각 단계는 명령을 명시적으로 한 번씩 실행한다.
 - `orc auto`/`orc auto -f`는 내부 재시도 루프로 unresolved 상태를 반복 처리한다. (기본 무제한, `ORC_AUTO_RETRY_MAX=0`)
-- 산출물은 항상 `./.project` 기준으로 확인한다.
-  - `./.project/project.md`
-  - `./.project/plan.yaml`
-  - `./.project/drafts.yaml`
-- `plan.md`가 아니라 `plan.yaml`을 사용한다.
-- 폴더 상태를 먼저 확인한다. auto 모드에서는 `input.md` 유무와 관계없이 `orc create_input_md`를 통해 최신 input을 생성한 뒤 진행한다.
+- 사용자 기준 산출물 확인은 항상 `./.project/drafts.yaml`, `./.project/feedback.md`만 사용한다.
+- 내부 준비 명령이 더 있더라도 진행 판단과 완료 판정은 위 두 문서로만 한다.
 - 병렬 build가 완료되면 즉시 `orc clit test -p . -m "<build 완료 기능 요약>"`를 실행해 현재 작업 디렉터리를 점검하고 `./.project/feedback.md`를 남긴다.
 - `./.project/feedback.md`는 단일 운영 문서로 사용하며 최소 `# 문제`, `# 해결`, `#개선필요` 섹션을 사용한다.
 - 계획/구현/점검 중 새로 발견한 이슈는 `# 문제`에 추가한다.
@@ -30,29 +26,29 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 ## 표준 실행 순서
 0. 초기 폴더 빠른 경로 확인
 - 빠른 자동 경로: `orc auto -f`
-- 이 경로에서는 `project.md + plan.yaml` 기준으로 `create_input_md`를 먼저 실행해 `input.md`를 생성/갱신한 뒤 구현 단계까지 진행한다.
+- 이 경로에서는 필요한 내부 준비 명령을 거친 뒤 `./.project/drafts.yaml` 반영 단계부터 구현까지 진행한다.
 
 1. 프로젝트 초기화
 - `orc init_code_project -a "<요구사항>"`
-- 확인: `./.project/project.md`
+- 확인: 이후 draft 단계가 `./.project/drafts.yaml` 갱신으로 이어질 준비가 되었는지 본다.
 
 2. 계획 생성
 - `orc init_code_plan -a`
 - 필요 시 기능 보강: `orc add_code_plan -a` 또는 `orc add_code_plan -m "<feature>"`
-- 확인: `./.project/plan.yaml`
+- 확인: 계획 보강 결과가 다음 `drafts.yaml` 갱신에 반영될 수 있는 상태인지 본다.
 
-3. input 생성
-- `orc create_input_md` (`project.md + plan.yaml` 기반으로 `./input.md` 생성/갱신)
-- 확인: `./input.md`
+3. 구현 입력 준비
+- `orc create_input_md`
+- 확인: 준비 결과가 다음 `drafts.yaml` 갱신으로 이어지는지 본다.
 
 4. draft 생성
 - 파일 기반: `orc add_code_draft -f`
-- auto 입력 기반: `orc add_code_draft -a` (`project.md + plan.yaml` 기준으로 `build_input_md_auto()`를 통해 `./input.md`를 생성한 후 draft를 생성)
+- auto 입력 기반: `orc add_code_draft -a`
 - 확인: `./.project/drafts.yaml` (`planned/worked/complete/failed` 상태)
 
 5. 구현 실행
 - `orc impl_code_draft`
-- 실패 항목은 `./.project/drafts.yaml.failed`로 이동되는지 확인
+- 성공/실패 상태는 `./.project/drafts.yaml`와 `./.project/feedback.md`에서 확인한다
 
 6. 병렬 build 완료 점검
 - `orc clit test -p . -m "<build 완료 기능 요약>"`
@@ -70,8 +66,8 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 
 7. 점검/리포트
 - 이 단계는 메인 pane이 직접 닫지 않고 `feedback-followup-agent` 호출 단계로 처리한다.
-- followup agent가 `check-code` skill과 `orc-cli-workflow` skill을 사용해 코드 체크, `.project/feedback.md` 갱신, 새 `plan.md` 작성, 문제 해결, 재검증을 수행한다.
-- 확인: `report.md`, `./.project/feedback.md`
+- followup agent가 `check-code` skill과 `orc-cli-workflow` skill을 사용해 코드 체크, `.project/feedback.md` 갱신, `.project/drafts.yaml` 기준 문제 해결, 재검증을 수행한다.
+- 확인: `./.project/drafts.yaml`, `./.project/feedback.md`
 
 ## tmux 위임 운영
 - 메인 pane에서 위 명령을 실행하면 하위 단계는 워커 pane으로 분기될 수 있다.
@@ -88,9 +84,9 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - 각 워커 실행은 `orc send-tmux <worker_pane_id> "<명령>" enter`로 전달한다.
 - 워커 종료 시 `orc send-tmux <manager_pane_id> "<stage>:done|fail:<reason>" enter` 형식으로 회수한다.
 - manager pane은 회수 메시지를 보고 다음 단계 진행/재시도 여부를 결정한다.
-- 실패 또는 산출물 미완성(`.project/*.yaml` 누락/비정상) 상태면 동일 단계를 새 워커 pane에서 재실행한다.
+- 실패 또는 산출물 미완성(`./.project/drafts.yaml`, `./.project/feedback.md` 비정상) 상태면 동일 단계를 새 워커 pane에서 재실행한다.
 - 완료 조건: 병렬 build 완료 후 `orc clit test -p . -m "<build 완료 기능 요약>"`가 실행되어 `./.project/feedback.md`가 생성되고, 이후 `check_code_draft -a`가 통과한 상태.
-- `읽고 처리해줘` 트리거에서는 기존 `input.md`를 읽는 경로를 사용하고 `create_input_md`를 호출하지 않는다.
+- `읽고 처리해줘` 트리거에서는 기존 `drafts.yaml` 문맥을 읽는 경로를 사용하고 추가 입력 준비 결과를 별도 기준 문서로 삼지 않는다.
 
 ## 단계별 위임 순서 (트리거별)
 1. `"~~~을 만들어줘"` 또는 `"~~~을 추가해줘"`
@@ -98,7 +94,7 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - manager pane이 추가 질문을 수집
 - 워커 pane별로 `orc init_code_plan -a`(또는 `orc add_code_plan -m "<추가요구>"`) -> `orc add_code_draft -a` -> `orc impl_code_draft` -> `orc clit test -p . -m "<build 완료 기능 요약>"` -> `orc check_code_draft -a` 순차 위임
 2. `"~을 읽고 처리해줘"`
-- 사전 조건: `./input.md`가 존재해야 한다.
+- 사전 조건: `./.project/drafts.yaml`가 존재해야 한다.
 - 워커 pane별로 `orc add_code_plan -f` -> `orc add_code_draft -f` -> `orc impl_code_draft` -> `orc clit test -p . -m "<build 완료 기능 요약>"` -> `orc check_code_draft -a` 순차 위임
 - 이 경로에서는 `orc create_input_md`를 실행하지 않는다.
 - 공통: 단계별 완료/실패 회수 후 manager가 다음 단계/재시도 판단
@@ -123,8 +119,8 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - `orc send-tmux <worker_read_draft> "cd /home/tree/project/rust-orc && orc add_code_draft -f" enter`
 
 ## 실패 처리
-- 실패 시 우선 `./.project/feedback.md`, `./.project/drafts.yaml.failed`를 확인한다.
-- 프로세스 점검 내용은 별도 `check-process.md`가 아니라 `./.project/feedback.md`의 `# 문제` 또는 `#개선필요`에 기록한다.
+- 실패 시 우선 `./.project/drafts.yaml`, `./.project/feedback.md`를 확인한다.
+- 프로세스 점검 내용은 `./.project/feedback.md`의 `# 문제` 또는 `#개선필요`에 기록한다.
 - 재시도는 자동 반복보다 단계별 수동 재실행을 우선한다.
   - 예: `orc add_code_draft -a` -> `orc impl_code_draft` -> `orc clit test -p . -m "parallel build verification"`
 - 동일 실패가 반복되면 실패 항목만 분리해 `add_code_draft -m`으로 축소 재진입한다.
@@ -154,6 +150,6 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - 새 pane에는 잔여 `# 문제`만 전담하는 followup agent를 보낸다.
   - 선호: `orc send-tmux <pane_id> "<followup command>" enter`
 - followup agent 프롬프트에는 `check-code` skill과 `orc-cli-workflow` skill 사용을 반드시 포함한다.
-- followup command는 반드시 `feedback을 읽고 새 plan.md를 만든 뒤 문제를 해결하라`는 직접 명령을 포함한다.
+- followup command는 반드시 `feedback을 읽고 drafts.yaml 기준으로 남은 문제를 해결하라`는 직접 명령을 포함한다.
 - followup agent는 `orc-cli-workflow` 안의 `check_code_draft -a`/feedback 정리/재검증 구간을 전담 수행한다.
 - followup agent는 수정 -> 검증 -> `# 해결` 이동을 반복해 `# 문제`가 0개가 될 때까지 종료할 수 없다.

@@ -219,6 +219,11 @@
 ## 2026-03-13 - rust-response Output Routing Rule (Highest Priority)
 - Before sending any user-facing response, route output through `~/project/rust-response` CLI with a `msg` argument.
 
+## 2026-03-14 - Detail Chat Pause Badge Rule
+- detail chat page는 footer의 `반영하기` 버튼을 두지 않고, 취소와 별도의 `중지/재개` 상태를 상단 badge로 제어한다.
+- `취소`는 현재 채팅 session 종료를 뜻하고, `중지`는 session을 유지한 채 입력/투표/전송만 멈춘다.
+- 중지 상태는 chat page 오른쪽 위 badge로 항상 보여야 하며, 같은 badge를 다시 눌러 즉시 재개한다.
+
 ## 2026-03-14 - Detail Blur Unlock Rule
 - `project.md` detail pane와 `episode outline` pane의 blur overlay는 모든 핵심 항목이 비어 있는 경우에만 적용한다.
 - 항목이 하나라도 채워진 상태에서는 전체 blur를 유지하지 않는다.
@@ -233,6 +238,10 @@
 - detail page에서 `video pane`은 `episode drafts` 뒤, 즉 detail column의 맨 아래에 둔다.
 - script/video 프로젝트에서 draft_item 기반 작업 흐름이 video pane보다 먼저 보여야 한다.
 
+## 2026-03-15 - Template Scope Correction Rule
+- 사용자가 `template들`, `template/web`, `templates too`처럼 복수 템플릿 범위를 지적하면 단일 템플릿으로 임의 축소하지 않는다.
+- 최소 실행 단위는 `template/web` 하위 전체 목록 점검 + 대상별 현재 상태 기록이며, 구현 우선순위를 줄여야 할 때도 먼저 전체 범위를 읽고 근거를 남긴 뒤 좁힌다.
+
 ## 2026-03-14 - Detail Page Root Background Rule
 - `data-testid="detail-page"` 루트 래퍼에는 별도 배경색 클래스를 두지 않는다.
 - detail page 배경은 상위 page shell 또는 개별 pane이 담당하고, 루트는 투명 상태를 유지한다.
@@ -240,6 +249,15 @@
 ## 2026-03-14 - Draft Flow Label Rule
 - draft flow pane 단계명은 현재 작업 의미를 그대로 보여야 한다.
 - `project.md` 단계 label은 `draft detail`, `draft_item` 단계 label은 `scene add`로 표시한다.
+
+## 2026-03-14 - Initial Override Read Gate
+- `/home/tree/ai`에서 시작한 turn은 어떤 `commentary`나 `final` 문구보다 먼저 `~/ai/codex/AGENTS.override.md`를 내부적으로 읽는다.
+- 사용자에게 보이는 첫 문장은 override 선독 이후에만 보낼 수 있다.
+- 요청 요약 출력 규칙도 override 선독이 끝난 뒤에만 적용한다.
+
+## 2026-03-15 - No Skill On User Demand
+- 사용자가 스킬을 쓰지 말라고 지시한 turn에서는 명시적 skill invocation, skill 파일 절차 준수, skill 기반 우회 설명을 모두 중단한다.
+- 해당 turn의 작업은 일반 탐색/구현/검증 절차로만 수행한다.
 
 ## 2026-03-14 - Detail State Badge Rule
 - detail page의 현재 project state badge는 읽기 전용이 아니라 상태 변경 진입점이어야 한다.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Check UI"
+  short_description: "Audit live UI against web references"
+  default_prompt: "Use $check-ui to capture the current app, compare it with similar live sites, write a plan, and kick off an ORC-driven improvement pane."
