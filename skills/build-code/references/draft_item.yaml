@@ -1,0 +1,14 @@
+# draft item template (single item)
+# - LLM은 아래 주석을 읽고 각 필드 의미를 이해한 뒤 값을 채운다.
+# - 최종 출력(drafts.yaml item)에는 이 주석을 포함하지 않는다.
+- name: "" # feature key(snake_case), ex) todo_create
+  type: "action" # action | calc
+  domain: [] # project.md domains 중 실제 책임 도메인
+  depends_on: [] # 선행 feature key 목록
+  scope: [] # 구현/수정 대상 범위(파일/모듈/상태)
+  rule: [] # 자동 검증 가능한 규칙(==, !=, >=, <=, matches, contains, exists)
+  step: [] # 실행 순서(트리거 -> 처리 -> 결과)
+  tasks: [] # 구현해야 할 실제 작업 항목
+  constraints: [] # 제한/계약 조건(각 항목은 `입력 -> 출력 : 기능 설명` 포맷, 글 생성 draft는 1300~1700자 목표 포함)
+  check: [] # 검증 항목(테스트/확인 포인트)
+  state: # planned | worked | error | complete 중에 하나 
