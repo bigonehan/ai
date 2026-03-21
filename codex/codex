@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REAL_CODEX="/home/tree/.local/share/nvm/v25.7.0/bin/codex"
+
+if [[ ! -x "$REAL_CODEX" ]]; then
+  echo "BLOCK: codex 실행 파일 없음: $REAL_CODEX"
+  exit 1
+fi
+
+exec "$REAL_CODEX" "$@"

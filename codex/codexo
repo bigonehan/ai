@@ -1,0 +1,391 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OVERRIDE="$HOME/ai/codex/AGENTS.override.md"
+REAL_CODEX="/home/tree/.local/share/nvm/v25.7.0/bin/codex"
+
+if [[ ! -r "$OVERRIDE" ]]; then
+  echo "BLOCK: AGENTS.override.md 없음: $OVERRIDE"
+  exit 1
+fi
+
+if [[ ! -x "$REAL_CODEX" ]]; then
+  echo "BLOCK: codex 실행 파일 없음: $REAL_CODEX"
+  exit 1
+fi
+
+if [[ $# -eq 0 ]]; then
+  exec "$REAL_CODEX"
+fi
+
+first_arg="$1"
+case "$first_arg" in
+  -*|exec|review|resume|fork|login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|apply|cloud|features|help)
+    exec "$REAL_CODEX" "$@"
+    ;;
+esac
+
+extract_user_prompt() {
+  if [[ $# -eq 0 ]]; then
+    return 1
+  fi
+
+  if [[ "$1" == "exec" ]]; then
+    shift
+    if [[ $# -eq 0 ]]; then
+      return 1
+    fi
+    printf '%s' "${!#}"
+    return 0
+  fi
+
+  if [[ "$1" == -* ]]; then
+    printf '%s' "${!#}"
+    return 0
+  fi
+
+  printf '%s' "$*"
+}
+
+is_orc_internal_prompt() {
+  local prompt="$1"
+  [[ "$prompt" == *"너는 project.md 생성기다."* || "$prompt" == *"# draft item template"* || "$prompt" == *"project.md:"* || "$prompt" == *"requirement:"* ]]
+}
+
+wait_for_pane_idle() {
+  local pane_id="$1"
+  local timeout_sec="${2:-900}"
+  local start_ts now cmd
+  start_ts="$(date +%s)"
+
+  while true; do
+    cmd="$(tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null || true)"
+    if [[ -z "$cmd" || "$cmd" == "fish" || "$cmd" == "bash" || "$cmd" == "zsh" ]]; then
+      return 0
+    fi
+
+    now="$(date +%s)"
+    if (( now - start_ts >= timeout_sec )); then
+      echo "[codex-orc] WARN: pane ${pane_id} timed out while waiting (${cmd})"
+      return 1
+    fi
+    sleep 2
+  done
+}
+
+ensure_requirement_from_prompt() {
+  python3 - "$PWD/job.md" "$1" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+prompt = sys.argv[2].strip()
+if not path.exists():
+    raise SystemExit(0)
+
+text = path.read_text(encoding="utf-8")
+title = " ".join(prompt.split())[:80] if prompt else "task"
+heading = f"## {title}"
+if heading in text:
+    raise SystemExit(0)
+
+anchor = "# task"
+idx = text.find(anchor)
+if idx == -1:
+    raise SystemExit(0)
+
+block = f"""{heading}
+### step
+1. 요구사항을 구현한다.
+2. 핵심 동작이 실제로 동작하는지 점검한다.
+3. 실패 항목을 수정한 뒤 다시 점검한다.
+### rules
+- 명령에서 요청한 범위를 우선한다.
+- 구현 후 점검을 반드시 수행한다.
+
+"""
+
+updated = text[:idx] + block + text[idx:]
+path.write_text(updated, encoding="utf-8")
+PY
+}
+
+prompt_to_key() {
+  python3 - "$1" <<'PY'
+import re
+import sys
+
+text = sys.argv[1].lower()
+text = re.sub(r"[^a-z0-9가-힣]+", "_", text).strip("_")
+if not text:
+    text = "task"
+print(text[:40])
+PY
+}
+
+ensure_task_planned_item() {
+  python3 - "$PWD/job.md" "$1" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+item = sys.argv[2]
+if not path.exists():
+    raise SystemExit(0)
+text = path.read_text(encoding="utf-8")
+
+m = re.search(r"(?ms)^## planned\s*\n(.*?)(?=^## |\Z)", text)
+if not m:
+    raise SystemExit(0)
+section = m.group(1)
+if re.search(rf"(?m)^\s*-\s*{re.escape(item)}\s*$", section):
+    raise SystemExit(0)
+
+insert_at = m.start(1)
+updated = text[:insert_at] + f"- {item}\n" + text[insert_at:]
+path.write_text(updated, encoding="utf-8")
+PY
+}
+
+ensure_fallback_draft() {
+  python3 - "$PWD/.project/drafts.yaml" "$1" "$2" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+name = sys.argv[2]
+prompt = sys.argv[3]
+path.parent.mkdir(parents=True, exist_ok=True)
+
+if path.exists():
+    raw = path.read_text(encoding="utf-8")
+    if f"- name: {name}" in raw:
+        raise SystemExit(0)
+else:
+    raw = "draft:\n"
+
+block = f"""  - name: {name}
+    type: action
+    domain: [app]
+    depends_on: []
+    scope: [.]
+    rule: []
+    step: [\"trigger -> implement -> verify\"]
+    tasks: [\"{prompt}\"]
+    constraints: []
+    check: [\"orc clit test -p . -m {prompt}\"]
+    state: planned
+"""
+
+if "draft:" not in raw:
+    raw = "draft:\n"
+
+if not raw.endswith("\n"):
+    raw += "\n"
+
+path.write_text(raw + block, encoding="utf-8")
+PY
+}
+
+mark_job_completed() {
+  python3 - "$PWD/job.md" "$1" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+item = sys.argv[2]
+if not path.exists():
+    raise SystemExit(0)
+text = path.read_text(encoding="utf-8")
+
+def clear_section(src, name):
+    pat = rf"(?ms)^## {name}\s*\n(.*?)(?=^## |\Z)"
+    m = re.search(pat, src)
+    if not m:
+        return src
+    return src[:m.start(1)] + "" + src[m.end(1):]
+
+for sec in ["planned", "work", "check", "fail"]:
+    text = clear_section(text, sec)
+
+m = re.search(r"(?ms)^## completed\s*\n(.*?)(?=^## |\Z)", text)
+if m and not re.search(rf"(?m)^\s*-\s*{re.escape(item)}\s*$", m.group(1)):
+    text = text[:m.start(1)] + f"- {item}\n" + text[m.start(1):]
+
+path.write_text(text, encoding="utf-8")
+PY
+}
+
+job_has_incomplete_items() {
+  python3 - "$PWD/job.md" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if not path.exists():
+    print("1")
+    raise SystemExit(0)
+
+text = path.read_text(encoding="utf-8")
+sections = {}
+for name in ["planned", "work", "check", "fail", "completed"]:
+    m = re.search(rf"(?ms)^## {name}\s*\n(.*?)(?=^## |\Z)", text)
+    if not m:
+        sections[name] = []
+        continue
+    items = []
+    for line in m.group(1).splitlines():
+        line = line.strip()
+        if line.startswith("- "):
+            items.append(line[2:].strip())
+    sections[name] = items
+
+incomplete = bool(sections["planned"] or sections["work"] or sections["check"] or sections["fail"] or not sections["completed"])
+print("1" if incomplete else "0")
+PY
+}
+
+run_prompt_orc_flow() {
+  local original_prompt="$1"
+  local plan_prompt="/plan ${original_prompt}"
+  local manager_pane worker_pane attempt max_retry project_name spec task_key test_ok
+  max_retry="${ORC_RETRY_MAX:-0}"
+  project_name="$(printf '%s' "$original_prompt" | tr '[:space:]/' '-' | tr -cd '[:alnum:]-' | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-32)"
+  [[ -n "$project_name" ]] || project_name="auto-task"
+  spec="$original_prompt"
+  task_key="$(prompt_to_key "$original_prompt")"
+
+  if [[ -z "${TMUX:-}" ]]; then
+    echo "[codex-orc] FAIL: tmux session required for react todo auto-flow"
+    exit 1
+  fi
+  command -v orc >/dev/null 2>&1 || { echo "[codex-orc] FAIL: orc not found"; exit 1; }
+
+  manager_pane="$(tmux display-message -p '#{pane_id}')"
+  worker_pane="$(tmux split-window -h -P -F '#{pane_id}' -c "$PWD")"
+  echo "[codex-orc] manager=${manager_pane} worker=${worker_pane}"
+
+  tmux send-keys -t "$worker_pane" "cd \"$PWD\" && \"$REAL_CODEX\" exec \"$plan_prompt\"" C-m
+  wait_for_pane_idle "$worker_pane" 1200 || true
+  tmux kill-pane -t "$worker_pane" >/dev/null 2>&1 || true
+
+  if [[ ! -f "$PWD/.project/project.md" ]]; then
+    (cd "$PWD" && orc init_orc_project -n "$project_name" -s "$spec" -d "$spec" -a >/dev/null 2>&1 || true)
+  fi
+
+  attempt=0
+  while true; do
+    attempt=$((attempt + 1))
+    if (( max_retry > 0 && attempt > max_retry )); then
+      echo "[codex-orc] FAIL: reached max retry (${max_retry})"
+      return 1
+    fi
+    echo "[codex-orc] attempt=${attempt}"
+
+    (cd "$PWD" && orc init_orc_job >/dev/null 2>&1 || true)
+    ensure_requirement_from_prompt "$original_prompt"
+    ensure_task_planned_item "$task_key"
+
+    (cd "$PWD" && orc add_orc_drafts >/dev/null 2>&1 || true)
+    ensure_fallback_draft "$task_key" "$original_prompt"
+    (cd "$PWD" && orc impl_orc_code >/dev/null 2>&1 || true)
+    (cd "$PWD" && orc check_orc_code >/dev/null 2>&1 || true)
+    test_ok=0
+    if (cd "$PWD" && orc clit test -p . -m "$original_prompt" >/dev/null 2>&1); then
+      test_ok=1
+    fi
+    if [[ "$test_ok" == "1" ]]; then
+      mark_job_completed "$task_key"
+    fi
+
+    if [[ "$(job_has_incomplete_items)" == "0" ]]; then
+      echo "[codex-orc] complete"
+      return 0
+    fi
+  done
+}
+
+contains_dangerous=0
+for arg in "$@"; do
+  if [[ "$arg" == "--dangerously-bypass-approvals-and-sandbox" ]]; then
+    contains_dangerous=1
+    break
+  fi
+done
+
+run_args=("$@")
+if [[ $contains_dangerous -eq 0 ]]; then
+  run_args=(--dangerously-bypass-approvals-and-sandbox "${run_args[@]}")
+fi
+
+if [[ $# -eq 0 ]]; then
+  exec "$REAL_CODEX" "${run_args[@]}" "$PREFLIGHT_PROMPT"
+fi
+
+first="$first_arg"
+
+case "$first" in
+  login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|apply|cloud|features|help|review|resume|fork)
+    ;;
+  *)
+    if user_prompt="$(extract_user_prompt "$@")"; then
+      if [[ -n "${user_prompt// }" ]]; then
+        if is_orc_internal_prompt "$user_prompt"; then
+          exec "$REAL_CODEX" "${run_args[@]}"
+        fi
+        run_prompt_orc_flow "$user_prompt"
+        exit $?
+      fi
+    fi
+    ;;
+esac
+
+PREFLIGHT_PROMPT=$'작업 시작 전에 전역설정을 먼저 읽고 준수해.\n그 다음 `scripts/orc_gate_preflight.sh .`를 실행해서 절차 준수 여부를 확인해.'
+echo "[codex-preflight] 전역설정 읽기 + orc_gate_preflight 실행 지시 주입"
+
+case "$first" in
+  review|resume|fork)
+    echo "BLOCK: $first 는 전역설정 본문 주입을 보장할 수 없어 차단됨. codex 또는 codex exec 사용."
+    exit 1
+    ;;
+  exec)
+    exec_args=("${@:2}")
+    if [[ ${#exec_args[@]} -eq 0 ]]; then
+      exec "$REAL_CODEX" "${run_args[0]}" exec "$PREFLIGHT_PROMPT"
+    fi
+
+    last_index=$((${#exec_args[@]} - 1))
+    last_value="${exec_args[$last_index]}"
+    if [[ "$last_value" == -* ]]; then
+      exec "$REAL_CODEX" "${run_args[0]}" exec "${exec_args[@]}" "$PREFLIGHT_PROMPT"
+    fi
+
+    merged_prompt="$PREFLIGHT_PROMPT"$'\n\n'"$last_value"
+    exec_args[$last_index]="$merged_prompt"
+    exec "$REAL_CODEX" "${run_args[0]}" exec "${exec_args[@]}"
+    ;;
+  login|logout|mcp|mcp-server|app-server|completion|sandbox|debug|apply|cloud|features|help)
+    exec "$REAL_CODEX" "${run_args[@]}"
+    ;;
+  -*)
+    top_args=("${run_args[@]}")
+    last_index=$((${#top_args[@]} - 1))
+    last_value="${top_args[$last_index]}"
+    if [[ "$last_value" == -* ]]; then
+      exec "$REAL_CODEX" "${top_args[@]}" "$PREFLIGHT_PROMPT"
+    fi
+
+    merged_prompt="$PREFLIGHT_PROMPT"$'\n\n'"$last_value"
+    top_args[$last_index]="$merged_prompt"
+    exec "$REAL_CODEX" "${top_args[@]}"
+    ;;
+  *)
+    user_prompt="$*"
+    merged_prompt="$PREFLIGHT_PROMPT"$'\n\n'"$user_prompt"
+    exec "$REAL_CODEX" "${run_args[0]}" "$merged_prompt"
+    ;;
+esac
