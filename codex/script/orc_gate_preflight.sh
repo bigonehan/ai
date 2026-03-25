@@ -22,6 +22,7 @@ TRACE_FILE="${ROOT_DIR}/.project/orc_gate_trace.log"
 LOCAL_OVERRIDE_FILE="${ROOT_DIR}/AGENTS.override.md"
 LOCAL_RULE_FILE="${LOCAL_OVERRIDE_FILE}"
 DRAFTS_FILE="${ROOT_DIR}/.project/drafts.yaml"
+CONFIG_FILE="${ROOT_DIR}/configs/configs.yaml"
 
 fail() {
   echo "[orc_gate_preflight] FAIL: $1" >&2
@@ -48,8 +49,32 @@ require_dir() {
 
 require_trace() {
   local token="$1"
-  rg -n --fixed-strings "${token}" "${TRACE_FILE}" >/dev/null 2>&1 \
-    || fail "missing trace token: ${token}"
+  if rg -n --fixed-strings "${token}" "${TRACE_FILE}" >/dev/null 2>&1; then
+    return 0
+  fi
+  local context
+  context="$(tail -n 12 "${TRACE_FILE}" 2>/dev/null || true)"
+  fail "missing trace token: ${token} | trace_tail=${context//$'\n'/ ; }"
+}
+
+trace_last_line_no() {
+  local token="$1"
+  local line_no
+  line_no="$(rg -n --fixed-strings "${token}" "${TRACE_FILE}" 2>/dev/null | tail -n 1 | cut -d: -f1)"
+  [[ -n "${line_no}" ]] || fail "missing trace token for order check: ${token}"
+  echo "${line_no}"
+}
+
+require_trace_order() {
+  local token_a="$1"
+  local token_b="$2"
+  local line_a
+  local line_b
+  line_a="$(trace_last_line_no "${token_a}")"
+  line_b="$(trace_last_line_no "${token_b}")"
+  if [[ "${line_a}" -ge "${line_b}" ]]; then
+    fail "trace order invalid: ${token_a}(${line_a}) must be before ${token_b}(${line_b})"
+  fi
 }
 
 task_bullet_count() {
@@ -60,7 +85,7 @@ from pathlib import Path
 
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8")
-section = re.search(r"(?ms)^# task\s*\n(.*?)(?:^# |\Z)", text)
+section = re.search(r"(?ms)^# task\s*\n(.*?)(?=^# |\Z)", text)
 if not section:
     print("0")
     raise SystemExit(0)
@@ -83,6 +108,7 @@ fi
 require_file "${JOB_FILE}" "job.md"
 require_file "${TRACE_FILE}" "orc gate trace"
 require_file "${VERIFY_SCRIPT}" "verify_job_evidence.sh"
+require_file "${CONFIG_FILE}" "configs/configs.yaml"
 
 [[ -r "${GLOBAL_OVERRIDE_FILE}" ]] || fail "global AGENTS override unreadable: ${GLOBAL_OVERRIDE_FILE}"
 [[ -r "${LOCAL_RULE_FILE}" ]] || fail "local AGENTS rule unreadable: ${LOCAL_RULE_FILE}"
@@ -90,6 +116,10 @@ require_file "${VERIFY_SCRIPT}" "verify_job_evidence.sh"
 require_trace "global_override_read"
 require_trace "orc_init_orc_job"
 require_trace "job_task_locked"
+require_trace "run_preflight"
+require_trace_order "global_override_read" "orc_init_orc_job"
+require_trace_order "orc_init_orc_job" "job_task_locked"
+require_trace_order "job_task_locked" "run_preflight"
 
 "${VERIFY_SCRIPT}" "${ROOT_DIR}" >/dev/null
 

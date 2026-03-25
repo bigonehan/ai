@@ -1,5 +1,11 @@
 # Agents Override Rules
 
+### New Session `/plan` ORC-First Rule (Global)
+- 새 Codex 세션에서 사용자가 `/plan` 또는 `plan 모드` 지시를 내리면 먼저 `/plan` 계획 응답을 완료한다.
+- 계획 응답 완료 직후 ORC를 실행해 `job.md`를 생성/고정한다.
+- 강제 순서: `/plan 완료` -> `codexo "/plan <task-name>: <plan prompt>"` -> ORC 검증 체인 실행 -> 결과 보고.
+- `/plan` 완료 후 ORC 실행을 생략하는 응답을 금지한다.
+
 # basic case 
 ## common Case
 - 완료 후에는 `nf -m "<task-name> complete"`를 실행한다.
@@ -10,29 +16,10 @@
 - 모든 채널에서 동의/확인 서두 없이 바로 결과부터 말하고, 금지 표현 `맞습니다`, `맞아요`, `인식했습니다`, `알겠습니다`, `네, 맞습니다`, `맞습니다.`, `네 맞습니다`, `그렇습니다`는 쓰지 않는다.
 - 전송 직전 금지 표현을 다시 검사하고 하나라도 있으면 전체 문장을 다시 쓴다.
 
-### Plan->ORC->job.md Gate Rule (Global)
-- 사용자가 Plan 모드로 계획을 요청한 턴에서는 구현/파일수정 없이 계획만 작성한다.
-- Plan 모드가 끝난 첫 실행 턴에서는 반드시 `orc-cli-workflow`를 먼저 적용한다.
-- 실행 시작 0단계로 `job.md`를 생성/갱신하고 `#task` 상태(`planned/work/check/completed/fail`)를 먼저 고정한다.
-- `job.md#task` 상태 고정 전에는 구현 시작/완료 보고를 금지한다.
-- ORC 작업 완료 순서를 고정한다: `/home/tree/ai/codex/script/verify_job_evidence.sh` 통과 -> 기능 검증 통과 -> `nf -m "<task-name> complete"` -> 최종 보고.
-
-### ORC Gate Hard-Block Rule (Global)
-- 구현 전 강제 순서: `전역설정 읽기 -> orc init_orc_job -> job.md#task 고정 -> /home/tree/ai/codex/script/orc_gate_preflight.sh`.
-- `/home/tree/ai/codex/script/orc_gate_preflight.sh`가 실패하면 구현/완료 보고를 금지하고 원인 수정 후 0단계부터 재시작한다.
-- `turn_aborted`가 발생하면 항상 0단계부터 재개한다.
-- preflight 실행 전 현재 경로에 `job.md`, `AGENTS.md(or AGENTS.override.md)`, `.project/orc_gate_trace.log`가 있는지 먼저 확인한다.
-- 위 마커가 충족되지 않으면 repo root가 아니므로 preflight를 실행하지 않고 root부터 재설정한다.
-
-### Preflight Script Path Canonical Rule (Global)
-- preflight 실행 명령은 항상 절대경로 `/home/tree/ai/codex/script/orc_gate_preflight.sh`만 사용한다.
-- `scripts/orc_gate_preflight.sh` 같은 상대경로/별칭/탐색 실행을 금지한다.
-- 경로 실패 시 다른 경로를 찾지 말고, 절대경로 문자열과 실행 위치(repo root)만 재점검한다.
-
 ### Recursive Improvement Loop Rule (Global)
-- 반복 위반 시 `/home/tree/ai/codex/script/orc_recursive_improve.sh`로 tmux worker + `orc send-tmux` codex `/plan` 요청 + preflight 재검증을 수행한다.
-- 실행 체인은 `orc add_orc_drafts -> orc impl_orc_code(병렬) -> orc check_orc_code -> orc clit test -p . -m "<task>"`로 고정한다.
-- 성공 기준은 `job.md` 존재, `#task` 고정, `/home/tree/ai/codex/script/orc_gate_preflight.sh pipeline` 통과다.
+- 반복 위반 시 `codexo "/plan <원문 명령>"`으로 재계획 + preflight 재검증을 수행한다.
+- 실행 체인은 `orc create_job_md -> orc add_code_draft_item/add_code_draft -> orc impl_code_draft -> orc check_code_draft -> orc clit test -p . -m "<task>"`로 고정한다.
+- 성공 기준은 `job.md` 존재, `#task` 고정, ORC pipeline preflight 통과다.
 
 ### Request Summary Output Rule
 - For every user request, before starting work, output with label and description split across separate lines.
@@ -78,10 +65,15 @@
 - "이건 지적이다" 유형 입력은 분석-only 응답을 금지하고 즉시 수정/실행/검증 순서로 진행한다.
 - 동일 턴에서 규칙 반영과 구현을 모두 수행한다.
 ## 작업 완료시 
-### "다음부터" Improvement Logging Rule (Highest Priority)
-- If the assistant says phrases equivalent to `다음부터` (for example: `앞으로는`, `재발 방지로`) in any response, it must first identify at least one concrete process improvement.
-- The identified improvement must be written to `AGENTS.md` in the same turn before finishing the response.
-- Response-only promises without rule update are invalid and treated as process violation.
+### Promise/Critique/Fault Auto Recovery Rule (Highest Priority)
+- 트리거 문구: assistant 응답에 `다음부터`, `앞으로는`, `맞습니다`, `재발 방지`, `다시는`, `하겠다/하겠습니다`, `제 실수입니다`, `잘못했습니다`가 포함되면 즉시 실패 반응으로 판정한다.
+- 감지 즉시 최소 1개 이상의 구체적 프로세스 개선안을 식별하고 같은 턴에 `AGENTS.md`에 기록한다. 규칙 갱신 없는 약속성 응답은 위반으로 처리한다.
+- 즉시 `/plan` 모드로 재진입해 현재 문제를 재정의하고, 루트 `job.md`의 `#task/#problems/#check`에 보완책을 먼저 기록한다.
+- `/plan` 요청에는 `원인` + `재발 조건` + `예방 검증 예제(정상 1개, 차단 1개 이상)` 기록 지시를 반드시 포함한다.
+- 보완책 기록 뒤 tmux 새 pane을 생성하고, 문제가 처음 발생한 사용자 원문 명령을 `codexo "/plan <원문 명령>"`으로 재실행한다.
+- 재실행 검증 체인은 `create_job_md -> add_code_draft_item/add_code_draft -> impl_code_draft -> check_code_draft -> clit test`로 고정한다.
+- 실패 시 `job.md`에 실패 원인/보완책을 추가하고 같은 루프를 반복한다.
+- 종료 조건은 원문 명령 재실행이 동일 검증 체인을 통과하는 경우로만 제한한다.
 
 ### Action Log Trace Rule
 - 사용자가 오류 해결 중 동작 기록을 남기라고 지시하면, 구현과 검증 동안 저장소의 `log.md`에 단계별 실행 기록을 append 한다.
@@ -90,6 +82,8 @@
 - 최종 보고 전에 이번 턴에서 남긴 `log.md` 항목으로 반복 실패 여부를 한 번 요약 점검한다.
 ## 2026-03-21 - Global Settings First
 - 작업 시작 전 전역설정 파일을 먼저 읽고 준수한 다음 저장소 작업을 진행한다.
+- fail-closed: 전역설정 파일 읽기 확인이 실패하면 구현/실행/보고를 즉시 중단한다.
+- 강제 게이트: 전역설정 읽기 확인이 선행되지 않은 작업 실행은 규칙 위반으로 처리한다.
 
 ## 2026-03-21 - Full Scope Trigger Rule
 - 사용자가 `전부`, `모두`, `전체`를 명시하면 부분 수정/부분 보고를 금지하고 관련 범위를 전수 반영한다.
@@ -100,3 +94,7 @@
 - 사용자가 Skill 전역설정 정리를 지시하면 `/home/tree/ai/skills`, `/home/tree/.codex/skills`의 설정 문서를 전수 점검한다.
 - legacy/구식 경로/구식 호환 문구가 발견되면 남김없이 현재 표준 규칙으로 치환한다.
 - 전수 점검 후에는 잔존 문자열 검색 결과를 함께 확인하고 보고한다.
+
+## 2026-03-22 - Cargo Install Always Rule
+- 사용자가 `설정에 매번 실행`을 지시한 저장소 작업에서는 완료 직전에 `cargo install --path /home/tree/project/mono_Manager --bin orc --force`를 매번 실행한다.
+- 완료 전 체크 순서는 `cargo install -> nf -m -> final 응답`으로 고정한다.
