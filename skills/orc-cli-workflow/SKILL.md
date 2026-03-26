@@ -11,7 +11,7 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 
 ## 기본 규칙
 - `자동으로` 라는 명령이 없다면 각 단계는 명령을 명시적으로 한 번씩 실행한다.
-- `orc auto`/`orc auto -f`는 에서 실패했다면 실패 이유를 출력하고 대기한다
+- `orc auto`/`orc auto -f` 실패, 단계별 ORC 명령 실패, 검증 실패, 새 문제 감지 중 하나라도 발생하면 즉시 재귀 개선 루프를 시작한다(대기 금지).
 - `.job.md`는 단일 운영 문서로 사용한다. 
 - 계획/구현/점검 중 새로 발견한 이슈는 `.job.mb#requirement`에 추가한다.
 - `.job.md#feedback`에는 이미 반영한 변경 설명을 적지 않고, 앞으로 더 손봐야 할 지점, 반복 병목, 재시도 비용을 줄일 개선 후보만 남긴다.
@@ -62,8 +62,8 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - 워커 pane을 생성한다. 이때 생성은 `tmux split-window -h -P -F '#{pane_id}'`로 pane id를 받아 처리한다. (`rust-orc/src/tmux/mod.rs`와 동일하게 좌/우 분할 고정)
 - 각 워커 실행은 `orc send-tmux <worker_pane_id> "<명령>" enter`로 전달한다.
 - 워커 종료 시 `orc send-tmux <manager_pane_id> "<stage>:done|fail:<reason>" enter` 형식으로 회수한다.
-- 반복적인 순서 위반이 있으면 `/home/tree/ai/codex/script/orc_recursive_improve.sh <root> <task-name> "<plan 요청>"`으로 재귀 개선 루프를 실행한다.
+- 아래 상황이 발생하면 `/home/tree/ai/codex/script/orc_recursive_improve.sh <root> <task-name> "<plan 요청>"`으로 재귀 개선 루프를 즉시 실행한다.
+- 트리거: 순서 위반, 단계 실패, 테스트 실패, 새 실패 원인 발견.
 - 재귀 개선 루프 성공 기준: `job.md` 생성/유지 + `#task` 고정 + `/home/tree/ai/codex/script/orc_gate_preflight.sh` 통과.
 - 재귀 개선 루프의 실행 체인은 고정한다: `orc create_job_md -> orc add_code_draft_item/add_code_draft -> orc impl_code_draft(병렬) -> orc check_code_draft -> orc clit test -p . -m "<task>"`.
-
 
