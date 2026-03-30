@@ -34,6 +34,13 @@ description: "입력된 기능/목표 기준 체크리스트 생성 후 언어�
   - 위 조건이 입력/상태/외부결과 검증 없이 최종 판정 분기로 쓰이면 검증 실패로 기록한다.
   - 권장 점검 명령 예시:
     - `rg -n "contains\\(|starts_with\\(|ends_with\\(" src crates packages`
+- 상태/단계/토픽 해석이 enum·공통 resolver·공통 read helper를 우회하는지 반드시 점검한다.
+  - 예: UI/handler/test에서 로컬 문자열 분기(`pane === "rules"` -> `"rules"`), 직접 배열 인덱스 접근(`steps[index]`), 직접 `findIndex(...)`로 상태를 다시 해석하는 경우
+  - 이미 `enum`, `parse*`, `resolve*`, `read*` helper가 있는데 다른 레이어에서 같은 해석 로직을 재구현하면 검증 실패로 기록한다.
+  - 상태 해석이 필요한 코드는 `enum/source of truth -> parse/resolve -> read helper -> consumer` 경로만 사용해야 한다.
+  - 권장 점검 명령 예시:
+    - `rg -n "findIndex\\(|\\[[A-Za-z0-9_]+\\]|=== \\\"rules\\\"|=== \\\"constraints\\\"" src packages`
+    - `rg -n "parse[A-Z]|resolve[A-Z]|read[A-Z]" src packages`
 
 ## 테스트 워크 플로우 
 - 먼저 `drafts.yaml` 내부의 `item`들을 순회하면서 `drafts_item.yaml`에서 `constraints`기능/목표를 읽는다.

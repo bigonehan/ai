@@ -38,22 +38,30 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - `orc add-function`기능을 수행한다.
 ## 프로젝트 초기화
 - `project/plan/draft` 단계는 실행 전 `/plan` 선행으로 범위/검증 기준을 먼저 확정한다.
-- `orc init_code_project -a "<요구사항>"` 을 수행한다.
+- 초기화 하드 규칙은 `project.md 생성 -> bootstrap -> job/draft` 순서로 고정한다.
+- `orc init_orc_project` 또는 별칭 `orc init_code_project`를 사용한다.
+- `-m <요구사항>` 또는 `-n/-d/-s`로 `./.project/project.md`를 먼저 생성한다.
+- `-a` bootstrap은 반드시 방금 생성된 `./.project/project.md`의 `name/spec/path`를 다시 읽어 실행한다.
+- `spec`가 비어 있으면 bootstrap 단계로 넘어가지 말고 먼저 `project.md` 입력 생성 경로를 점검한다.
+- 대상 루트가 분리되어 있으면 `-p <path>`를 사용해 프로젝트 루트를 먼저 고정한 뒤 그 루트 안에서 `.project/project.md`를 생성한다.
 
 
 ## Plan Mode Auto-Continuation (Mandatory)
 - Codex가 `/plan` 모드 응답에서 `<proposed_plan>`을 확정하면 normal mode 전환 직후 아래 체인을 자동 실행한다.
-- 자동 체인: `job.md 계획 섹션 갱신 -> orc create_job_md -> orc add_code_draft_item/add_code_draft -> planned draft 병렬 impl_code_draft -> orc check_code_draft -> orc clit test -p . -m "<task-name>"`.
+- 자동 체인: `job.md 계획 섹션 갱신 -> orc init_orc_job|create_job_md -> orc add_orc_drafts -> planned draft 병렬 orc impl_orc_code -> orc check_orc_code -> orc clit test -p . -m "<task-name>"`.
 - `drafts.yaml` 생성은 ORC 명령 전용이며, 수동 작성/수정으로 대체하지 않는다.
 - 체인 실행 전 preflight: 현재 루트가 Git 저장소인지 확인하고 아니라면 `git init` 후 진행한다.
 - 병렬 구현은 기본적으로 `planned` 상태 draft_item 전체를 동시에 처리한다.
-- `add_code_draft_item/add_code_draft`, `impl_code_draft`, `check_code_draft`, `clit test`는 각 `timeout 180s`로 실행하고 실패 시 동일 단계를 최대 2회 재시도한다.
+- `add_orc_drafts`, `impl_orc_code`, `check_orc_code`, `orc clit test`는 각 `timeout 180s`로 실행하고 실패 시 동일 단계를 최대 2회 재시도한다.
 - 단계 실패 시 다음 단계로 넘어가지 않고 실패 로그를 남긴 뒤 같은 단계부터 재시도한다.
+- 구현 자체는 manager pane에서 직접 하지 않고 반드시 tmux worker pane에 위임한다.
+- manager pane은 worker의 `done` 메시지를 받은 직후 `job.md`를 다시 읽고, 그 다음에만 e2e와 스크린샷 검증을 시작한다.
+- worker 성공 보고만으로 완료를 확정하면 안 된다.
 
 
 
 ## Draft Parse Safety
-- `orc add_code_draft_item/add_code_draft` 단계는 파서 입력이므로 내부 LLM 응답을 구조 데이터 전용으로 제한한다.
+- `orc add_orc_drafts` 단계는 파서 입력이므로 내부 LLM 응답을 구조 데이터 전용으로 제한한다.
 - 금지: 서술형 문장, 완료 안내, 파일 목록, Markdown code fence.
 - 허용: 파서가 읽는 draft item YAML/JSON 본문만.
 
@@ -62,8 +70,12 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - 워커 pane을 생성한다. 이때 생성은 `tmux split-window -h -P -F '#{pane_id}'`로 pane id를 받아 처리한다. (`rust-orc/src/tmux/mod.rs`와 동일하게 좌/우 분할 고정)
 - 각 워커 실행은 `orc send-tmux <worker_pane_id> "<명령>" enter`로 전달한다.
 - 워커 종료 시 `orc send-tmux <manager_pane_id> "<stage>:done|fail:<reason>" enter` 형식으로 회수한다.
+- worker가 `done`을 보낸 뒤 manager는 반드시 `job.md`를 다시 읽고 worker 보고와 현재 상태가 일치하는지 확인한다.
+- manager 검증 순서는 고정한다: `job.md 재확인 -> e2e 실행 -> ./.project/captures/ 스크린샷 저장 -> 스크린샷 확인 -> 완료/실패 판정`.
+- UI 작업은 e2e와 스크린샷 확인이 둘 다 끝나기 전까지 완료로 처리하면 안 된다.
+- manager 검증이 실패하면 manager가 `job.md`를 새 실패 상태 기준으로 갱신하고, 남은 문제를 적은 뒤 새 worker pane을 열어 같은 과정을 반복한다.
+- 실패 시 갱신된 `job.md`에는 최소 `worker 완료 보고 요약`, `manager 실패 단계`, `남은 문제`, `다음 worker 작업`, `재검증 기준`이 있어야 한다.
 - 아래 상황이 발생하면 `/home/tree/ai/codex/script/orc_recursive_improve.sh <root> <task-name> "<plan 요청>"`으로 재귀 개선 루프를 즉시 실행한다.
 - 트리거: 순서 위반, 단계 실패, 테스트 실패, 새 실패 원인 발견.
 - 재귀 개선 루프 성공 기준: `job.md` 생성/유지 + `#task` 고정 + `/home/tree/ai/codex/script/orc_gate_preflight.sh` 통과.
-- 재귀 개선 루프의 실행 체인은 고정한다: `orc create_job_md -> orc add_code_draft_item/add_code_draft -> orc impl_code_draft(병렬) -> orc check_code_draft -> orc clit test -p . -m "<task>"`.
-
+- 재귀 개선 루프의 실행 체인은 고정한다: `orc init_orc_job|create_job_md -> orc add_orc_drafts -> orc impl_orc_code(병렬) -> orc check_orc_code -> orc clit test -p . -m "<task>"`.
