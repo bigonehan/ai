@@ -18,10 +18,12 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - `clit test`의 `-p`는 기본적으로 현재 작업 루트(`.`)를 사용한다. 별도 실행 대상 폴더가 분명할 때만 그 경로로 바꾼다.
 - 화면 캡처 산출물은 작업 루트의 `./.project/captures/`에만 저장하고 Git에 포함하지 않는다.
 - 완료 시에는 반드시 `nf -m "<task-name> complete"`를 실행해 완료 알림을 보낸다.
-- 구현 시작 하드 게이트는 고정한다: `전역설정 읽기 -> orc create_job_md -> job.md#task 고정 -> /home/tree/ai/codex/script/orc_gate_preflight.sh`.
+- 구현 시작 하드 게이트는 고정한다: `전역설정 읽기 -> orc create_job_md -> job.md#task 고정 -> git rev-parse --is-inside-work-tree 확인`.
 - 하드 게이트 실패 시 구현을 금지하고, 원인 수정 후 0단계부터 재시도한다.
 - ORC 체인 실행 전 반드시 현재 저장소 루트 `AGENTS.md`를 읽고 해당 규칙을 준수한다.
 - UI 검증 절차의 상세 규칙은 스킬에 중복 정의하지 않고, 항상 현재 저장소 `AGENTS.md`를 단일 원천으로 따른다.
+- 저장/삭제/생성/수정처럼 상태 변화가 있는 UI 기능은 `selector/screenshot`만으로 완료 판정하지 않는다.
+- 위 기능은 최소 `입력 또는 클릭 -> 상태 변화 트리거 -> reload/reopen 또는 동등한 재조회 -> selector/assert 확인` 순서를 포함해야 한다.
 
 ## Stage Gate (Plan-First)
 - `project`, `domain`, `plan`, `draft` 단계는 실제 `orc` 명령 실행 전에 `/plan` 모드로 먼저 사고하고 결정사항을 고정한다.
@@ -42,6 +44,7 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 - `orc init_orc_project` 또는 별칭 `orc init_code_project`를 사용한다.
 - `-m <요구사항>` 또는 `-n/-d/-s`로 `./.project/project.md`를 먼저 생성한다.
 - `-a` bootstrap은 반드시 방금 생성된 `./.project/project.md`의 `name/spec/path`를 다시 읽어 실행한다.
+- `./.project/project.md#architecture`에 `name:` 값이 있으면 같은 이름의 architecture skill contract를 draft/check 단계에 함께 주입한다.
 - `spec`가 비어 있으면 bootstrap 단계로 넘어가지 말고 먼저 `project.md` 입력 생성 경로를 점검한다.
 - 대상 루트가 분리되어 있으면 `-p <path>`를 사용해 프로젝트 루트를 먼저 고정한 뒤 그 루트 안에서 `.project/project.md`를 생성한다.
 
@@ -67,15 +70,16 @@ description: rust-orc 프로젝트를 orc 명령으로 단계별 실행하고, t
 
 # 작업 완료시 
 - 현재  pane은 `manager pane`으로 고정한다.
-- 워커 pane을 생성한다. 이때 생성은 `tmux split-window -h -P -F '#{pane_id}'`로 pane id를 받아 처리한다. (`rust-orc/src/tmux/mod.rs`와 동일하게 좌/우 분할 고정)
-- 각 워커 실행은 `orc send-tmux <worker_pane_id> "<명령>" enter`로 전달한다.
-- 워커 종료 시 `orc send-tmux <manager_pane_id> "<stage>:done|fail:<reason>" enter` 형식으로 회수한다.
+- 워커 pane은 `orc worker-create`로 생성하고, 이후 명령은 `orc worker-send`, 대기는 `orc worker-wait`, 종료는 `orc worker-close`만 사용한다.
+- 각 워커 실행은 `orc worker-send <worker_ref> "<명령>" enter`로 전달한다.
+- 워커 종료 시 worker 출력은 `worker:<pane_id>:done|fail:<reason>` 형식을 유지하되 manager 대기는 `orc worker-wait <worker_ref> "<pattern>" ...`로 회수한다.
 - worker가 `done`을 보낸 뒤 manager는 반드시 `job.md`를 다시 읽고 worker 보고와 현재 상태가 일치하는지 확인한다.
 - manager 검증 순서는 고정한다: `job.md 재확인 -> e2e 실행 -> ./.project/captures/ 스크린샷 저장 -> 스크린샷 확인 -> 완료/실패 판정`.
 - UI 작업은 e2e와 스크린샷 확인이 둘 다 끝나기 전까지 완료로 처리하면 안 된다.
+- 상태 변화 기능은 manager가 `render verified`와 `state-change verified`를 구분해 기록해야 하며, 전자만으로는 완료 처리하지 않는다.
 - manager 검증이 실패하면 manager가 `job.md`를 새 실패 상태 기준으로 갱신하고, 남은 문제를 적은 뒤 새 worker pane을 열어 같은 과정을 반복한다.
 - 실패 시 갱신된 `job.md`에는 최소 `worker 완료 보고 요약`, `manager 실패 단계`, `남은 문제`, `다음 worker 작업`, `재검증 기준`이 있어야 한다.
-- 아래 상황이 발생하면 `/home/tree/ai/codex/script/orc_recursive_improve.sh <root> <task-name> "<plan 요청>"`으로 재귀 개선 루프를 즉시 실행한다.
+- 아래 상황이 발생하면 `job.md`에 실패 원인과 다음 조치를 기록한 뒤 `/plan` 재진입 + 고정 ORC 체인 재실행으로 재귀 개선 루프를 즉시 실행한다.
 - 트리거: 순서 위반, 단계 실패, 테스트 실패, 새 실패 원인 발견.
-- 재귀 개선 루프 성공 기준: `job.md` 생성/유지 + `#task` 고정 + `/home/tree/ai/codex/script/orc_gate_preflight.sh` 통과.
+- 재귀 개선 루프 성공 기준: `job.md` 생성/유지 + `#task` 고정 + Git preflight 통과.
 - 재귀 개선 루프의 실행 체인은 고정한다: `orc init_orc_job|create_job_md -> orc add_orc_drafts -> orc impl_orc_code(병렬) -> orc check_orc_code -> orc clit test -p . -m "<task>"`.

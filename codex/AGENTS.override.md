@@ -48,6 +48,9 @@
 - `current.png`는 기본적으로 `/mnt/c/Users/tende/Pictures/Screenshots/current.png`로 바로 처리하고, 저장소 전체 검색은 사용자 후속 요청이 있을 때만 한다.
 - 사용자가 `current.png`로 UI 문제를 지적한 턴에서는 test 산출 스크린샷만으로 완료 판정을 내리지 않는다. `current.png`에 보인 레이아웃 실패 조건을 직접 체크리스트로 적고, 수정 후 같은 조건이 사라졌는지 기준으로만 완료를 판단한다.
 - 사용자가 `current.png에 있는 것처럼 하라`고 지시하면, 같은 턴의 `current.png`는 문제 예시가 아니라 목표 배치 설계도로 취급한다. 이 경우 완료 기준은 `current.png`와의 레이아웃 유사성`이며, assistant가 스스로 더 낫다고 판단한 배치로 치환하면 안 된다.
+- 사용자가 `current.png`로 UI를 지적하면, 이미지에 보인 에셋/라벨/버튼/그룹/툴바의 상대 위치를 우선 보존한다. 상하/좌우/포함/동일 컨테이너/헤더-리스트-item 계층 관계를 임의로 바꾸면 사용자 원문 위반으로 처리한다.
+- 사용자가 `A 아래에 B가 보이게`, `A 안에 B를 넣어`, `A 밑에 B를 추가`처럼 말하면 기본 해석은 `A 유지 + B 추가`다. A를 숨기거나 치환하거나 이름만 남기지 않는 해석은 금지한다.
+- 사용자가 제거를 명시하지 않았는데 기존 라벨/헤더/그룹명을 지우면 사용자 원문 위반으로 처리한다.
 ### 검색 요청
 - 검색 요청은 사용자가 지정한 파일/문구/경로 범위에서 가장 좁은 직접 검색만 먼저 실행하고, 첫 답변에는 존재 여부·정확한 hit 위치·검색 범위만 적는다.
 - 정확한 문자열이 주어졌으면 exact match만 수행하고, 0건이면 0건으로 끝낸다. 유사 문구·의미 확장·원인 추적은 후속 요청이 있을 때만 한다.
@@ -116,3 +119,12 @@
 - 첫 검증은 저장소 루트 기준 `rg` 전수 검색으로 시작하며, 완료 기준도 사용자가 지정한 primary pattern과 alias pattern을 `rg`로 검색했을 때 모두 0건인 상태뿐이다.
 - 사용자가 보존을 명시한 경로만 `rg` 예외로 제외할 수 있고, 그 외 임의 범위 축소는 금지한다.
 - 1건이라도 남아 있으면 완료 보고를 금지하고 `검색 -> 수정 -> 재검색` 루프를 계속 반복한다.
+
+## 2026-04-02 - ORC Worker API First
+- tmux worker pane orchestration은 `orc worker-create`, `orc worker-send`, `orc worker-wait`, `orc worker-close`만 표준으로 사용한다.
+- `tmux split-window ...` 직접 호출, `.project` 아래 worker 실행 스크립트 생성, `orc send-tmux` 기반 worker 조합은 worker 표준 경로에서 금지한다.
+- skill/설정/문서/코드 예시는 모두 위 worker API를 사용하도록 같은 턴에 동기화한다.
+
+## 2026-04-02 - ORC Manager Trace API First
+- `orc_manager` 흐름에서 trace 기록/검증은 shell script 호출이 아니라 `orc manager-trace`, `orc check-manager-trace` 명령을 표준으로 사용한다.
+- 위 shell script 경로는 남기지 않는다. 호출, 문서 언급, 파일 자체를 같은 턴에 제거하고 ORC 내부 명령만 남긴다.
