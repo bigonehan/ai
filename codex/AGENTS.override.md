@@ -20,7 +20,7 @@
 
 ### Recursive Improvement Loop Rule (Global)
 - 반복 위반 시 `codexo "/plan <원문 명령>"`으로 재계획 + preflight 재검증을 수행한다.
-- 실행 체인은 `orc create_job_md -> orc add_code_draft_item/add_code_draft -> orc impl_code_draft -> orc check_code_draft -> orc clit test -p . -m "<task>"`로 고정한다.
+- 실행 체인은 `orc create_job_md -> orc add_orc_drafts -> orc impl_orc_code -> orc check_orc_code`로 고정한다.
 - 성공 기준은 `job.md` 존재, `#task` 고정, ORC pipeline preflight 통과다.
 
 ### Request Summary Output Rule
@@ -83,7 +83,7 @@
 - 즉시 `/plan` 모드로 재진입해 현재 문제를 재정의하고, 루트 `job.md`의 `#task/#problems/#check`에 보완책을 먼저 기록한다.
 - `/plan` 요청에는 `원인` + `재발 조건` + `예방 검증 예제(정상 1개, 차단 1개 이상)` 기록 지시를 반드시 포함한다.
 - 보완책 기록 뒤 tmux 새 pane을 생성하고, 문제가 처음 발생한 사용자 원문 명령을 `codexo "/plan <원문 명령>"`으로 재실행한다.
-- 재실행 검증 체인은 `create_job_md -> add_code_draft_item/add_code_draft -> impl_code_draft -> check_code_draft -> clit test`로 고정한다.
+- 재실행 검증 체인은 `create_job_md -> add_orc_drafts -> impl_orc_code -> check_orc_code`로 고정한다.
 - 실패 시 `job.md`에 실패 원인/보완책을 추가하고 같은 루프를 반복한다.
 - 종료 조건은 원문 명령 재실행이 동일 검증 체인을 통과하는 경우로만 제한한다.
 
@@ -128,3 +128,9 @@
 ## 2026-04-02 - ORC Manager Trace API First
 - `orc_manager` 흐름에서 trace 기록/검증은 shell script 호출이 아니라 `orc manager-trace`, `orc check-manager-trace` 명령을 표준으로 사용한다.
 - 위 shell script 경로는 남기지 않는다. 호출, 문서 언급, 파일 자체를 같은 턴에 제거하고 ORC 내부 명령만 남긴다.
+
+## 2026-04-04 - ORC Manager Blocking Loop Guard
+- `orc_manager` 작업에서 사용자가 `성공할때까지`, `될때까지`, `끝까지`, `중간 승인 없이 계속`을 명시한 턴에는 explanation-only 종료를 금지한다.
+- 이 경우 `job.md#problems` 또는 `job.md##problems`에 blocking bullet이 남아 있거나 `job.md##verify`에 unchecked 항목이 남아 있으면 final 응답을 금지한다.
+- 위 종료 금지는 `scripts/check_orc_manager_completion_guard.sh`를 canonical gate로 사용한다.
+- `scripts/response_send_guard.sh`는 requirement_trace와 trace final 뿐 아니라 ORC manager completion guard도 통과해야 PASS다.
