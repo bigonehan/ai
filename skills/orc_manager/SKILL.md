@@ -34,6 +34,15 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 - 위 5줄은 요약문으로 축약하지 말고 사용자 원문 조건을 잃지 않는 수준으로 직접 적어야 한다.
 - 사용자 원문에 `별개`, `분리`, `유지`, `추가`, `처럼`, `말고`, `아니고`가 있으면 manager는 기존 구현 경로에 맞춰 축소 해석하면 안 된다.
 - manager는 `/plan` 진입 전에 위 5줄을 먼저 적고, 그 내용을 `job.md#input`, `job.md#output`, `job.md#keep`, `job.md#add`, `job.md#forbid`에 잠가야 한다.
+- manager는 plan 승인 전에 `job.md# hard gate`를 만들고 아래 하위 섹션을 채워야 한다.
+  - `## requirement_lock`
+  - `## forbidden_substitutions`
+  - `## verification_examples`
+- `## verification_examples`에는 아래 검증 예시 항목이 반드시 그대로 들어가야 한다.
+  - `md 저장 != 메모리 유지`
+  - `재시작 != reload`
+  - `실제 e2e != fixture, mock, real-equivalent`
+- 위 표가 없으면 plan 승인, preflight 통과, worker 생성이 모두 금지된다.
 - manager는 worker를 열기 전에 `job.md#check`에 아래 4종을 모두 만든다.
   - `input_output_checklist`: 각 `입력`이 어떤 `출력`으로 이어져야 하는지
   - `keep_checklist`: `유지` 대상이 구현 후에도 남아 있어야 한다는 항목
@@ -208,6 +217,12 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 - 그 다음에만 완료를 보고한다.
 
 ## 하드게이트
+- `job.md# hard gate`가 없으면 실패다.
+- `job.md## verification_examples`에 아래 3줄이 없으면 실패다.
+  - `md 저장 != 메모리 유지`
+  - `재시작 != reload`
+  - `실제 e2e != fixture, mock, real-equivalent`
+- 위 3줄 없이 plan 승인, preflight, worker 생성, completion 검증으로 넘어가면 실패다.
 - `입력 / 출력 / 유지 / 추가 / 금지` 5줄 분해 없이 사용자 요청을 구현 해석으로 넘기면 실패다.
 - `job.md#input/#output/#keep/#add/#forbid` 잠금 전에 `/plan`, `add_orc_drafts`, worker 생성으로 넘어가면 실패다.
 - `job.md#check`에 `input_output_checklist`, `keep_checklist`, `add_checklist`, `forbid_checklist`가 없으면 실패다.
