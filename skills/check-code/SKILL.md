@@ -40,6 +40,10 @@ description: "입력된 기능/목표 기준 체크리스트 생성 후 언어�
 - `real-equivalent`는 실제 persistence source를 사용하고, mock/stub 주입 없이 `reload`, `reopen`, `restart` 중 최소 1개를 포함한 검증에만 붙인다.
 - UI/웹 증상 해소 판정은 `data source=real` 또는 `execution=browser`가 확인된 실제 브라우저 검증으로만 내린다. `real-equivalent`는 저장/재진입 보조 근거로만 사용한다.
 - 사용자 원문에 `사라짐`, `재실행`, `종료 후`, `다시 열면`, `유지 안 됨`이 있으면 첫 검증 대상은 반드시 `persist -> read/load -> reload/re-entry` 경로여야 한다. 이 경로를 보기 전에 프런트 이벤트/렌더/부분 가설만 수정하고 완료 처리하면 검증 실패다.
+- 상태 소실 버그에서 `group`, `folder`, `section`, `category` 같은 구조 컨테이너가 있으면 `구조 메타데이터 저장`과 `실제 내용 저장`을 분리해서 검증한다. item이 0개여도 저장 source에 남아야 하는 group metadata가 있다면 이를 별도 persistence 항목으로 먼저 확인해야 한다.
+- 도메인에 `group`과 `item`이 함께 있고 `group만 있고 item 0개` 상태가 가능하면, 검증은 `non-empty item 저장`만으로 완료 처리하면 안 된다. `empty group metadata`가 실제 persistence source에 기록되고 restart/re-entry 뒤 다시 읽히는지 확인하지 않으면 검증 실패다.
+- 저장 source가 파일, markdown, DB, 설정 문서처럼 외부 source of truth인 경우, 브라우저 render·modal reopen·reload·in-memory state만으로 저장 성공을 판정하면 안 된다. 실제 persistence source 본문 또는 레코드가 바뀌었는지 먼저 확인해야 한다.
+- `reload`, `modal reopen`, `같은 프로세스 내 재조회`는 `restart`나 `앱 재실행`을 대체하지 않는다. 사용자 증상이 재시작 후 소실이라면 `restart != reload`를 하드게이트로 적용한다.
 - 사용자가 보고한 UI/상태변경 버그에서 `html.contains`, `js.contains`, 함수 존재 확인, selector 존재 확인 같은 정적 문자열 검증만으로 완료 처리하면 검증 실패다.
 - 사용자가 보고한 실제 증상과 대응되는 핵심 사용자 플로우는 반드시 `실행 순서` 그대로 검증한다. 예: `생성 -> 선택/입력 -> 저장 -> 재조회/재진입 -> 최종 상태 확인`.
 - 도메인에 `group`, `preset`, `slot`, `collection`, `list`처럼 항목 집합이 있으면 `empty 상태`를 별도 검증 축으로 다룬다.
@@ -107,6 +111,45 @@ description: "입력된 기능/목표 기준 체크리스트 생성 후 언어�
     - `rg -n "findIndex\\(|\\[[A-Za-z0-9_]+\\]|=== \\\"rules\\\"|=== \\\"constraints\\\"" src packages`
     - `rg -n "parse[A-Z]|resolve[A-Z]|read[A-Z]" src packages`
 
+## 파일 저장 공통 규칙
+- 파일 저장 관련 구현/검증에서는 아래 5축을 항상 한 세트로 다룬다.
+  - `write path`: 어떤 함수/핸들러가 persistence source를 실제로 쓰는지
+  - `persisted source`: 파일 본문이 실제로 바뀌었는지
+  - `read path`: 같은 source를 다시 읽는 함수/로더가 무엇인지
+  - `re-entry`: `reload`, `reopen`, `restart`, `read_data/load` 중 현재 증상과 맞는 재진입 경로가 무엇인지
+  - `negative-check`: empty 상태, 누락 필드, 구조 메타데이터만 존재하는 상태에서 깨지지 않는지
+- 파일 저장 검증에서는 위 5축 외에 아래 2축도 하드게이트로 다룬다.
+  - `final write wins`: 마지막 저장 caller가 앞선 정상 저장을 덮어쓰지 않는지
+  - `target file identity`: 사용자가 지정한 정확한 파일/경로와 같은 source를 검증했는지
+- 파일 저장 버그에서 첫 판단은 반드시 `UI 이벤트 문제`, `write path 문제`, `write 후 overwrite 문제`, `read path 문제` 중 어디인지 분류한다. 이 분류 없이 수정부터 하면 검증 실패다.
+- 파일 저장 구현을 수정할 때는 `write path`와 `read path`를 둘 다 `rg`로 남긴다. 저장 함수만 보고 로드 함수 확인 없이 완료 처리하면 검증 실패다.
+- persistence source가 파일이면 최종 판정 전에 반드시 실제 파일 경로와 파일 본문 일부를 남긴다. `파일이 저장됐을 것이다` 같은 간접 보고는 검증 실패다.
+- 사용자가 특정 파일명/경로를 준 경우 그 파일이 completion source of truth다. temp file, 다른 sandbox path, fixture path로만 통과시키면 검증 실패다.
+- 특정 파일 경로를 자동화하기 어렵다면 즉시 실패로 끝내지 말고, 같은 경로를 실제로 쓰는 `real-equivalent` 테스트/CLI 경로를 추가하거나 찾아서 `write -> persisted file -> read/re-entry`를 증명해야 한다.
+- 파일 저장 검증 보고에는 최소 아래 8개를 함께 남긴다.
+  - `target_file=<path>`
+  - `write_path=<function or command>`
+  - `final_write_path=<last function or command>`
+  - `read_path=<function or command>`
+  - `persisted_snippet=<saved content or record evidence>`
+  - `reentry_path=<reload|reopen|restart|read_data/load>`
+  - `source=<real|real-equivalent|fixture|mock>`
+  - `target_file_identity=<user path|job locked equivalent>`
+- `write path`가 정상이어도 같은 프로세스 종료 직전/후속 저장에서 상태가 잘려 overwrite 될 수 있으면 `final write wins` 경로를 별도로 점검한다. 마지막 저장 caller를 보지 않으면 검증 실패다.
+- 메모리 상태와 파일 직렬화 포맷이 다르면 `serialize before write` 경로를 별도로 점검한다. 메모리에는 있는데 직렬화 payload에서 빠지는 필드는 저장 성공으로 간주하면 안 된다.
+- 파일 구조에 `group`, `section`, `header`, `folder`, `category` 같은 구조 메타데이터가 있으면 `content 저장`과 `structure metadata 저장`을 분리 검증한다.
+- `group만 있고 item 0개`가 가능한 파일 포맷이면 empty metadata 케이스를 하드게이트로 넣는다. `item이 없는 group`이 파일에 남아야 하는 도메인인데 이 검증이 없으면 실패다.
+- 저장 후 재진입 검증은 가능한 경우 아래 순서를 그대로 사용한다.
+  - `입력/생성 -> 저장 트리거 -> 파일 본문 확인 -> 프로세스 경계 또는 동등 재진입 -> 같은 파일 다시 읽기 -> 최종 상태 확인`
+- 이전에 같은 저장 버그를 놓친 적이 있는 턴이면 검증 보고에 반드시 아래 두 줄을 추가한다.
+  - `previous_miss=<이전 검증이 놓친 축 1개>`
+  - `overwrite_guard=<이번에는 어떤 overwrite/re-entry 경로까지 확인했는지>`
+- `launch timeout`, `window stayed open`, `HTTP 200`, `browser opened`, `process alive`는 파일 저장/재시작 검증 근거가 아니다. 이런 표현만 있으면 검증 실패다.
+- 사용자 원문이 구체 파일/경로를 지정했는데 `target_file_identity`가 그 경로와 다르면 검증 실패다. 동등 경로를 쓰려면 사전에 `job.md`에 잠겨 있어야 한다.
+- `real-equivalent`는 사용자가 지정한 target file을 직접 쓰거나, 사전에 잠근 동등 경로를 write/read/re-entry에 모두 사용한 경우에만 허용한다. temp markdown만 바꾼 경우는 `real-equivalent`로 기록하면 안 된다.
+- 종료/닫기/save-on-close/save_state 같은 후속 저장이 있는 도메인에서 마지막 저장 caller를 재실행하지 않았다면 검증 실패다.
+- 반복된 저장 버그에서는 `previous_miss`와 `overwrite_guard`가 없으면 검증 실패다.
+
 ## 테스트 워크 플로우 
 - 먼저 `drafts.yaml` 내부의 `item`들을 순회하면서 `drafts_item.yaml`에서 `constraints`기능/목표를 읽는다.
 - 위 입력과 `job.md#task#verify`, `job.md#problems`를 바탕으로 검증 체크리스트를 구성하고 `.job.md#check`에 item 들을 더한다 
@@ -125,8 +168,20 @@ description: "입력된 기능/목표 기준 체크리스트 생성 후 언어�
   - `non-empty 기준 정상 플로우`
   - `empty 기준 경계 플로우`
   둘 중 하나라도 빠지면 저장 구조의 누락을 놓칠 수 있으므로 검증 실패로 본다.
+- `group create`, `group rename`, `group delete`처럼 item과 분리된 구조 변경이 있으면 각각을 별도 저장 검증 대상으로 다룬다. item 저장 테스트 하나로 group metadata 저장까지 통과한 것으로 간주하면 검증 실패다.
+- 상태소실/재진입 버그의 검증 보고에는 반드시 아래 둘을 함께 남긴다.
+  - `실제 소실 지점 1개`
+  - `이전 검증이 왜 틀렸는지 1개`
+- `real-equivalent`는 저장 source write와 read/load가 확인된 재진입 보조 근거로만 사용한다. persistence source 변경 확인이 없으면 `real-equivalent verified`로 기록하면 안 된다.
 - `unit only pass`, `fixture only pass`, `real-equivalent verified`, `real runtime verified`를 분리 기록한다. UI/웹 완료 처리는 `real runtime verified`만 허용하고, `real-equivalent verified`는 persistence/re-entry 보조 판정으로만 사용한다.
 - `negative_checklist`에는 최소 한 항목 이상 있어야 하며, 없으면 검증 실패다.
+- 파일 저장 작업이면 체크리스트에 아래 공통 항목을 기본 포함한다.
+  - `${저장 입력} -> ${대상 파일 본문 변경} : write path가 실제 target file을 갱신해야 한다`
+  - `${마지막 저장 caller 실행} -> ${앞선 정상 저장 내용 유지} : final write wins 경로가 overwrite하지 않아야 한다`
+  - `${저장 완료 후 재진입} -> ${같은 파일에서 동일 상태 복원} : read path가 persisted source를 다시 읽어야 한다`
+  - `${empty metadata 상태 저장} -> ${구조 메타데이터 유지} : group/section/header metadata가 item 0개여도 남아야 한다`
+  - `${이전 누락 경로 재실행} -> ${동일 overwrite/serialize 누락 재발 없음} : previous_miss 축을 다시 밟아야 한다`
+  - `${사용자 지정 파일 검증} -> ${같은 target file/path에서 증거 확보} : target file identity가 일치해야 한다`
 
 # 완료 처리 
 - 완료 시 해결된 항목은 `.job.md#task#verify` 에서 `.job.md#task#complete`로 이동 

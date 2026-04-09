@@ -38,11 +38,28 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
   - `## requirement_lock`
   - `## forbidden_substitutions`
   - `## verification_examples`
+- 사용자 원문에 `저장`, `파일`, `md`, `markdown`, `사라짐`, `종료 후`, `다시 열기`, `재시작`, `유지`, 구체 파일명, 구체 경로가 있으면 아래 섹션도 추가로 잠가야 한다.
+  - `## persistence_target_lock`
+  - `## overwrite_risk_lock`
+- 같은 저장/재진입 증상을 사용자가 2회 이상 반복 지적했으면 아래 섹션도 추가로 잠가야 한다.
+  - `## previous_miss_lock`
 - `## verification_examples`에는 아래 검증 예시 항목이 반드시 그대로 들어가야 한다.
   - `md 저장 != 메모리 유지`
   - `재시작 != reload`
   - `실제 e2e != fixture, mock, real-equivalent`
 - 위 표가 없으면 plan 승인, preflight 통과, worker 생성이 모두 금지된다.
+- `## persistence_target_lock`에는 최소 아래를 적어야 한다.
+  - 사용자가 지정한 정확한 target file/path 또는 target file identity
+  - target file을 대체할 수 있는 경로가 있는지 여부
+  - 대체 경로가 허용된다면 왜 사용자 요구와 동등한지
+- `## overwrite_risk_lock`에는 최소 아래를 적어야 한다.
+  - 최초 write path
+  - 마지막 write caller
+  - read/load path
+  - re-entry path
+- `## previous_miss_lock`에는 최소 아래를 적어야 한다.
+  - `previous_miss=<이전 검증이 놓친 축>`
+  - `next_guard=<이번에 반드시 다시 밟아야 하는 overwrite/re-entry 경로>`
 - manager는 worker를 열기 전에 `job.md#check`에 아래 4종을 모두 만든다.
   - `input_output_checklist`: 각 `입력`이 어떤 `출력`으로 이어져야 하는지
   - `keep_checklist`: `유지` 대상이 구현 후에도 남아 있어야 한다는 항목
@@ -138,6 +155,13 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 7.2. 사용자 원문 항목 하나라도 대응 checklist 줄이 없으면 브라우저 실행 전에 실패로 되돌린다.
 8. 저장/삭제/생성/수정처럼 상태가 바뀌는 기능은 `접속 -> 입력/클릭 -> 상태 변화 트리거 -> reload/reopen 또는 동등 재조회 -> selector/assert 확인`까지 포함한다.
 8.0. 상태 변화 작업이면 QA session은 결과를 `render`, `mutation`, `persistence`, `re-entry`, `negative-check` 다섯 축으로 나눠 기록해야 한다.
+8.0.1. 사용자 원문이 구체 파일/경로를 지정한 저장 작업이면 QA session은 반드시 아래도 함께 기록해야 한다.
+   - `target_file`
+   - `write_path`
+   - `final_write_path`
+   - `read_path`
+   - `persisted_snippet`
+   - `reentry_path`
 8.1. 사용자가 `A 아래 B 표시`처럼 기존 요소 유지 + 하위 요소 추가를 요구한 경우, QA session은 최소한 아래 두 가지를 따로 확인해야 한다.
    - 기존 요소 A가 그대로 보이는지
    - 새 요소 B가 A의 하위 영역에 실제로 보이는지
@@ -153,18 +177,21 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
    - 직접 주입한 객체나 stub만으로 검증했으면 `source=mock`
 12. 사용자가 보고한 실제 증상 해소 판정은 `source=real|real-equivalent` 결과로만 할 수 있다. `source=fixture|mock` 성공은 보조 근거일 뿐 완료 조건이 아니다.
 13. 사용자 원문에 `재시작`, `다시 열기`, `사라짐`, `초기화`, `유지`가 있으면 QA session은 반드시 `re-entry` 축을 채워야 하며, 없으면 실패다.
+14. 사용자 원문이 구체 파일/경로를 지정한 저장 작업이면 temp file, 다른 sandbox path, generic temp markdown만으로 QA 성공 처리하면 안 된다. 같은 파일을 직접 쓰거나, `job.md#persistence_target_lock`에 잠근 동등 경로만 허용된다.
+15. `launch timeout`, `app stayed open`, `HTTP 200`, `window opened`, dev URL 생존만으로 `restart` 또는 `save verified`를 기록하면 실패다.
+16. 종료 직전 저장/후속 저장이 있는 도메인이면 QA session은 `final write wins` 경로를 별도로 점검해야 한다. 첫 저장 성공만 보고 완료 처리하면 실패다.
 
 ## Check Session 루프
 1. manager session은 구현/QA 결과를 회수한 뒤 check 전용 tmux session을 새로 만든다.
 2. manager session은 check session을 열기 전에 `orc check-manager-trace check`를 통과해야 한다.
 3. check session은 시작 즉시 `job.md`를 읽고 `# problems`, `# check`, `## verify`를 확인한다.
-4. check session은 반드시 `check-code` skill을 읽고 그 기준으로 점검을 수행한다.
-5. manager session은 check worker 시작 전에 `check-code` skill 사용 지시를 명시하고, 회수한 결과에서 check worker가 그 기준을 따랐는지만 확인한다.
-5.1. check session은 `job.md#input/#output/#keep/#add/#forbid/#symptom/#success`를 source of truth로 다시 읽고, `# check` 각 줄이 어느 사용자 요구를 검증하는지 1:1 대응을 점검해야 한다.
-5.2. `forbid`에서 파생된 반증 검증이 `negative_checklist`에 없으면 실패다.
-5.3. `input/output` 기준 검증이 없이 유닛테스트 통과, 구현 함수 호출, 내부 로그만 있으면 실패다.
-6. tmux worker wrapper 또는 manager는 check 시작/완료 시 `stage_check_session_started`, `stage_check_done` trace를 남겨야 한다.
-7. check session 완료 메시지 형식은 고정한다.
+4. manager session은 check worker에 보내는 `worker-send` 명령 본문 안에 아래 지시를 직접 넣어야 한다.
+   - `반드시 /home/tree/ai/skills/check-code/SKILL.md를 읽고 그 기준만으로 점검하라.`
+   - `job.md#input/#output/#keep/#add/#forbid/#symptom/#success를 다시 읽고 #check 각 줄을 사용자 요구와 1:1 대응시켜라.`
+   - `forbid에서 파생된 반증 검증이 negative_checklist에 없으면 실패로 남겨라.`
+   - `input/output 기준 검증 없이 유닛테스트 통과, 구현 함수 호출, 내부 로그만 있으면 실패로 남겨라.`
+5. tmux worker wrapper 또는 manager는 check 시작/완료 시 `stage_check_session_started`, `stage_check_done` trace를 남겨야 한다.
+6. check session 완료 메시지 형식은 고정한다.
   - 성공: `worker:<session_name>:done:check=<report>`
   - 실패: `worker:<session_name>:fail:check=<reason>`
 
@@ -178,7 +205,6 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
   - `orc worker-dev-url <worker_ref|pane_id>` 결과와 worker 보고 URL 일치 여부 확인
   - QA session 시연 결과 확인
   - check session 점검 결과 확인
-  - check worker가 `check-code` skill 기준으로 점검했는지 확인
   - 남아 있는 `# problems` 확인
   - `## verify`가 남아 있는지 확인
   - 개선 필요 여부 판단
@@ -186,6 +212,15 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 - manager session은 최종 결과가 `job.md#output`과 일치하는지, `job.md#keep`을 훼손하지 않았는지, `job.md#forbid` 위반이 없는지 따로 대조해야 한다.
 - manager session은 `qa=<report>`와 `check=<report>` 안에 `input/output/keep/add/forbid` 대응 결과가 모두 있는지 확인해야 하며, 구현 세부사항만 있고 사용자 요구 문장이 빠져 있으면 실패로 되돌려야 한다.
 - manager session은 `symptom reproduced`, `symptom cleared`, `re-entry verified`, `negative-check passed` 네 항목을 별도로 확인해야 하며, 하나라도 비면 완료 처리하면 안 된다.
+- manager session은 저장 관련 작업에서 아래 3가지를 별도로 확인해야 한다.
+  - `target_file_verified`
+  - `final_write_verified`
+  - `same_source_reentry_verified`
+- 사용자가 구체 파일/경로를 지정했으면 manager session은 QA/check 보고에서 같은 경로가 직접 확인됐는지 대조해야 한다. 다른 경로 증거만 있으면 실패로 되돌려야 한다.
+- manager session은 `persisted_snippet` 또는 동등한 target file 본문 증거 없이 저장 성공으로 판정하면 안 된다.
+- manager session은 `launch timeout`, `window stayed open`, `HTTP 200`, `generic restart-focused coverage`, `temp markdown pass`를 `stage_restart_path_verified`의 근거로 받아들이면 안 된다.
+- manager session은 `last writer`, `serialize before write`, `final write caller` 중 하나라도 비어 있으면 종료 전에 impl 또는 qa/check로 되돌려야 한다.
+- 같은 저장 증상이 반복된 턴에서는 manager session이 `previous_miss`와 `next_guard`를 `job.md`와 QA/check 보고에서 모두 재확인해야 한다. 둘 중 하나라도 없으면 실패다.
 - manager session은 사용자가 명시한 기존 요소가 구현 중 사라지지 않았는지 반드시 확인해야 한다. `추가 표시` 요구를 `기존 요소 대체`로 처리했으면 즉시 실패로 되돌린다.
 - manager session은 실패 원인을 재판단할 때 필요하면 `orc capture-pane <pane_id> 120`으로 각 session의 최근 로그를 회수한다.
 - manager session은 `worker-wait` 패턴으로 일반 `worker:` 문자열을 사용하면 안 된다. worker 명령 안에서 `marker=$(printf '__ORC_%s__' DONE)`처럼 동적으로 만든 sentinel만 대기한다.
@@ -214,6 +249,13 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 - `job.md`의 `## verify` 항목이 모두 비었다.
 - improve session이 `non_blocking`만 보고했거나, 1회 재진입 후 blocking issue가 해소됐다.
 - `stage_input_locked`, `stage_output_locked`, `stage_keep_locked`, `stage_add_locked`, `stage_forbid_locked`, `stage_symptom_locked`, `stage_success_locked`, `stage_restart_path_verified`, `stage_negative_check_passed` trace가 모두 존재한다.
+- 저장 관련 작업이면 아래도 모두 충족해야 한다.
+  - `job.md#persistence_target_lock`이 채워져 있다.
+  - target file/path identity가 QA/check evidence와 일치한다.
+  - `target_file_verified`, `final_write_verified`, `same_source_reentry_verified`가 manager 재확인 detail에 모두 들어 있다.
+- 같은 저장 증상이 반복된 턴이면 아래도 모두 충족해야 한다.
+  - `job.md#previous_miss_lock`이 채워져 있다.
+  - `previous_miss`와 `next_guard`가 QA/check evidence에 다시 나온다.
 - 그 다음에만 완료를 보고한다.
 
 ## 하드게이트
@@ -222,6 +264,8 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
   - `md 저장 != 메모리 유지`
   - `재시작 != reload`
   - `실제 e2e != fixture, mock, real-equivalent`
+- 사용자 원문이 구체 파일/경로를 지정한 저장 작업인데 `job.md## persistence_target_lock`이 없으면 실패다.
+- 같은 저장/재진입 증상을 반복 지적한 턴인데 `job.md## previous_miss_lock`이 없으면 실패다.
 - 위 3줄 없이 plan 승인, preflight, worker 생성, completion 검증으로 넘어가면 실패다.
 - `입력 / 출력 / 유지 / 추가 / 금지` 5줄 분해 없이 사용자 요청을 구현 해석으로 넘기면 실패다.
 - `job.md#input/#output/#keep/#add/#forbid` 잠금 전에 `/plan`, `add_orc_drafts`, worker 생성으로 넘어가면 실패다.
@@ -239,7 +283,13 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 - 구현 후 dev 서버 유지와 QA 시연 검증을 생략하면 실패다.
 - check session을 생략하면 실패다.
 - QA/check 결과에 `input/output/keep/add/forbid` 대응이 하나라도 빠지면 실패다.
+- 저장 관련 작업에서 QA/check 결과에 `target_file`, `write_path`, `final_write_path`, `read_path`, `persisted_snippet`, `reentry_path` 중 하나라도 빠지면 실패다.
+- 사용자 원문이 구체 파일/경로를 지정했는데 temp file, generic temp markdown, 다른 sandbox path 증거만으로 `stage_restart_path_verified`를 찍으면 실패다.
+- `launch timeout`, `window stayed open`, `HTTP 200`, `generic re-entry coverage`만으로 `stage_restart_path_verified`를 찍으면 실패다.
+- `target_file_verified`, `final_write_verified`, `same_source_reentry_verified` 확인 없이 `stage_manager_reverified`를 찍으면 실패다.
+- 같은 저장 증상이 반복된 턴에서 `previous_miss`와 `next_guard` 재확인 없이 완료 처리하면 실패다.
 - improve session의 `blocking|non_blocking` 분류 없이 종료하면 실패다.
+- 저장 관련 반복 버그에서 target file 증거 또는 final-write 증거가 비어 있는데 improve 결과를 `non_blocking`으로 받으면 실패다.
 - improve 결과가 `non_blocking`인데 구현 루프를 다시 열면 실패다.
 - improve 결과가 `blocking`인데 사용자 명시적 반복 지시가 없는 상태로 재진입을 2회 이상 반복하면 실패다.
 - 완료 보고 전에 `orc check-manager-trace final`이 통과하지 않으면 실패다.
@@ -249,5 +299,4 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 
 ## 권장 조합
 - ORC 세부 실행은 `orc-cli-workflow` skill 규칙을 함께 따른다.
-- 코드 점검은 `check-code` skill과 함께 사용한다.
 - UI/웹 기능 시연 검증은 `playwright-cli` skill 또는 동등한 브라우저 자동화 규칙과 함께 사용한다.
