@@ -89,7 +89,8 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 - manager session은 직접 `orc impl_*`, `orc check_*`, dev 서버 실행, 브라우저 시연을 하지 않는다.
 - manager session은 새 tmux session 생성과 상태 회수만 담당한다.
 - session 간 명령 전달과 대기는 `orc worker-create`, `orc worker-send`, `orc worker-wait`, `orc worker-close`만 사용한다.
-- manager session은 worker를 열기 전에 `orc cli_help`가 최소 `worker-create [name]`, `worker-send ...|--stdin`를 보여 주는지 확인해야 한다. 불일치하면 `cargo install --path /home/tree/project/mono_Manager --bin orc --force`를 먼저 실행한다.
+- manager/worker orchestration 중 임시 `*.sh` wrapper 생성, 새 shell script 산출, 직접 tmux pane 명령 호출, legacy pane-send 조합은 금지한다.
+- manager session은 worker를 열기 전에 `orc cli_help`가 최소 `worker-create [name]`, `worker-send ...|--stdin`, `run-preflight [gate|pipeline]`, `check-requirement-trace [job.md]`, `response-send-gate [--text <response>]`를 보여 주는지 확인해야 한다. 불일치하면 `cargo install --path /home/tree/project/rust-write --bin orc --force`를 먼저 실행한다.
 - session 이름에는 역할이 드러나야 한다.
   - 예: `impl-<task>`, `qa-<task>`, `check-<task>`, `improve-<task>`
 
@@ -229,6 +230,7 @@ description: 사용자의 요구를 먼저 /plan으로 정리한 뒤, manager se
 - manager session은 `source=fixture|mock` 인 QA 성공 메시지를 받으면 즉시 실제 실행 검증 누락으로 재분류해야 한다.
 - manager session은 `stage_restart_path_verified`, `stage_negative_check_passed` trace가 없으면 `stage_manager_reverified`를 기록하면 안 된다.
 - manager session은 `job.md` 재확인까지 끝난 뒤 `orc manager-trace stage_manager_reverified "<detail>"`를 기록해야 한다.
+- manager session은 완료 직전 `orc check-requirement-trace [job.md]`를 먼저 통과시키고, 최종 응답 본문은 `orc response-send-gate --text "<response>"`로 다시 검증해야 한다.
 
 ## 개선 탐색 Session 루프
 - 기본 구현/점검 루프가 끝난 뒤 manager session은 개선 탐색용 새 tmux session을 다시 연다.

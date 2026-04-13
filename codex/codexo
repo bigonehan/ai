@@ -252,7 +252,7 @@ PY
 run_prompt_orc_flow() {
   local original_prompt="$1"
   local plan_prompt="/plan ${original_prompt}"
-  local manager_pane worker_pane attempt max_retry project_name spec task_key test_ok
+  local manager_pane worker_ref marker worker_cmd attempt max_retry project_name spec task_key test_ok
   max_retry="${ORC_RETRY_MAX:-0}"
   project_name="$(printf '%s' "$original_prompt" | tr '[:space:]/' '-' | tr -cd '[:alnum:]-' | sed 's/--*/-/g; s/^-//; s/-$//' | cut -c1-32)"
   [[ -n "$project_name" ]] || project_name="auto-task"
@@ -266,12 +266,18 @@ run_prompt_orc_flow() {
   command -v orc >/dev/null 2>&1 || { echo "[codex-orc] FAIL: orc not found"; exit 1; }
 
   manager_pane="$(tmux display-message -p '#{pane_id}')"
-  worker_pane="$(tmux split-window -h -P -F '#{pane_id}' -c "$PWD")"
-  echo "[codex-orc] manager=${manager_pane} worker=${worker_pane}"
-
-  tmux send-keys -t "$worker_pane" "cd \"$PWD\" && \"$REAL_CODEX\" exec \"$plan_prompt\"" C-m
-  wait_for_pane_idle "$worker_pane" 1200 || true
-  tmux kill-pane -t "$worker_pane" >/dev/null 2>&1 || true
+  worker_ref="$(orc worker-create codexo-plan)"
+  marker="__CODEXO_PLAN_DONE_${$}_$(date +%s)__"
+  echo "[codex-orc] manager=${manager_pane} worker=${worker_ref}"
+  worker_cmd="$(cat <<EOF
+cd "$PWD"
+"$REAL_CODEX" exec "$plan_prompt"
+printf '%s\n' "$marker"
+EOF
+)"
+  printf '%s' "$worker_cmd" | orc worker-send "$worker_ref" --stdin enter >/dev/null
+  orc worker-wait "$worker_ref" "$marker" 120000 200 >/dev/null || true
+  orc worker-close "$worker_ref" >/dev/null 2>&1 || true
 
   if [[ ! -f "$PWD/.project/project.md" ]]; then
     (cd "$PWD" && orc init_orc_project -n "$project_name" -s "$spec" -d "$spec" -a >/dev/null 2>&1 || true)
@@ -344,8 +350,8 @@ case "$first" in
     ;;
 esac
 
-PREFLIGHT_PROMPT=$'작업 시작 전에 전역설정을 먼저 읽고 준수해.\n그 다음 `scripts/orc_gate_preflight.sh .`를 실행해서 절차 준수 여부를 확인해.'
-echo "[codex-preflight] 전역설정 읽기 + orc_gate_preflight 실행 지시 주입"
+PREFLIGHT_PROMPT=$'작업 시작 전에 전역설정을 먼저 읽고 준수해.\n그 다음 ORC 내부 명령으로 절차를 확인해: `orc init_orc_job`, `orc check-manager-trace preflight`, `orc check-manager-completion job.md`.'
+echo "[codex-preflight] 전역설정 읽기 + ORC 내부 preflight 확인 지시 주입"
 
 case "$first" in
   review|resume|fork)

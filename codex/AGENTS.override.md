@@ -44,6 +44,13 @@
 - 내부 우선순위는 항상 `현재 사용자 원문 > 삭제/수정 같은 작업 전용 강제 규칙 > 일반 검색/출력/편의 규칙` 순서다.
 - 삭제/제거 작업에서는 `이 규칙이 사용자 원문을 덮어쓰는가`, `이 규칙 때문에 범위가 좁아지는가`, `이 규칙 때문에 검증 강도가 약해지는가`를 먼저 점검하고, 하나라도 해당하면 사용자 원문 기준으로 재결정한다.
 
+### Priority Fail-Closed Rule
+- 사용자 원문이나 저장된 규칙에 `전부`, `모두`, `전체`, `legacy 제거`, `남김없이`, `같은 턴에 전부 수정`이 있으면 부분 완료 판단을 금지한다.
+- 이 경우 assistant는 주경로만 고치고 종료하면 안 된다. 관련 코드, helper, 문서, 스킬, 검증 경로, 생성 산출물까지 같은 턴에 전수 반영해야 한다.
+- 완료 판정은 `잔존 항목 전수 검색 결과 0건` 또는 그와 동등한 강한 증빙이 있는 경우만 허용한다.
+- 위 증빙이 없으면 설명, 요약, 부분 성공, 핵심 경로 수정 같은 표현으로 종료를 시도하면 안 된다.
+- 사용자 지적이 `우선순위`, `범위 축소`, `왜 종료했냐` 류면 분석 응답을 금지하고, 먼저 우선순위 규칙과 해당 저장소 규칙을 같은 턴에 갱신한 뒤 작업을 재개한다.
+
 ### 스크린샷 언급 
 - `current.png`는 기본적으로 `/mnt/c/Users/tende/Pictures/Screenshots/current.png`로 바로 처리하고, 저장소 전체 검색은 사용자 후속 요청이 있을 때만 한다.
 - 사용자가 `current.png`로 UI 문제를 지적한 턴에서는 test 산출 스크린샷만으로 완료 판정을 내리지 않는다. `current.png`에 보인 레이아웃 실패 조건을 직접 체크리스트로 적고, 수정 후 같은 조건이 사라졌는지 기준으로만 완료를 판단한다.
@@ -122,15 +129,28 @@
 
 ## 2026-04-02 - ORC Worker API First
 - tmux worker pane orchestration은 `orc worker-create`, `orc worker-send`, `orc worker-wait`, `orc worker-close`만 표준으로 사용한다.
-- `tmux split-window ...` 직접 호출, `.project` 아래 worker 실행 스크립트 생성, `orc send-tmux` 기반 worker 조합은 worker 표준 경로에서 금지한다.
+- 직접 tmux pane 명령 호출, `.project` 아래 worker 실행 스크립트 생성, legacy pane-send 조합은 worker 표준 경로에서 금지한다.
 - skill/설정/문서/코드 예시는 모두 위 worker API를 사용하도록 같은 턴에 동기화한다.
 
 ## 2026-04-02 - ORC Manager Trace API First
 - `orc_manager` 흐름에서 trace 기록/검증은 shell script 호출이 아니라 `orc manager-trace`, `orc check-manager-trace` 명령을 표준으로 사용한다.
 - 위 shell script 경로는 남기지 않는다. 호출, 문서 언급, 파일 자체를 같은 턴에 제거하고 ORC 내부 명령만 남긴다.
 
+## 2026-04-11 - ORC Internal Functions Only
+- ORC 작업에서는 임시 `*.sh` wrapper 생성, 새 shell script 산출, 직접 tmux pane 명령 호출, legacy pane-send 조합을 금지한다.
+- 허용 경로는 ORC 내부 함수만이다: `orc worker-create`, `orc worker-send`, `orc worker-wait`, `orc worker-close`, `orc manager-trace`, `orc check-manager-trace`, `orc check-manager-completion`.
+- 코드, 스킬, 규칙 문서, helper wrapper가 위 원칙과 어긋나면 같은 턴에 전부 수정한다.
+
+## 2026-04-11 - After Check Regulation Hard Gate
+- 모든 작업은 완료 직전 `after-check-regulation` 스킬을 의무적으로 사용한다.
+- 이 스킬은 `/home/tree/ai/codex/AGENTS.override.md`의 우선순위/범위/완료 판단 규칙을 source of truth로 읽고 PASS/FAIL을 판정해야 한다.
+- 이 스킬은 `/home/tree/.codex/skills/after-check-regulation/references/override-hard-gate.md`의 체크리스트를 반드시 수행해서 체크한 뒤에만 PASS/FAIL을 낼 수 있다.
+- `after-check-regulation: PASS` 없이 `final` 응답을 전송하면 규칙 위반이다.
+- `after-check-regulation: FAIL`이면 final 금지, 실패 규칙을 기준으로 같은 턴에서 즉시 수정 루프를 재개한다.
+- 사용자 원문에 `전부`, `모두`, `전체`, `legacy 제거`, 우선순위 비판, 조기 종료 비판이 있으면 이 스킬은 hard fail-closed 게이트로 동작한다.
+
 ## 2026-04-04 - ORC Manager Blocking Loop Guard
 - `orc_manager` 작업에서 사용자가 `성공할때까지`, `될때까지`, `끝까지`, `중간 승인 없이 계속`을 명시한 턴에는 explanation-only 종료를 금지한다.
 - 이 경우 `job.md#problems` 또는 `job.md##problems`에 blocking bullet이 남아 있거나 `job.md##verify`에 unchecked 항목이 남아 있으면 final 응답을 금지한다.
-- 위 종료 금지는 `scripts/check_orc_manager_completion_guard.sh`를 canonical gate로 사용한다.
-- `scripts/response_send_guard.sh`는 requirement_trace와 trace final 뿐 아니라 ORC manager completion guard도 통과해야 PASS다.
+- 위 종료 금지는 `orc check-manager-completion [job.md]`를 canonical gate로 사용한다.
+- `orc response-send-gate`는 requirement_trace와 trace final 뿐 아니라 ORC manager completion guard도 통과해야 PASS다.

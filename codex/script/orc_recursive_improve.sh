@@ -14,7 +14,6 @@ CHECK_LOG_FILE="${ROOT_DIR}/job.md"
 CHECK_LOG_SECTION="## orc_recursive_log"
 GLOBAL_OVERRIDE_FILE="/home/tree/ai/codex/AGENTS.override.md"
 SCRIPT_HOME="/home/tree/ai/codex/script"
-PRECHECK_SCRIPT="${SCRIPT_HOME}/orc_gate_preflight.sh"
 LOCK_SCRIPT="${SCRIPT_HOME}/orc_task_lock.py"
 CODEX_CMD="${CODEX_CMD:-codex}"
 CLIT_MODE="${ORC_CLIT_MODE:-gate_priority_recursive_improve}"
@@ -65,13 +64,15 @@ load_gate_inputs() {
     cat "${LOCAL_RULE_FILE}" >/dev/null || fail "failed to read local rule: ${LOCAL_RULE_FILE}"
   fi
   cat "${CONFIG_FILE}" >/dev/null || fail "failed to read config: ${CONFIG_FILE}"
-  cat "${PRECHECK_SCRIPT}" >/dev/null || fail "failed to read precheck script: ${PRECHECK_SCRIPT}"
   log_trace "global_override_read"
 }
 
 run_preflight() {
   log_trace "run_preflight"
-  "${PRECHECK_SCRIPT}" "${ROOT_DIR}" >/dev/null
+  (
+    cd "${ROOT_DIR}"
+    orc run-preflight gate >/dev/null
+  )
 }
 
 run_with_retry() {
@@ -92,26 +93,28 @@ run_with_retry() {
 }
 
 open_worker_and_send_plan() {
-  local pane_id
-  local signal
-  pane_id="$(tmux split-window -h -P -F '#{pane_id}' fish -i)"
-  [[ -n "${pane_id}" ]] || fail "failed to create worker pane"
-  log_trace "tmux_pane_created:${pane_id}"
-
-  signal="orc_plan_done_${TASK_NAME}_$$_$(date +%s)"
-  signal="${signal//[^a-zA-Z0-9_]/_}"
-
+  local worker_ref
+  local marker
   local cmd
-  cmd="${CODEX_CMD} --ask-for-approval never \"${PLAN_REQUEST}\"; tmux wait-for -S ${signal}"
-  orc send-tmux "${pane_id}" "${cmd}" enter >/dev/null
-  log_trace "orc_send_tmux_plan:${pane_id}"
-  orc send-tmux "$(tmux display-message -p '#{pane_id}')" "echo recursive:worker_started:${pane_id}" enter >/dev/null
+  worker_ref="$(orc worker-create "recursive-${TASK_NAME}")" || fail "failed to create worker"
+  log_trace "worker_created:${worker_ref}"
 
-  if ! timeout "${STEP_TIMEOUT_SEC}" tmux wait-for "${signal}"; then
-    log_check "plan wait timeout: pane=${pane_id} signal=${signal}"
+  marker="__ORC_PLAN_DONE_${TASK_NAME}_$$_$(date +%s)__"
+  marker="${marker//[^a-zA-Z0-9_]/_}"
+  cmd="$(cat <<EOF
+cd "${ROOT_DIR}"
+${CODEX_CMD} --ask-for-approval never "${PLAN_REQUEST}"
+printf '%s\n' "${marker}"
+EOF
+)"
+  printf '%s' "${cmd}" | orc worker-send "${worker_ref}" --stdin enter >/dev/null
+  log_trace "worker_send_plan:${worker_ref}"
+
+  if ! orc worker-wait "${worker_ref}" "${marker}" "$((STEP_TIMEOUT_SEC * 1000))" 200 >/dev/null; then
+    log_check "plan wait timeout: worker=${worker_ref} marker=${marker}"
     return 1
   fi
-  echo "${pane_id}"
+  echo "${worker_ref}"
 }
 
 run_orc_pipeline() {
@@ -166,16 +169,20 @@ while true; do
 
   if ! run_orc_pipeline; then
     log_check "pipeline stage failed at attempt ${attempt}"
-    orc send-tmux "${worker}" "recursive:retry:${attempt}" enter >/dev/null || true
+    orc worker-send "${worker}" "recursive:retry:${attempt}" enter >/dev/null || true
     continue
   fi
 
-  if ! "${PRECHECK_SCRIPT}" "${ROOT_DIR}" pipeline >/dev/null; then
+  if ! (
+    cd "${ROOT_DIR}"
+    orc run-preflight pipeline >/dev/null
+  ); then
     log_check "pipeline preflight failed at attempt ${attempt}"
-    orc send-tmux "${worker}" "recursive:retry:${attempt}" enter >/dev/null || true
+    orc worker-send "${worker}" "recursive:retry:${attempt}" enter >/dev/null || true
     continue
   fi
 
+  orc worker-close "${worker}" >/dev/null 2>&1 || true
   log_check "recursive success at attempt ${attempt}: job.md exists | #task locked | preflight pass"
   echo "[orc_recursive_improve] OK: attempt=${attempt} worker=${worker}"
   exit 0
