@@ -1,0 +1,4 @@
+interface:
+  display_name: "Effect Check"
+  short_description: "Effect TS 구조와 실행 경계 규칙을 점검"
+  default_prompt: "Use $effect_check to review this Effect TS code for Tag, TaggedError, Layer, provide wiring, and runPromiseExit boundary issues."

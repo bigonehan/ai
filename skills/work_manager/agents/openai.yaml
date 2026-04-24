@@ -1,0 +1,7 @@
+interface:
+  display_name: "Work Manager"
+  short_description: "Use work_helper cli.ts workflow wrappers"
+  default_prompt: "Use $work-manager to run or compose work_helper cli.ts stage functions for project orchestration."
+
+policy:
+  allow_implicit_invocation: true
