@@ -1,0 +1,4 @@
+interface:
+  display_name: "Effect Domain"
+  short_description: "Model domains with Effect TS"
+  default_prompt: "Use $effect-domain to design an Effect TS domain module with schemas, errors, ports, and services."
