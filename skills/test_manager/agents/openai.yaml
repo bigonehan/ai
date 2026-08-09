@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Manager"
+  short_description: "관찰 단위·UI 인스턴스·부작용 횟수·반복 회귀 검증"
+  default_prompt: "Use $test-manager to separate data, component, root, process, and visible-result cardinality, then validate lifecycle, propagation, semantic effects, retries, and real consumer outcomes."
