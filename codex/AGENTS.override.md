@@ -7,6 +7,20 @@ STEP 1. nf -m "<task-name> complete"
 
 STEP 2. → DENIAL SCAN (B) 실행
 
+# A-2. PLAN MODE INPUT NOTIFICATION GATE
+Plan Mode에서 사용자 질문, 확인 요청, 선택 요청 또는 `request_user_input` 호출이 필요할 때마다 질문을 보내기 직전에 적용한다.
+
+STEP 1. `nf -m "Codex input required: <입력이 필요한 이유>"`
+실행 출력: `[PLAN INPUT GATE] exit: <code>`
+- code != 0 → `[PLAN INPUT GATE] HALT`를 출력하고 사용자에게 질문하지 않으며 `request_user_input`도 호출하지 않는다.
+- code = 0 → 필요한 질문 또는 `request_user_input`을 전송한다.
+
+추가 규칙:
+- 질문 묶음마다 새로 실행하고 이전 실행 결과를 재사용하지 않는다.
+- 직접 작성한 질문과 `request_user_input`에 모두 적용한다.
+- 단순 진행 상황 안내와 완성된 계획 전달에는 적용하지 않는다.
+- `nf` 명령이 없거나 실행할 수 없으면 gate 실패로 처리한다.
+
 # B. DENIAL SCAN
 모든 final 응답 전에 적용.
 draft에서 아래 표현을 내부적으로 검사한다:
@@ -99,3 +113,13 @@ Eagle 관련 플러그인의 아이콘은 흰색 라인아트 스타일로 만�
 - 사용자 관점에서 한 번인 붙여넣기·쓰기·업로드·전송을 여러 consumer 호출이나 chunk로 나누면 각 호출을 별도 부작용으로 계산한다. 명시적인 streaming 계약이 없으면 전체 payload를 담은 호출 정확히 한 번을 검사한다.
 - 같은 사용자-visible 실패가 두 번째 보고되면 missed regression으로 처리하고, 기존 테스트가 통과한 이유를 분석한 뒤 수정 전 baseline 또는 격리된 동일 mutant에서 실패하는 회귀 테스트를 증명해야 완료할 수 있다.
 - 테스트의 관찰 단위는 사용자 동작에서 실제 consumer 상태까지 생산자·handler·전파·consumer·결과 경계를 추적해 정한다. 함수 호출 횟수를 실제 효과 횟수로 대신하지 말고 bubbling, 다중 listener, fan-out·fan-in, fallback과 deduplication 뒤의 권위 있는 consumer 결과를 별도로 검사한다.
+
+# L. STRICT REQUEST SCOPE AND ADJACENT WORKFLOW ISOLATION
+기능 추가, 수정, 버그 해결에서 사용자가 명시한 동작 경로만 작업 범위로 본다.
+- `여기`, `현재 사이트`, `이 버튼`, `Item 클릭`처럼 현재 UI 동작을 가리키는 요청은 해당 UI 이벤트에서 직접 도달하는 생산자·handler·consumer 경로로 한정한다.
+- 사용자가 이름을 말하지 않은 Bridge, background 작업, 외부 자동화, batch, queue, 다른 입력 경로, 공유 integration은 기존 기능이 비슷하거나 helper를 재사용할 수 있다는 이유만으로 수정하지 않는다.
+- 구현 전에 내부 체크리스트에 `허용된 시작 동작`, `허용된 최종 효과`, `수정 금지 인접 경로`를 각각 기록한다.
+- 요청을 가장 좁은 호출 지점에서 구현할 수 있으면 그 호출 지점에서만 처리한다. 공유 helper 변경으로 둘 이상의 workflow 동작이 달라지게 만들지 않는다.
+- 합리적인 해석이 둘 이상이고 선택에 따라 서로 다른 workflow가 변경될 수 있으면 파일 수정 전에 사용자에게 범위를 질문한다.
+- 테스트에는 요청 경로의 기대 결과뿐 아니라 이름이 언급되지 않은 인접 workflow의 payload, 저장 설정, 부작용이 변경되지 않았다는 negative-scope 회귀 검사를 포함한다.
+- 작업 중 명시되지 않은 경로가 변경된 사실을 발견하면 완료 처리하지 말고 같은 작업에서 해당 변경을 되돌리고 경계 검사를 추가한다.
