@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dev Branch"
+  short_description: "개발 브랜치 작업 범위와 이전 절차를 엄격히 제한합니다"
+  default_prompt: "Use $dev-branch to move this work to an isolated development branch without expanding scope."
