@@ -18,6 +18,7 @@ Follow this order and keep each check distinct:
    Drive the initiating action through the production input boundary. Direct property assignment, synthetic event dispatch, handler invocation, or state injection is not user-action evidence.
 9. Run the project-required full check and any applicable renderer, path, file-access, build, copy, or deployment verification.
 10. Validate a runtime evidence record with `scripts/verify_runtime_evidence.py`; report completion only when the gate accepts it.
+11. When delegation is available, require an independent verifier agent to review the requirement, production dependency topology, mutant-red proof, registered suite, and delivered artifact; validate its receipt with `scripts/verify_independent_review.py`.
 
 # Test Manager
 
@@ -50,6 +51,32 @@ Before defining tests, read the current request and the complete relevant incide
 Map every requirement ID to at least one `acceptance_scenarios` entry. Each scenario declares its own origin, initiating user action, authoritative consumer, and expected output count. The union of scenario origins must exactly equal `runtime_target.required_origins`; never reduce a multi-target request to the easiest available target. Every scenario must have its own passing unit receipt and, when regression evidence is required, its own live pre-fix failure and live post-fix success receipt.
 
 Record every repeat of the same incident in `incident_history`, including the source statement and the evidence boundary missed previously. `repeated_report_count` must equal this history length. A partial result may be reported per scenario, but the overall workflow remains `runtime-unverified` until every mapped requirement is closed.
+
+## Producer–Namespace–Consumer Binding Hard Gate
+
+Whenever code adds, changes, or consumes a cross-file global, namespace export, injected script API, plugin registry member, or equivalent runtime binding, declare and verify the complete binding path:
+
+1. Read the production-owned injection or load-order source; do not reconstruct an expected order only inside the test.
+2. Record `producer artifact → exported owner path → member → expected type → consumer expression → user handler → authoritative consumer` for every changed binding.
+3. Load the actual build artifacts in production order and execute the changed user handler through its production listener. Resolve and call the member at the consumer site, then verify the final consumer and an empty uncaught-error ledger.
+4. A CommonJS import, destructured helper call, source `.includes()` assertion, or producer-only export test cannot prove this cross-file binding.
+5. Create an isolated owner/member typo mutant and require the same boundary scenario to reject it before the product fix can pass.
+6. Search every consumer for unregistered owner paths. An optional chain does not excuse an owner typo when the feature requires that binding.
+7. Register the regression in the project's standard check command. A standalone script is not coverage unless the standard suite invokes it or the contract explicitly classifies it as user-run runtime verification.
+8. Assert the fixture's selectors, storage keys, and schema fields still exist in production. Fail stale fixtures before interpreting their result.
+
+For browser extensions, the authoritative topology is the script list used by the real popup, service worker, manifest, or injection handler. The boundary observation must include every loaded artifact hash, the delegated pointer/keyboard path, the resolved owner/member type, final DOM or persisted consumer, and `error` plus `unhandledrejection` records.
+
+## Independent Verifier Agent Hard Gate
+
+When collaboration/delegation is available, the implementation author cannot be the sole test reviewer.
+
+1. Give a different agent the exact requirement, current diff or artifact hashes, standard test command, and relevant production loader. Do not give it the intended verdict.
+2. The verifier independently identifies the observation unit and missed boundary, checks suite registration and stale fixtures, inspects or runs the owner/member typo mutant, and checks negative scope.
+3. Record a JSON receipt containing distinct `author_id` and `verifier_id`, scenario IDs, reviewed artifact SHA-256 values, commands, `mutant_rejected`, `standard_suite_registered`, `stale_fixture_check`, `negative_scope_checked`, findings, and dispositions.
+4. Declare `independent_verification` in the contract with `author_id`, exact `scenario_ids`, `standard_suite_command`, and exact `reviewed_artifacts`, then run `python3 scripts/verify_independent_review.py validate <contract.json> <receipt.json>`. A missing receipt, identical author/verifier identity, uncovered scenario, stale fixture, unregistered regression, surviving mutant, unresolved finding, failed command, or mismatched artifact hash blocks completion.
+5. After any product or test change made in response to findings, generate a new receipt for the new artifact hashes; do not reuse the earlier review.
+6. If delegation is unavailable, report `runtime-unverified` and name the missing independent-verifier boundary instead of silently self-approving.
 
 ## Logs-First Diagnosis Hard Gate
 

@@ -138,6 +138,8 @@ Eagle 관련 플러그인의 아이콘은 흰색 라인아트 스타일로 만�
 - 사용자-visible 기능은 unit test, mock, jsdom, fake Chrome API, 소스 문자열 검사, 빌드 또는 체크섬만으로 완료 처리하지 않는다. 배포 artifact를 실제 브라우저·프로세스·CLI 등 해당 런타임에서 실행하고 권위 있는 consumer 결과를 직접 읽어야 한다.
 - 첫 mutation 전에 `/home/tree/ai/skills/test_manager/scripts/verify_runtime_evidence.py snapshot <contract.json> <state.json>`으로 범위를 고정하고, 실제 runtime 검사는 같은 스크립트의 `run`으로 실행한다. 모든 테스트 근거 완료 응답 전에 `validate <contract.json> <state.json> <evidence.json>`을 실행하며, gate가 `complete`를 승인하지 않으면 완료라고 표현하지 않고 `runtime-unverified`와 미검증 경계를 보고한다.
 - 브라우저 확장 작업은 실제 브라우저에 배포본을 로드하고 사용자 시작 동작, content script 또는 service worker 전달, 실제 DOM·editor·download·navigation 결과를 검증한다. reload·재주입·restart가 관련되면 같은 실제 브라우저 세션에서 해당 전환도 실행한다.
+- cross-file 전역 API, namespace export, injected script API 또는 plugin registry member를 추가·변경·소비하면 producer 등록명, production load order, consumer 호출명, 실제 사용자 handler와 authoritative consumer를 하나의 boundary 시나리오에서 실행한다. helper 직접 호출이나 소스 문자열 검사만으로 통과시키지 않고 owner/member 오탈자 mutant를 거부해야 한다.
+- 협업 Agent를 사용할 수 있는 테스트 작업은 구현·테스트 작성자와 다른 Agent가 요구, production loader, 표준 suite 등록, stale fixture, mutant-red 증거, 인접 경로 무변경을 독립 검증한다. `/home/tree/ai/skills/test_manager/scripts/verify_independent_review.py validate <contract.json> <receipt.json>`이 통과하지 않으면 완료 처리하지 않는다. 검증 뒤 제품 또는 테스트 artifact가 바뀌면 새 hash로 다시 독립 검증한다.
 
 # L. STRICT REQUEST SCOPE AND ADJACENT WORKFLOW ISOLATION
 기능 추가, 수정, 버그 해결에서 사용자가 명시한 동작 경로만 작업 범위로 본다.
@@ -193,3 +195,19 @@ UI/UX 또는 frontend 표현을 설계·구현·수정·디버그·검증하는 
 - 요구된 invariant가 현재 production 경로에 이미 구현되어 있는지 먼저 확인한다. 이미 구현되어 있으면 같은 동작을 다시 설계하지 않고 실제 실패 경계, 배포 artifact 차이, stale runtime, 관찰 누락 또는 잘못된 테스트 계약을 조사한다.
 - 테스트는 사용자 예시에 나온 하나의 특별한 명칭만으로 구조 분리를 증명하지 않는다. 임의 명칭의 구조 인스턴스를 둘 이상 사용하고, 선택 범위의 결과와 선택 밖 범위의 유입 0건을 함께 검사한다.
 - 진행 상황과 결과를 설명할 때는 사용자가 지정한 구조 계층과 범위를 그대로 사용한다. 내부 구현의 유사 용어로 요약해 요구 의미를 바꾸지 않는다.
+
+# Q. NEW PROJECT VERIFICATION ARTIFACT LAYOUT
+새 프로젝트를 만들고 프로젝트별 `AGENTS.md`를 생성할 때 적용한다.
+- 프로젝트 루트에 `test/tmp/` 디렉터리를 함께 만든다.
+- 생성하는 `AGENTS.md`에 테스트·검증 과정의 계약, 상태, 증거, receipt 및 요구 캡처용 임시 `.json`·`.txt` 파일을 해당 프로젝트의 `test/tmp/` 아래에서만 생성하고 사용한다는 규칙을 포함한다.
+- 위 검증용 임시 파일을 프로젝트 루트나 상위 프로젝트 모음 디렉터리에 생성하지 않는다.
+- 제품 런타임이 직접 읽는 설정·manifest·fixture·데이터 JSON/TXT는 이 규칙의 이동 대상으로 취급하지 않고 기존 소유 경로를 유지한다.
+
+# R. STAGED FEATURE PLAN SKILL
+Plan 모드에서 기능 추가, 기능 수정, 버그 해결, 빌드 또는 설정 변경을 계획할 때 `/home/tree/.codex/skills/staged-feature-plan/SKILL.md`를 끝까지 읽고 적용한다.
+- 전체 요청을 의존성 순서의 단계별 기능 목표로 분리하고, 각 단계의 구현과 테스트가 끝난 뒤에만 다음 단계의 제품 코드를 수정한다.
+- 승인된 계획을 실행할 때 첫 프로젝트 mutation으로 프로젝트 루트의 `.ai/plan/YYMMDD.요약.md`를 생성하거나 갱신한다. 날짜는 Asia/Seoul 기준이며 요약은 1~9자로 제한한다.
+- 같은 날짜에는 계획 파일을 하나만 사용하고, 서로 다른 요구는 같은 파일의 독립된 `# 요청명` 섹션으로 누적한다. 같은 요구의 후속 변경은 기존 섹션과 변경 기록을 갱신한다.
+- 각 단계에 사용자 개입 `[y/n]`을 명시한다. `[n]`은 Agent가 authoritative consumer까지 직접 검증한 뒤 자동 진행하고, `[y]`는 실행 로그와 기준 상태를 먼저 준비한 뒤 사용자 실행과 결과 판독을 포함한다.
+- `[n]` 단계에서 사용자 전용 runtime 동작이 필요해지면 검증을 생략하지 않고 입력 알림 gate를 거쳐 `[y]`로 변경한다.
+- 일일 계획 문서는 Skill의 `scripts/validate_stage_plan.py`로 검증하고, 완료 단계는 체크 상태·상태·완료 증거가 일치해야 한다.
