@@ -1,0 +1,184 @@
+{
+  "task_id": "ui-design-skill-backup-20260923",
+  "workflow": "create, install, and back up a Codex skill",
+  "user_action": "create ui-design-implementation skill and synchronize installed and backup copies",
+  "expected_outcome": "installed skill, managed backup, and AGENTS backup are byte-identical at their declared boundaries",
+  "unit_observation": "staged skill package validation",
+  "unit_test_commands": [
+    [
+      "python3",
+      "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+      "unit",
+      "/home/tree/ai/test/tmp/ui-design-skill/contract.json"
+    ]
+  ],
+  "authoritative_consumer": "installed .codex skill tree and ~/ai backup trees",
+  "requirement_coverage": [
+    {
+      "id": "req-ui-skill-backup",
+      "incident_key": "missing-ui-design-implementation-skill",
+      "source_path": "/home/tree/ai/Input.md",
+      "source_text": "- 요청: `ui-design-implementation` Skill을 생성하고 동일한 복사본을 `~/ai/skills`에 두며, `build-design/SKILL.md` 내용을 참조해 새 Skill 내용을 구성한다.",
+      "source_sha256": "4d8e2e9d79f38456c86367803aef8b1b90f10e1f1fb8144a668c355f88c51f7f"
+    },
+    {
+      "id": "req-remove-and-back-up-active-config",
+      "incident_key": "missing-ui-design-implementation-skill",
+      "source_path": "/home/tree/ai/Input.md",
+      "source_text": "- 요청: 새 Skill 생성이 끝나면 `~/ai/skills/build-design`을 삭제하고, 현재 `.codex`에서 사용하는 Skill과 `AGENTS.md`를 각각 `~/ai/skills`, `~/ai/codex`에 백업한다.",
+      "source_sha256": "db0e11d53cc262711bc5725d3acd6b960fe311338dfa60950e84d3f66e0acf38"
+    },
+    {
+      "id": "req-copy-integrity",
+      "incident_key": "missing-ui-design-implementation-skill",
+      "source_path": "/home/tree/ai/Input.md",
+      "source_text": "- 완료 조건: 설치본과 백업본의 파일 및 SHA-256을 검증하고, `~/ai/skills/build-design`의 제거 상태와 AGENTS 백업 동일성을 확인한다.",
+      "source_sha256": "22f46f829ab8e875ae9706e6479c485d0b72588d337db6337c2e498b2b5fae16"
+    }
+  ],
+  "acceptance_scenarios": [
+    {
+      "scenario_id": "ui-skill-filesystem-sync",
+      "requirement_ids": [
+        "req-ui-skill-backup",
+        "req-remove-and-back-up-active-config",
+        "req-copy-integrity"
+      ],
+      "origin": "",
+      "user_action": "create ui-design-implementation skill and synchronize installed and backup copies",
+      "authoritative_consumer": "installed .codex skill tree and ~/ai backup trees",
+      "expected_output_count": 0,
+      "requires_effect_safety": false,
+      "input_lineage": {
+        "original_input": {
+          "source_kind": "user_action",
+          "source_ref": "/home/tree/ai/Input.md#2026-09-23",
+          "value_type": "action",
+          "byte_length": 81,
+          "sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00"
+        },
+        "production_path": [
+          {
+            "id": "requirement-input",
+            "role": "input",
+            "interface": "dated requirement record"
+          },
+          {
+            "id": "skill-copy-loader",
+            "role": "loader",
+            "interface": "filesystem skill package copy"
+          },
+          {
+            "id": "skill-validator",
+            "role": "handler",
+            "interface": "skill-creator quick validation and layout-validator self-test"
+          },
+          {
+            "id": "installed-and-backup-readback",
+            "role": "consumer",
+            "interface": "installed .codex skill tree and ~/ai backup trees"
+          }
+        ],
+        "loader_sources": [
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+            "sha256": "746e70d5b3ae13009190522f2bc7be073afd920aeef25bfd60cbddcde8cc5404"
+          }
+        ],
+        "artifact_order": [
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/SKILL.md",
+            "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+          },
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/agents/openai.yaml",
+            "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+          },
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/scripts/validate_layout_contract.py",
+            "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+          }
+        ],
+        "expected_result": {
+          "value_type": "installed-and-backup-filesystem-state",
+          "byte_length": 894,
+          "sha256": "901d60cefbaf150ed5b56bb910e53fd3c32534f5032a98cfe2a71e3c747689ed"
+        }
+      }
+    }
+  ],
+  "incident_history": [],
+  "runtime_log_sources": [],
+  "runtime_target": {
+    "environment": "local_filesystem",
+    "required_origins": [],
+    "allow_fixture_origins": true,
+    "authoritative_output_root": null
+  },
+  "input_fidelity": {
+    "production_boundary": "filesystem package installation and byte readback",
+    "required_observations": [
+      "requirement_record",
+      "installed_skill_tree",
+      "backup_skill_tree",
+      "agents_backup"
+    ],
+    "forbidden_shortcuts": [
+      "source-only inspection",
+      "unchecked copy",
+      "path existence without byte readback"
+    ]
+  },
+  "input_validation": {
+    "applicable": false,
+    "reason": "This maintenance task has no user-editable runtime input surface.",
+    "surfaces": []
+  },
+  "repeated_report_count": 0,
+  "allowed_roots": [
+    "/home/tree/.codex/skills/ui-design-implementation",
+    "/home/tree/ai/skills/ui-design-implementation",
+    "/home/tree/ai/skills/build-design",
+    "/home/tree/ai/codex/AGENTS.override.md"
+  ],
+  "watch_roots": [
+    "/home/tree/.codex/skills",
+    "/home/tree/ai/skills",
+    "/home/tree/ai/codex/AGENTS.override.md",
+    "/home/tree/ai/archives/build-design"
+  ],
+  "forbidden_roots": [
+    "/home/tree/ai/archives/build-design"
+  ],
+  "adjacent_workflows": [
+    "bundled .system skills",
+    "test-manager skill",
+    "archived build-design source"
+  ],
+  "delivered_artifacts": [
+    "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/SKILL.md",
+    "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/agents/openai.yaml",
+    "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/scripts/validate_layout_contract.py"
+  ],
+  "requires_regression": false,
+  "independent_verification": {
+    "author_id": "root-agent",
+    "scenario_ids": ["ui-skill-filesystem-sync"],
+    "standard_suite_command": [
+      "python3",
+      "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+      "post",
+      "/home/tree/ai/test/tmp/ui-design-skill/contract.json"
+    ],
+    "reviewed_artifacts": [
+      "/home/tree/.codex/skills/ui-design-implementation/SKILL.md",
+      "/home/tree/.codex/skills/ui-design-implementation/agents/openai.yaml",
+      "/home/tree/.codex/skills/ui-design-implementation/scripts/validate_layout_contract.py",
+      "/home/tree/ai/skills/ui-design-implementation/SKILL.md",
+      "/home/tree/ai/skills/ui-design-implementation/agents/openai.yaml",
+      "/home/tree/ai/skills/ui-design-implementation/scripts/validate_layout_contract.py",
+      "/home/tree/ai/codex/AGENTS.override.md",
+      "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py"
+    ]
+  }
+}

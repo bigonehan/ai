@@ -1,0 +1,86 @@
+{
+  "author_id": "root-agent",
+  "verifier_id": "ui-skill-review-agent",
+  "contract_digest": "a259678797cd96251d8ee32a2484c517f6007975fc4e3297bc1a2981fc14c468",
+  "scenario_ids": [
+    "ui-skill-filesystem-sync"
+  ],
+  "command_results": [
+    {
+      "argv": [
+        "python3",
+        "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+        "post",
+        "/home/tree/ai/test/tmp/ui-design-skill/contract.json"
+      ],
+      "exit_code": 0,
+      "output_sha256": "1eef811f790562f5b47694a28e92a7146a3cab2a1c5ef770f9fe153b85e5d2de"
+    }
+  ],
+  "mutant_rejected": true,
+  "standard_suite_registered": true,
+  "stale_fixture_check": true,
+  "negative_scope_checked": true,
+  "reviewed_artifacts": [
+    {
+      "path": "/home/tree/.codex/skills/ui-design-implementation/SKILL.md",
+      "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+    },
+    {
+      "path": "/home/tree/.codex/skills/ui-design-implementation/agents/openai.yaml",
+      "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+    },
+    {
+      "path": "/home/tree/.codex/skills/ui-design-implementation/scripts/validate_layout_contract.py",
+      "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+    },
+    {
+      "path": "/home/tree/ai/skills/ui-design-implementation/SKILL.md",
+      "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+    },
+    {
+      "path": "/home/tree/ai/skills/ui-design-implementation/agents/openai.yaml",
+      "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+    },
+    {
+      "path": "/home/tree/ai/skills/ui-design-implementation/scripts/validate_layout_contract.py",
+      "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+    },
+    {
+      "path": "/home/tree/ai/codex/AGENTS.override.md",
+      "sha256": "d7b2c831a8b479de9bd77e13f05c5c5bf1f3030360a6cc09f21f75f6f858c9c4"
+    },
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+      "sha256": "746e70d5b3ae13009190522f2bc7be073afd920aeef25bfd60cbddcde8cc5404"
+    }
+  ],
+  "lineage_reviews": [
+    {
+      "scenario_id": "ui-skill-filesystem-sync",
+      "original_input_review": "Compared the 81-byte scenario action fingerprint with the action text and independently inspected all three 2026-09-23 requirement records and their digests in /home/tree/ai/Input.md.",
+      "mock_boundary_review": "The post-fix evidence starts at original_input with mocked=false and substitutions=[]; the recorder reads real staged, installed, backup, AGENTS, removal, and archive filesystem state and runs the real quick validator and layout-validator self-tests.",
+      "loader_order_review": "Inspected the evidence.json post-fix observation, its trace, loader capture, and recorder source; artifact order matches the staged SKILL.md, agents/openai.yaml, and validate_layout_contract.py hashes, and each downstream trace digest is derived from measured data rather than the contract's expected result.",
+      "runtime_observation": {
+        "path": "/home/tree/ai/test/tmp/ui-design-skill/post-fix-observation.json",
+        "sha256": "a0dca6a558a489d5ceaa763b12ef531d9f7bbd1ed6d426a4e8e972c5a982d7f9"
+      },
+      "recorder_artifacts": [
+        {
+          "path": "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+          "sha256": "746e70d5b3ae13009190522f2bc7be073afd920aeef25bfd60cbddcde8cc5404"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "summary": "The initial contract preserved only the skill-creation requirement and omitted the removal, active-configuration backup, and checksum completion requirements; the current contract records three distinct requirements and links all three to the acceptance scenario.",
+      "disposition": "fixed"
+    },
+    {
+      "summary": "The initial recorder copied expected_result into intermediate lineage steps; the current recorder fingerprints actual staged bytes, validator subprocess results, and installed/backup/AGENTS/removal/archive filesystem state.",
+      "disposition": "fixed"
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "UI Design Implementation"
+  short_description: "Implement and verify precise UI layouts"
+  default_prompt: "Use $ui-design-implementation to implement and verify this UI change."

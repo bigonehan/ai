@@ -1,0 +1,152 @@
+{
+  "version": 6,
+  "receipts": [
+    {
+      "receipt_version": 6,
+      "contract_digest": "55006a6023331ff48bdd0c1ca9bf7f5cd3e41576b0820f4e62984b8040bc6cac",
+      "state_digest": "bbae77e7858d945a3131bca5ba930f2100fec8775d8b47bac72e6d880a9d75b5",
+      "command": [
+        "python3",
+        "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+        "unit",
+        "/home/tree/ai/test/tmp/ui-design-skill/contract.json"
+      ],
+      "started_ns": 1790095700946277933,
+      "finished_ns": 1790095701037296756,
+      "exit_code": 0,
+      "stdout": "{\n  \"ok\": true,\n  \"phase\": \"unit\",\n  \"errors\": []\n}\n",
+      "stderr": "",
+      "observation": {
+        "scenario_id": "ui-skill-filesystem-sync",
+        "requirement_ids": [
+          "req-ui-skill-backup"
+        ],
+        "runtime": "Python skill package validator",
+        "user_action": "create ui-design-implementation skill and synchronize installed and backup copies",
+        "observed_consumer": "staged skill package validation",
+        "phase": "unit",
+        "outcome": "success",
+        "observation_level": "unit",
+        "run_id": "ui-skill-unit-1790095700971931482",
+        "action_started_ns": 1790095700971931482,
+        "action_finished_ns": 1790095701032669982,
+        "original_input": {
+          "source_kind": "user_action",
+          "source_ref": "/home/tree/ai/Input.md#2026-09-23",
+          "value_type": "action",
+          "byte_length": 81,
+          "sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00"
+        },
+        "entry_stage": "original_input",
+        "substitutions": [],
+        "mocked": false,
+        "loaded_artifacts": [
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/SKILL.md",
+            "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+          },
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/agents/openai.yaml",
+            "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+          },
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/scripts/validate_layout_contract.py",
+            "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+          }
+        ],
+        "uncaught_errors": [],
+        "unobserved_layers": []
+      },
+      "observation_error": null,
+      "signature": "fc4aff9a879dd7419a1e3045eddbb4121cc0bf9ebd0644c831327721c3b6c474"
+    },
+    {
+      "receipt_version": 6,
+      "contract_digest": "55006a6023331ff48bdd0c1ca9bf7f5cd3e41576b0820f4e62984b8040bc6cac",
+      "state_digest": "bbae77e7858d945a3131bca5ba930f2100fec8775d8b47bac72e6d880a9d75b5",
+      "command": [
+        "python3",
+        "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+        "post",
+        "/home/tree/ai/test/tmp/ui-design-skill/contract.json"
+      ],
+      "started_ns": 1790095701082427017,
+      "finished_ns": 1790095701288375951,
+      "exit_code": 0,
+      "stdout": "{\n  \"ok\": true,\n  \"phase\": \"post_fix\",\n  \"errors\": []\n}\n",
+      "stderr": "",
+      "observation": {
+        "scenario_id": "ui-skill-filesystem-sync",
+        "requirement_ids": [
+          "req-ui-skill-backup"
+        ],
+        "runtime": "local filesystem Codex skill loader",
+        "user_action": "create ui-design-implementation skill and synchronize installed and backup copies",
+        "observed_consumer": "installed .codex skill tree and ~/ai backup trees",
+        "phase": "post_fix",
+        "outcome": "success",
+        "observation_level": "runtime",
+        "run_id": "ui-skill-post-1790095701103337777",
+        "action_started_ns": 1790095701103337777,
+        "action_finished_ns": 1790095701281429043,
+        "original_input": {
+          "source_kind": "user_action",
+          "source_ref": "/home/tree/ai/Input.md#2026-09-23",
+          "value_type": "action",
+          "byte_length": 81,
+          "sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00"
+        },
+        "entry_stage": "original_input",
+        "substitutions": [],
+        "mocked": false,
+        "loaded_artifacts": [
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/SKILL.md",
+            "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+          },
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/agents/openai.yaml",
+            "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+          },
+          {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/scripts/validate_layout_contract.py",
+            "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+          }
+        ],
+        "uncaught_errors": [],
+        "unobserved_layers": [],
+        "input_fidelity": {
+          "production_boundary": "filesystem package installation and byte readback",
+          "driver": "Python filesystem process",
+          "matches_user_action": true,
+          "bypassed_layers": [],
+          "synthetic_shortcuts": [],
+          "observations": {
+            "requirement_record": true,
+            "installed_skill_tree": true,
+            "backup_skill_tree": true,
+            "agents_backup": true
+          }
+        },
+        "runtime_provenance": {
+          "environment": "local_filesystem",
+          "fixture": false,
+          "page_origins": []
+        },
+        "authoritative_outputs": [],
+        "runtime_logs": [
+          "/home/tree/ai/Input.md"
+        ],
+        "input_lineage": {
+          "start": "original_input",
+          "trace": {
+            "path": "/home/tree/ai/test/tmp/ui-design-skill/runtime/ui-skill-post-1790095701103337777/trace.json",
+            "sha256": "67c729c9a75d9f71ee04ccad1065924296cd8819e8172c73c28ae1b11c2a4340"
+          }
+        }
+      },
+      "observation_error": null,
+      "signature": "9e1556cf3a4836d0d8eac87fee256d7da5e6943f5d7e933cb550267b23141d0d"
+    }
+  ]
+}

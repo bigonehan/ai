@@ -1,4 +1,4 @@
 interface:
   display_name: "Test Manager"
   short_description: "모든 요구를 실제 런타임 증거까지 추적"
-  default_prompt: "Use $test-manager to map every logged requirement to an acceptance scenario, reject stale or partial evidence, and verify every scenario against the exact delivered artifact and authoritative runtime consumer before any completion claim."
+  default_prompt: "Use $test-manager to map every logged requirement to an acceptance scenario, trace original user inputs through production loaders and handlers to actual consumer readbacks, explain why prior tests missed the failure, reject fake production bindings and delayed duplicate effects, and keep offline evidence separate from runtime proof without automatically replaying costly AI actions."

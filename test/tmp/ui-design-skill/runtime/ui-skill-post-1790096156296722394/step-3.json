@@ -1,0 +1,20 @@
+{
+  "scenario_id": "ui-skill-filesystem-sync",
+  "run_id": "ui-skill-post-1790096156296722394",
+  "phase": "post_fix",
+  "step_id": "installed-and-backup-readback",
+  "at_ns": 1790096156296722398,
+  "input_sha256": "4ec07a9c28adb8ff0a6c18be8a2ba51f85dc964a814e5b49544a6219f70232f8",
+  "output_sha256": "901d60cefbaf150ed5b56bb910e53fd3c32534f5032a98cfe2a71e3c747689ed",
+  "status": "success",
+  "channel": "filesystem",
+  "observation": {
+    "source_ref": "/home/tree/ai/Input.md#2026-09-23",
+    "readback": {
+      "value_type": "installed-and-backup-filesystem-state",
+      "byte_length": 894,
+      "sha256": "901d60cefbaf150ed5b56bb910e53fd3c32534f5032a98cfe2a71e3c747689ed"
+    },
+    "consumer": "installed .codex skill tree and ~/ai backup trees"
+  }
+}

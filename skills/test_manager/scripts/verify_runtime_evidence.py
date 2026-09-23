@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import fnmatch
 import hashlib
 import hmac
@@ -16,10 +17,21 @@ import tempfile
 import time
 from typing import Any
 
+from input_lineage import validate_scenario, validate_substitutions, validate_trace, read_artifact
+from effect_safety import validate_observation as validate_effect_observation
+from user_action_gate import validate_ledger, in_verification_workspace
 
-RECEIPT_VERSION = 5
+
+RECEIPT_VERSION = 6
 DEFAULT_IGNORES = (".git/**", "node_modules/**", "__pycache__/**", "*.pyc")
 INPUT_KINDS = {"text", "textarea", "contenteditable", "select", "toggle", "file", "paste", "drop", "shortcut", "other"}
+API_SCHEMA_TYPES = {"string", "number", "integer", "boolean", "object", "array", "null"}
+SAFE_PROBE_METHODS = {"GET", "HEAD", "OPTIONS"}
+SENSITIVE_API_KEYS = {
+    "authorization", "proxy-authorization", "api_key", "apikey", "token", "access_token",
+    "refresh_token", "password", "secret", "cookie", "set-cookie", "bearer",
+}
+FORBIDDEN_CAPTURE_KEYS = {"raw", "raw_body", "response_body", "request_body", "payload", "headers"}
 BASE_INPUT_OBSERVATIONS = {
     "rendered_target", "hit_test", "focus", "first_input", "continuous_input",
     "event_trace", "event_value_snapshot", "value_after_input", "root_count_after_input",
@@ -72,6 +84,322 @@ def contains_raw_input(value: object) -> bool:
     if isinstance(value, list):
         return any(contains_raw_input(item) for item in value)
     return False
+
+
+def unsafe_api_capture_path(value: object, prefix: str = "$") -> str | None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key).strip().lower().replace("-", "_")
+            if normalized in {key.replace("-", "_") for key in SENSITIVE_API_KEYS | FORBIDDEN_CAPTURE_KEYS}:
+                return f"{prefix}.{key}"
+            nested = unsafe_api_capture_path(item, f"{prefix}.{key}")
+            if nested:
+                return nested
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            nested = unsafe_api_capture_path(item, f"{prefix}[{index}]")
+            if nested:
+                return nested
+    return None
+
+
+def validate_api_schema(value: object, field: str, errors: list[str]) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        errors.append(f"{field} must be a non-empty array")
+        return []
+    result: list[dict[str, Any]] = []
+    paths: set[str] = set()
+    for index, item in enumerate(value):
+        item_field = f"{field}[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{item_field} must be an object")
+            continue
+        path = item.get("path")
+        if not text(path) or not str(path).startswith("$."):
+            errors.append(f"{item_field}.path must be a JSON path beginning with $.")
+        elif any(marker in str(path).lower().replace("-", "_") for marker in SENSITIVE_API_KEYS):
+            errors.append(f"{item_field}.path must not identify credentials or secrets")
+        elif path in paths:
+            errors.append(f"{field} contains duplicate path: {path}")
+        else:
+            paths.add(path)
+        if item.get("type") not in API_SCHEMA_TYPES:
+            errors.append(f"{item_field}.type must be one of {sorted(API_SCHEMA_TYPES)}")
+        if not isinstance(item.get("required"), bool):
+            errors.append(f"{item_field}.required must be boolean")
+        if set(item) - {"path", "type", "required", "safe_value"}:
+            errors.append(f"{item_field} contains unsupported fields")
+        safe_value = item.get("safe_value")
+        if unsafe_api_capture_path(safe_value) or (isinstance(safe_value, str) and safe_value.lower().startswith("bearer ")):
+            errors.append(f"{item_field}.safe_value contains sensitive material")
+        result.append(item)
+    return result
+
+
+def checked_artifact(item: object, field: str, errors: list[str]) -> pathlib.Path | None:
+    if not isinstance(item, dict):
+        errors.append(f"{field} must be an object")
+        return None
+    path_value = item.get("path")
+    checksum = item.get("sha256")
+    if not text(path_value) or not pathlib.Path(path_value).is_absolute():
+        errors.append(f"{field}.path must be an absolute path")
+        return None
+    path = pathlib.Path(path_value)
+    if not path.is_file():
+        errors.append(f"{field}.path must be an existing file")
+        return None
+    if not sha256_text(checksum) or digest_file(path) != checksum:
+        errors.append(f"{field}.sha256 does not match the artifact")
+    return path
+
+
+def validate_external_api_contracts(
+    contract: dict[str, Any], scenario_ids: set[str], scenario_api_links: dict[str, set[str]], errors: list[str]
+) -> None:
+    decision = contract.get("external_api_validation")
+    if not isinstance(decision, dict):
+        errors.append("external_api_validation must explicitly declare applicability")
+        return
+    applicable = decision.get("applicable")
+    if not isinstance(applicable, bool):
+        errors.append("external_api_validation.applicable must be boolean")
+    if not text(decision.get("reason")):
+        errors.append("external_api_validation.reason must be non-empty text")
+    api_contracts = decision.get("contracts")
+    if not isinstance(api_contracts, list):
+        errors.append("external_api_validation.contracts must be an array")
+        return
+    if applicable is False and api_contracts:
+        errors.append("external_api_validation.contracts must be empty when not applicable")
+    if applicable is True and not api_contracts:
+        errors.append("applicable external API validation requires at least one contract")
+
+    declared_ids: set[str] = set()
+    linked_by_contract: dict[str, set[str]] = {}
+    environments: set[str] = set()
+    for index, item in enumerate(api_contracts):
+        field = f"external_api_validation.contracts[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{field} must be an object")
+            continue
+        contract_id = item.get("contract_id")
+        if not text(contract_id):
+            errors.append(f"{field}.contract_id must be non-empty text")
+            continue
+        if contract_id in declared_ids:
+            errors.append(f"duplicate external API contract id: {contract_id}")
+        declared_ids.add(contract_id)
+        for key in ("system", "operation", "endpoint_pattern", "authoritative_environment"):
+            if not text(item.get(key)):
+                errors.append(f"{field}.{key} must be non-empty text")
+        endpoint = item.get("endpoint_pattern")
+        if text(endpoint) and ("?" in endpoint or "@" in endpoint):
+            errors.append(f"{field}.endpoint_pattern must omit credentials and query values")
+        method = item.get("method")
+        if not text(method) or method != str(method).upper():
+            errors.append(f"{field}.method must be an uppercase HTTP method")
+        environment = item.get("authoritative_environment")
+        if text(environment):
+            environments.add(environment)
+        linked = item.get("scenario_ids")
+        if not isinstance(linked, list) or not linked or not all(text(value) for value in linked):
+            errors.append(f"{field}.scenario_ids must be a non-empty text array")
+            linked_set: set[str] = set()
+        else:
+            linked_set = set(linked)
+            if len(linked_set) != len(linked):
+                errors.append(f"{field}.scenario_ids must not contain duplicates")
+            if not linked_set.issubset(scenario_ids):
+                errors.append(f"{field}.scenario_ids contains undeclared scenarios")
+        linked_by_contract[contract_id] = linked_set
+
+        schema = validate_api_schema(item.get("response_schema"), f"{field}.response_schema", errors)
+        schema_paths = {entry.get("path") for entry in schema if isinstance(entry, dict) and text(entry.get("path"))}
+        probe = item.get("safe_probe")
+        if not isinstance(probe, dict):
+            errors.append(f"{field}.safe_probe must be an object")
+            continue
+        available = probe.get("available")
+        if not isinstance(available, bool):
+            errors.append(f"{field}.safe_probe.available must be boolean")
+        source_kind = probe.get("source_kind")
+        allowed_sources = {"live_read_only"} if available is True else {"recorded_response", "authoritative_docs"}
+        if source_kind not in allowed_sources:
+            errors.append(f"{field}.safe_probe.source_kind is inconsistent with availability")
+        if available is True and method not in SAFE_PROBE_METHODS:
+            errors.append(f"{field}.safe_probe live read-only capture requires GET, HEAD, or OPTIONS")
+        capture_path = checked_artifact(probe, f"{field}.safe_probe", errors)
+        capture: object = None
+        if capture_path:
+            try:
+                capture = read_json(capture_path)
+            except (OSError, json.JSONDecodeError) as error:
+                errors.append(f"{field}.safe_probe capture must be valid JSON: {error}")
+            if isinstance(capture, dict):
+                unsafe = unsafe_api_capture_path(capture)
+                if unsafe:
+                    errors.append(f"{field}.safe_probe capture exposes forbidden field at {unsafe}")
+                if capture.get("contains_secrets") is not False:
+                    errors.append(f"{field}.safe_probe capture must declare contains_secrets false")
+                for key, expected in (
+                    ("contract_id", contract_id), ("system", item.get("system")),
+                    ("operation", item.get("operation")), ("method", method),
+                    ("endpoint_pattern", endpoint), ("authoritative_environment", environment),
+                    ("source_kind", source_kind), ("response_schema", schema),
+                ):
+                    if capture.get(key) != expected:
+                        errors.append(f"{field}.safe_probe capture {key} does not match the contract")
+
+        fixtures = item.get("fixtures")
+        if not isinstance(fixtures, list) or not fixtures:
+            errors.append(f"{field}.fixtures must be a non-empty array")
+        else:
+            for fixture_index, fixture in enumerate(fixtures):
+                fixture_field = f"{field}.fixtures[{fixture_index}]"
+                checked_artifact(fixture, fixture_field, errors)
+                if not isinstance(fixture, dict) or fixture.get("source_capture_sha256") != probe.get("sha256"):
+                    errors.append(f"{fixture_field}.source_capture_sha256 must match the safe probe capture")
+                if isinstance(fixture, dict) and fixture.get("response_schema") != schema:
+                    errors.append(f"{fixture_field}.response_schema must match the live capture schema")
+
+        consumer = item.get("consumer")
+        consumer_path = checked_artifact(consumer, f"{field}.consumer", errors)
+        if isinstance(consumer, dict):
+            if not text(consumer.get("expression")):
+                errors.append(f"{field}.consumer.expression must be non-empty text")
+            required_fields = consumer.get("required_fields")
+            required_schema_paths = {entry.get("path") for entry in schema if entry.get("required") is True}
+            if not isinstance(required_fields, list) or set(required_fields) != required_schema_paths or len(required_fields) != len(set(required_fields)):
+                errors.append(f"{field}.consumer.required_fields must exactly match required response schema paths")
+        if consumer_path and not schema_paths:
+            errors.append(f"{field}.consumer has no validated response fields")
+
+        mutations = item.get("mutation_tests")
+        mutation_kinds: set[str] = set()
+        schema_types = {entry.get("path"): entry.get("type") for entry in schema}
+        if not isinstance(mutations, list) or not mutations:
+            errors.append(f"{field}.mutation_tests must be a non-empty array")
+        else:
+            for mutation_index, mutation in enumerate(mutations):
+                mutation_field = f"{field}.mutation_tests[{mutation_index}]"
+                mutation_path = checked_artifact(mutation, mutation_field, errors)
+                if not mutation_path:
+                    continue
+                try:
+                    receipt = read_json(mutation_path)
+                except (OSError, json.JSONDecodeError) as error:
+                    errors.append(f"{mutation_field} receipt must be valid JSON: {error}")
+                    continue
+                kind = receipt.get("mutation_kind") if isinstance(receipt, dict) else None
+                if kind in mutation_kinds:
+                    errors.append(f"{field}.mutation_tests contains duplicate kind: {kind}")
+                if text(kind):
+                    mutation_kinds.add(kind)
+                common_valid = (
+                    isinstance(receipt, dict)
+                    and receipt.get("contract_id") == contract_id
+                    and receipt.get("rejected") is True
+                    and receipt.get("production_consumer_executed") is True
+                    and isinstance(receipt.get("exit_code"), int)
+                    and receipt.get("exit_code") != 0
+                )
+                if kind == "field_name":
+                    valid = (
+                        common_valid
+                        and receipt.get("from_path") in schema_paths
+                        and text(receipt.get("to_path"))
+                        and receipt.get("to_path") not in schema_paths
+                    )
+                elif kind == "field_type":
+                    valid = (
+                        common_valid
+                        and receipt.get("path") in schema_paths
+                        and receipt.get("from_type") == schema_types.get(receipt.get("path"))
+                        and receipt.get("to_type") in API_SCHEMA_TYPES
+                        and receipt.get("to_type") != receipt.get("from_type")
+                    )
+                else:
+                    valid = False
+                if not valid:
+                    errors.append(f"{mutation_field} must prove its production-consumer mutant is rejected")
+        if mutation_kinds != {"field_name", "field_type"}:
+            errors.append(f"{field}.mutation_tests must include field_name and field_type mutants")
+
+    linked_ids = set().union(*scenario_api_links.values()) if scenario_api_links else set()
+    if linked_ids != declared_ids:
+        errors.append("acceptance scenario external_api_contract_ids must cover every and only declared external API contract")
+    for contract_id, linked_scenarios in linked_by_contract.items():
+        reverse = {scenario_id for scenario_id, ids in scenario_api_links.items() if contract_id in ids}
+        if reverse != linked_scenarios:
+            errors.append(f"external API contract {contract_id} scenario links are not bidirectional")
+    if applicable is False and linked_ids:
+        errors.append("external API links must be empty when validation is not applicable")
+    target = contract.get("runtime_target")
+    if applicable is True and isinstance(target, dict):
+        if set(target.get("external_api_environments", [])) != environments:
+            errors.append("runtime_target.external_api_environments must exactly match external API contract environments")
+
+
+def validate_external_api_observation(contract: dict[str, Any], observation: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    scenario = next(
+        (item for item in contract.get("acceptance_scenarios", []) if item.get("scenario_id") == observation.get("scenario_id")),
+        {},
+    )
+    linked_ids = scenario.get("external_api_contract_ids", [])
+    if not linked_ids:
+        if observation.get("external_api_validation") not in (None, []):
+            errors.append("runtime observation contains undeclared external API evidence")
+        return errors
+    evidence = observation.get("external_api_validation")
+    if not isinstance(evidence, list):
+        return ["observation requires external_api_validation evidence"]
+    evidence_by_id = {
+        item.get("contract_id"): item for item in evidence
+        if isinstance(item, dict) and text(item.get("contract_id"))
+    }
+    if len(evidence_by_id) != len(evidence) or set(evidence_by_id) != set(linked_ids):
+        errors.append("observation external API evidence must exactly match scenario links")
+        return errors
+    contracts = {
+        item["contract_id"]: item for item in contract["external_api_validation"]["contracts"]
+        if item.get("contract_id") in linked_ids
+    }
+    is_unit = observation.get("phase") == "unit"
+    successful_post = observation.get("phase") == "post_fix" and observation.get("outcome") == "success"
+    for contract_id, item in evidence_by_id.items():
+        spec = contracts[contract_id]
+        field = f"external API observation {contract_id}"
+        probe = spec["safe_probe"]
+        if item.get("authoritative_environment") != spec.get("authoritative_environment"):
+            errors.append(f"{field} environment does not match the contract")
+        if item.get("capture_sha256") != probe.get("sha256"):
+            errors.append(f"{field} capture_sha256 does not match the contract")
+        if item.get("response_schema") != spec.get("response_schema"):
+            errors.append(f"{field} response schema does not match the captured API contract")
+        if item.get("production_consumer_executed") is not True:
+            errors.append(f"{field} did not execute the production consumer")
+        if unsafe_api_capture_path(item):
+            errors.append(f"{field} exposes credentials or raw API material")
+        if is_unit:
+            if item.get("boundary_source") != "capture_fixture":
+                errors.append(f"{field} unit evidence must use the capture-derived fixture")
+            expected_fixtures = {(entry["path"], entry["sha256"]) for entry in spec.get("fixtures", [])}
+            observed_fixtures = {
+                (entry.get("path"), entry.get("sha256")) for entry in item.get("fixture_artifacts", [])
+                if isinstance(entry, dict)
+            }
+            if observed_fixtures != expected_fixtures:
+                errors.append(f"{field} fixture artifacts do not match the contract")
+            if set(item.get("mutations_rejected", [])) != {"field_name", "field_type"}:
+                errors.append(f"{field} unit evidence must reject field_name and field_type mutants")
+        if successful_post:
+            if item.get("boundary_source") != "live_response" or item.get("mocked") is not False:
+                errors.append(f"{field} successful runtime evidence must come from a non-mocked live response")
+            if item.get("consumer_readback") is not True:
+                errors.append(f"{field} successful runtime evidence requires authoritative consumer readback")
+    return errors
 
 
 def absolute_paths(value: object, field: str, errors: list[str]) -> list[pathlib.Path]:
@@ -156,6 +484,7 @@ def validate_contract(contract: object) -> list[str]:
     scenario_ids: set[str] = set()
     covered_requirement_ids: set[str] = set()
     scenario_origins: set[str] = set()
+    scenario_api_links: dict[str, set[str]] = {}
     if not isinstance(scenarios, list) or not scenarios:
         errors.append("acceptance_scenarios must be a non-empty array")
     else:
@@ -172,6 +501,13 @@ def validate_contract(contract: object) -> list[str]:
                 if scenario_id in scenario_ids:
                     errors.append(f"duplicate scenario id: {scenario_id}")
                 scenario_ids.add(scenario_id)
+                api_links = scenario.get("external_api_contract_ids")
+                if not isinstance(api_links, list) or not all(text(item) for item in api_links):
+                    errors.append(f"{field}.external_api_contract_ids must be a text array")
+                    api_links = []
+                elif len(api_links) != len(set(api_links)):
+                    errors.append(f"{field}.external_api_contract_ids must not contain duplicates")
+                scenario_api_links[scenario_id] = set(api_links)
             linked = scenario.get("requirement_ids")
             if not isinstance(linked, list) or not linked or not all(text(item) for item in linked):
                 errors.append(f"{field}.requirement_ids must be a non-empty text array")
@@ -187,6 +523,43 @@ def validate_contract(contract: object) -> list[str]:
                 errors.append(f"{field}.expected_output_count must be a non-negative integer")
     if requirement_ids and covered_requirement_ids != requirement_ids:
         errors.append("acceptance_scenarios must cover every and only declared requirement id")
+    user_execution = contract.get("user_execution")
+    if user_execution is not None:
+        if not isinstance(user_execution, dict):
+            errors.append("user_execution must be an object when provided")
+        else:
+            manual_required = user_execution.get("manual_run_required")
+            if not isinstance(manual_required, bool):
+                errors.append("user_execution.manual_run_required must be boolean")
+            if manual_required is True:
+                if user_execution.get("max_user_runs") != 1:
+                    errors.append("user_execution.max_user_runs must be exactly 1")
+                linked = user_execution.get("scenario_ids")
+                if not isinstance(linked, list) or not linked or not all(text(item) for item in linked):
+                    errors.append("user_execution.scenario_ids must be a non-empty text array")
+                    linked = []
+                elif len(linked) != len(set(linked)) or set(linked) != scenario_ids:
+                    errors.append("user_execution.scenario_ids must exactly cover every acceptance scenario once")
+                linked_actions = {
+                    scenario.get("user_action") for scenario in (scenarios if isinstance(scenarios, list) else [])
+                    if isinstance(scenario, dict) and scenario.get("scenario_id") in linked
+                }
+                if len(linked_actions) != 1:
+                    errors.append("one user execution requires the same initiating action for every linked scenario")
+                if user_execution.get("production_path_complete") is not True:
+                    errors.append("user_execution.production_path_complete must be true")
+                if user_execution.get("continues_independent_targets") is not True:
+                    errors.append("user_execution.continues_independent_targets must be true")
+                if user_execution.get("micro_stage_reassignment") is not False:
+                    errors.append("user_execution.micro_stage_reassignment must be false")
+                if user_execution.get("post_run_debug_source") != "captured_logs_and_automation":
+                    errors.append("user_execution.post_run_debug_source must be captured_logs_and_automation")
+                ledger_path = user_execution.get("action_ledger_path")
+                if ledger_path is not None:
+                    if not text(ledger_path) or not pathlib.Path(ledger_path).is_absolute() or not in_verification_workspace(pathlib.Path(ledger_path)):
+                        errors.append("user_execution.action_ledger_path must be an absolute project test/tmp path")
+                    if user_execution.get("action_type") not in {"settings_test", "extension_reload", "generation", "other"}:
+                        errors.append("user_execution.action_type must identify the initiating action")
     requires_preservation = contract.get("requires_behavior_preservation", False)
     if not isinstance(requires_preservation, bool):
         errors.append("requires_behavior_preservation must be boolean when provided")
@@ -399,6 +772,7 @@ def validate_contract(contract: object) -> list[str]:
                 errors.append("runtime_target.extension_path must be an existing absolute directory")
             if not preferences_path.is_absolute() or not preferences_path.is_file():
                 errors.append("runtime_target.secure_preferences_path must be an existing absolute file")
+    validate_external_api_contracts(contract, scenario_ids, scenario_api_links, errors)
     if count and count >= 2:
         diagnosis = contract.get("runtime_diagnosis")
         if not isinstance(diagnosis, dict):
@@ -420,6 +794,9 @@ def validate_contract(contract: object) -> list[str]:
         errors.append("delivered_artifacts must be a non-empty array")
     elif not all(text(item) and pathlib.Path(item).is_file() for item in delivered):
         errors.append("every delivered artifact must be an existing file")
+    for scenario in contract.get("acceptance_scenarios", []):
+        if isinstance(scenario, dict):
+            errors.extend(validate_scenario(scenario))
     return errors
 
 
@@ -544,7 +921,7 @@ def validate_receipt(receipt: object, contract: dict[str, Any], state: dict[str,
     if not text(signature) or not hmac.compare_digest(signature, receipt_signature(receipt, state["receipt_key"])):
         errors.append("receipt signature is missing or invalid; evidence must be produced by run")
     if receipt.get("receipt_version") != RECEIPT_VERSION:
-        errors.append("receipt version is invalid")
+        errors.append("receipt version is invalid; v6 requires recapture, never relabel archived v5 evidence")
     if receipt.get("contract_digest") != digest_object(contract):
         errors.append("receipt belongs to a different contract")
     if not isinstance(receipt.get("command"), list) or not receipt["command"] or not all(text(item) for item in receipt["command"]):
@@ -576,7 +953,15 @@ def validate_receipt(receipt: object, contract: dict[str, Any], state: dict[str,
         errors.append("observation.outcome must be failure or success")
     if observation.get("user_action") != scenario.get("user_action"):
         errors.append("observation user action does not match the acceptance scenario")
+    errors.extend(validate_external_api_observation(contract, observation))
+    errors.extend(validate_substitutions(observation))
+    spec = scenario.get("input_lineage", {})
+    if observation.get("original_input") != spec.get("original_input"):
+        errors.append("observation original_input does not match its scenario")
+    if not text(observation.get("entry_stage")):
+        errors.append("observation.entry_stage must declare where execution actually started")
     if observation.get("phase") == "unit":
+        errors.extend(validate_effect_observation(scenario, observation, read_artifact))
         if observation.get("observation_level") != "unit":
             errors.append("unit receipt must use observation_level: unit")
         if observation.get("observed_consumer") != contract["unit_observation"]:
@@ -586,6 +971,9 @@ def validate_receipt(receipt: object, contract: dict[str, Any], state: dict[str,
         if receipt.get("exit_code") != 0 or observation.get("outcome") != "success":
             errors.append("unit receipt must exit zero with outcome success")
         return errors
+    if observation.get("entry_stage") != "original_input":
+        errors.append("runtime execution cannot begin at an intermediate stage")
+    errors.extend(validate_trace(scenario, observation))
     if observation.get("observation_level") != "runtime":
         errors.append("pre_fix and post_fix receipts must use observation_level: runtime")
     if observation.get("observed_consumer") != scenario.get("authoritative_consumer"):
@@ -813,6 +1201,22 @@ def validate_receipt(receipt: object, contract: dict[str, Any], state: dict[str,
     return errors
 
 
+def validate_user_action_evidence(contract: dict[str, Any], post: list[tuple[dict[str, Any], dict[str, Any]]]) -> list[str]:
+    execution = contract.get("user_execution")
+    ledger_path = execution.get("action_ledger_path") if isinstance(execution, dict) else None
+    if not ledger_path:
+        return []  # Archived v6 contracts keep their original shape.
+    try:
+        ledger = read_json(pathlib.Path(ledger_path))
+    except (OSError, json.JSONDecodeError) as error:
+        return [f"user action ledger is missing or unreadable: {error}"]
+    run_ids = {item.get("run_id") for _, item in post if text(item.get("run_id"))}
+    errors = validate_ledger(ledger, contract, require_observed=True, runtime_run_ids=run_ids)
+    if len(run_ids) != 1:
+        errors.append("one user action must produce one correlated post_fix run_id across all scenarios")
+    return errors
+
+
 def validate_all(contract: object, state: object, evidence: object) -> list[str]:
     errors = validate_contract(contract)
     if errors or not isinstance(contract, dict):
@@ -825,6 +1229,8 @@ def validate_all(contract: object, state: object, evidence: object) -> list[str]
     errors.extend(scope_errors(contract, state))
     if not isinstance(evidence, dict) or not isinstance(evidence.get("receipts"), list):
         return errors + ["evidence.receipts must be an array"]
+    if evidence.get("version") != RECEIPT_VERSION:
+        errors.append("evidence version must be 6; archived evidence requires recapture")
     receipts = evidence["receipts"]
     if not receipts:
         return errors + ["at least one runtime receipt is required"]
@@ -837,6 +1243,7 @@ def validate_all(contract: object, state: object, evidence: object) -> list[str]
     unit = [(receipt, item) for receipt, item in observations if item.get("phase") == "unit"]
     post = [(receipt, item) for receipt, item in observations if item.get("phase") == "post_fix"]
     pre = [(receipt, item) for receipt, item in observations if item.get("phase") == "pre_fix"]
+    errors.extend(validate_user_action_evidence(contract, post))
     passed_unit_commands = {tuple(receipt.get("command", [])) for receipt, item in unit if receipt.get("exit_code") == 0 and item.get("outcome") == "success"}
     for command in contract["unit_test_commands"]:
         if tuple(command) not in passed_unit_commands:
@@ -859,6 +1266,11 @@ def validate_all(contract: object, state: object, evidence: object) -> list[str]
             errors.append("every acceptance scenario must fail before the fix and succeed after it")
     elif not any(item.get("outcome") == "success" and receipt.get("exit_code") == 0 for receipt, item in post):
         errors.append("a successful post_fix runtime receipt is required")
+    delivered_by_path = {str(pathlib.Path(item)): digest_file(pathlib.Path(item)) for item in contract["delivered_artifacts"]}
+    for _, observation in post:
+        loaded = {item.get("path"): item.get("sha256") for item in observation.get("loaded_artifacts", []) if isinstance(item, dict)}
+        if any(loaded.get(path) != checksum for path, checksum in delivered_by_path.items()):
+            errors.append(f"scenario {observation.get('scenario_id')} does not cover every delivered artifact by path and hash")
     delivered_hashes = {digest_file(pathlib.Path(item)) for item in contract["delivered_artifacts"]}
     loaded_hashes = {
         artifact.get("sha256")
@@ -877,7 +1289,9 @@ def validate_all(contract: object, state: object, evidence: object) -> list[str]
 
 def self_test() -> int:
     results: list[dict[str, object]] = []
-    with tempfile.TemporaryDirectory(prefix="test-manager-self-test-") as temp_text:
+    workspace = pathlib.Path(__file__).resolve().parents[1] / "test" / "tmp"
+    workspace.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="test-manager-self-test-", dir=workspace) as temp_text:
         root = pathlib.Path(temp_text)
         allowed = root / "allowed"
         forbidden = root / "forbidden"
@@ -918,8 +1332,8 @@ def self_test() -> int:
                 {"id": "req-gemini", "incident_key": "ai-download", "source_path": str(requirement_log), "source_text": requirement_two, "source_sha256": digest_text(requirement_two)},
             ],
             "acceptance_scenarios": [
-                {"scenario_id": "chatgpt-download", "requirement_ids": ["req-chatgpt"], "origin": "https://chatgpt.com", "user_action": "click gallery button", "authoritative_consumer": "browser DOM", "expected_output_count": 1, "coverage_kind": "preservation", "lifecycle_conditions": ["external_bridge", "tab_inactive", "document_hidden"]},
-                {"scenario_id": "gemini-download", "requirement_ids": ["req-gemini"], "origin": "https://gemini.google.com", "user_action": "click gallery button", "authoritative_consumer": "browser DOM", "expected_output_count": 1, "coverage_kind": "preservation", "lifecycle_conditions": ["external_bridge", "tab_inactive", "document_hidden"]},
+                {"scenario_id": "chatgpt-download", "requirement_ids": ["req-chatgpt"], "external_api_contract_ids": [], "origin": "https://chatgpt.com", "user_action": "click gallery button", "authoritative_consumer": "browser DOM", "expected_output_count": 1, "coverage_kind": "preservation", "lifecycle_conditions": ["external_bridge", "tab_inactive", "document_hidden"]},
+                {"scenario_id": "gemini-download", "requirement_ids": ["req-gemini"], "external_api_contract_ids": [], "origin": "https://gemini.google.com", "user_action": "click gallery button", "authoritative_consumer": "browser DOM", "expected_output_count": 1, "coverage_kind": "preservation", "lifecycle_conditions": ["external_bridge", "tab_inactive", "document_hidden"]},
             ],
             "requires_behavior_preservation": True,
             "behavior_change_analysis": {
@@ -979,6 +1393,11 @@ def self_test() -> int:
                     ],
                 }],
             },
+            "external_api_validation": {
+                "applicable": False,
+                "reason": "These validator fixtures exercise browser download boundaries without an external HTTP API.",
+                "contracts": [],
+            },
             "repeated_report_count": 2,
             "runtime_diagnosis": {"source": "runtime_log", "failing_boundary": "content loader", "specific_failing_detail": "receiver missing after reload", "log_artifacts": [str(runtime_log)]},
             "allowed_roots": [str(allowed)],
@@ -987,7 +1406,20 @@ def self_test() -> int:
             "adjacent_workflows": ["unrelated bridge"],
             "delivered_artifacts": [str(artifact)],
             "requires_regression": True,
+            "user_execution": {
+                "manual_run_required": True,
+                "max_user_runs": 1,
+                "scenario_ids": ["chatgpt-download", "gemini-download"],
+                "production_path_complete": True,
+                "continues_independent_targets": True,
+                "micro_stage_reassignment": False,
+                "post_run_debug_source": "captured_logs_and_automation",
+            },
         }
+        from lineage_test_fixtures import scenario_spec, attach_fixture
+        for scenario in contract["acceptance_scenarios"]:
+            scenario["input_lineage"] = scenario_spec(scenario, pathlib.Path(__file__).resolve())
+            scenario["input_lineage"]["artifact_order"] = [{"path": str(artifact), "sha256": digest_file(artifact)}]
         state = create_snapshot(contract)
         key = state["receipt_key"]
 
@@ -1062,6 +1494,7 @@ def self_test() -> int:
                     "unobserved_layers": [],
                 },
             }
+            attach_fixture(allowed / "test" / "tmp", scenario, value["observation"])
             value["signature"] = receipt_signature(value, key)
             return value
 
@@ -1075,14 +1508,188 @@ def self_test() -> int:
         ]}
 
         def case(name: str, accepted: bool, candidate_contract: object = contract, candidate_state: object = state, candidate_evidence: object = good) -> None:
-            actual = not validate_all(candidate_contract, candidate_state, candidate_evidence)
-            results.append({"name": name, "passed": actual is accepted})
+            errors = validate_all(candidate_contract, candidate_state, candidate_evidence)
+            actual = not errors
+            results.append({"name": name, "passed": actual is accepted, **({"errors": errors} if actual is not accepted else {})})
 
         def contract_case(name: str, accepted: bool, candidate_contract: object) -> None:
             actual = not validate_contract(candidate_contract)
             results.append({"name": name, "passed": actual is accepted})
 
-        case("signed pre/post runtime accepted", True)
+        case("synthetic v6 schema fixtures accepted (validator unit test only)", True)
+        missing_api_decision = copy.deepcopy(contract)
+        missing_api_decision.pop("external_api_validation")
+        contract_case("missing external API applicability decision rejected", False, missing_api_decision)
+
+        api_schema = [
+            {"path": "$.status", "type": "string", "required": True, "safe_value": "OK"},
+            {"path": "$.authenticated", "type": "boolean", "required": True, "safe_value": True},
+        ]
+        api_capture = allowed / "obsidian-status-capture.json"
+        write_json(api_capture, {
+            "contract_id": "obsidian-status",
+            "system": "Obsidian Local REST API",
+            "operation": "read server status",
+            "method": "GET",
+            "endpoint_pattern": "https://127.0.0.1:27124/",
+            "authoritative_environment": "windows_host",
+            "source_kind": "live_read_only",
+            "response_schema": api_schema,
+            "contains_secrets": False,
+        })
+        api_fixture = allowed / "obsidian-status-fixture.json"
+        write_json(api_fixture, {"status": "OK", "authenticated": True})
+        api_consumer = allowed / "obsidian-consumer.js"
+        api_consumer.write_text("const connected = body.status === 'OK' && body.authenticated === true;\n", encoding="utf-8")
+        mutant_receipt = allowed / "obsidian-status-mutant.json"
+        write_json(mutant_receipt, {
+            "contract_id": "obsidian-status", "mutation_kind": "field_name",
+            "from_path": "$.status", "to_path": "$.ok",
+            "rejected": True, "production_consumer_executed": True, "exit_code": 1,
+        })
+        type_mutant_receipt = allowed / "obsidian-type-mutant.json"
+        write_json(type_mutant_receipt, {
+            "contract_id": "obsidian-status", "mutation_kind": "field_type",
+            "path": "$.authenticated", "from_type": "boolean", "to_type": "string",
+            "rejected": True, "production_consumer_executed": True, "exit_code": 1,
+        })
+        api_contract = copy.deepcopy(contract)
+        api_contract["acceptance_scenarios"][0]["external_api_contract_ids"] = ["obsidian-status"]
+        api_contract["runtime_target"]["external_api_environments"] = ["windows_host"]
+        api_contract["external_api_validation"] = {
+            "applicable": True,
+            "reason": "The connection check consumes the live Obsidian status response.",
+            "contracts": [{
+                "contract_id": "obsidian-status",
+                "scenario_ids": ["chatgpt-download"],
+                "system": "Obsidian Local REST API",
+                "operation": "read server status",
+                "method": "GET",
+                "endpoint_pattern": "https://127.0.0.1:27124/",
+                "authoritative_environment": "windows_host",
+                "response_schema": api_schema,
+                "safe_probe": {
+                    "available": True, "source_kind": "live_read_only",
+                    "path": str(api_capture), "sha256": digest_file(api_capture),
+                },
+                "fixtures": [{
+                    "path": str(api_fixture), "sha256": digest_file(api_fixture),
+                    "source_capture_sha256": digest_file(api_capture), "response_schema": api_schema,
+                }],
+                "consumer": {
+                    "path": str(api_consumer), "sha256": digest_file(api_consumer),
+                    "expression": "body.status === 'OK' && body.authenticated === true",
+                    "required_fields": ["$.status", "$.authenticated"],
+                },
+                "mutation_tests": [
+                    {"path": str(mutant_receipt), "sha256": digest_file(mutant_receipt)},
+                    {"path": str(type_mutant_receipt), "sha256": digest_file(type_mutant_receipt)},
+                ],
+            }],
+        }
+        contract_case("capture-derived external API consumer contract accepted", True, api_contract)
+        wrong_fixture_schema = copy.deepcopy(api_contract)
+        wrong_fixture_schema["external_api_validation"]["contracts"][0]["fixtures"][0]["response_schema"][0]["path"] = "$.ok"
+        contract_case("status versus ok fixture drift rejected", False, wrong_fixture_schema)
+        wrong_environment = copy.deepcopy(api_contract)
+        wrong_environment["runtime_target"]["external_api_environments"] = ["wsl"]
+        contract_case("WSL versus Windows API environment mismatch rejected", False, wrong_environment)
+        wrong_type = copy.deepcopy(api_contract)
+        wrong_type["external_api_validation"]["contracts"][0]["fixtures"][0]["response_schema"][1]["type"] = "string"
+        contract_case("external API fixture type mismatch rejected", False, wrong_type)
+        surviving_mutant = allowed / "surviving-api-mutant.json"
+        write_json(surviving_mutant, {
+            "contract_id": "obsidian-status", "mutation_kind": "field_name",
+            "from_path": "$.status", "to_path": "$.ok",
+            "rejected": False, "production_consumer_executed": True, "exit_code": 0,
+        })
+        surviving_mutant_contract = copy.deepcopy(api_contract)
+        surviving_mutant_contract["external_api_validation"]["contracts"][0]["mutation_tests"][0] = {
+            "path": str(surviving_mutant), "sha256": digest_file(surviving_mutant),
+        }
+        contract_case("surviving external API field mutant rejected", False, surviving_mutant_contract)
+        secret_capture = allowed / "secret-api-capture.json"
+        secret_capture_value = read_json(api_capture)
+        secret_capture_value["authorization"] = "Bearer secret"
+        write_json(secret_capture, secret_capture_value)
+        secret_capture_contract = copy.deepcopy(api_contract)
+        secret_capture_contract["external_api_validation"]["contracts"][0]["safe_probe"].update({
+            "path": str(secret_capture), "sha256": digest_file(secret_capture),
+        })
+        secret_capture_contract["external_api_validation"]["contracts"][0]["fixtures"][0]["source_capture_sha256"] = digest_file(secret_capture)
+        contract_case("credential-bearing API capture rejected", False, secret_capture_contract)
+
+        api_unit_observation = {
+            "scenario_id": "chatgpt-download", "phase": "unit", "outcome": "success",
+            "external_api_validation": [{
+                "contract_id": "obsidian-status", "authoritative_environment": "windows_host",
+                "capture_sha256": digest_file(api_capture), "response_schema": api_schema,
+                "production_consumer_executed": True, "boundary_source": "capture_fixture",
+                "fixture_artifacts": [{"path": str(api_fixture), "sha256": digest_file(api_fixture)}],
+                "mutations_rejected": ["field_name", "field_type"],
+            }],
+        }
+        results.append({"name": "capture fixture executes production API consumer", "passed": not validate_external_api_observation(api_contract, api_unit_observation)})
+        mock_only_observation = copy.deepcopy(api_unit_observation)
+        mock_only_observation["external_api_validation"][0]["production_consumer_executed"] = False
+        results.append({"name": "mock-only API test rejected", "passed": bool(validate_external_api_observation(api_contract, mock_only_observation))})
+        api_runtime_observation = {
+            "scenario_id": "chatgpt-download", "phase": "post_fix", "outcome": "success",
+            "external_api_validation": [{
+                "contract_id": "obsidian-status", "authoritative_environment": "windows_host",
+                "capture_sha256": digest_file(api_capture), "response_schema": api_schema,
+                "production_consumer_executed": True, "boundary_source": "live_response",
+                "mocked": False, "consumer_readback": True,
+            }],
+        }
+        results.append({"name": "live API response reaches authoritative consumer", "passed": not validate_external_api_observation(api_contract, api_runtime_observation)})
+        unobserved_consumer = copy.deepcopy(api_runtime_observation)
+        unobserved_consumer["external_api_validation"][0]["consumer_readback"] = False
+        results.append({"name": "unobserved final API consumer rejected", "passed": bool(validate_external_api_observation(api_contract, unobserved_consumer))})
+        # Re-sign mutations so lineage rejection, not the receipt signature, is tested.
+        def lineage_case(name, mutate, expected_error):
+            candidate = copy.deepcopy(good)
+            item = candidate["receipts"][2]
+            obs = item["observation"]
+            trace = read_json(pathlib.Path(obs["input_lineage"]["trace"]["path"]))
+            mutate(obs, trace)
+            trace_path = allowed / "test" / "tmp" / "lineage-negatives" / (name + ".json")
+            trace_path.parent.mkdir(exist_ok=True)
+            write_json(trace_path, trace)
+            obs["input_lineage"]["trace"] = {"path": str(trace_path), "sha256": digest_file(trace_path)}
+            item["signature"] = receipt_signature(item, key)
+            errors = validate_all(contract, state, candidate)
+            results.append({"name": name, "passed": any(expected_error in error for error in errors) and not any("signature" in error or "scope changed" in error for error in errors)})
+
+        lineage_case("middle-entry", lambda o, t: o.update(entry_stage="handler"), "intermediate stage")
+        lineage_case("missing-original", lambda o, t: t.pop("original_input"), "original input")
+        lineage_case("injected-namespace", lambda o, t: t.update(substitutions=[{"component": "namespace", "stage": "handler", "reason": "fake"}]), "substitutions")
+        lineage_case("skipped-handler", lambda o, t: t["steps"].pop(2), "production path")
+        lineage_case("wrong-run", lambda o, t: t.update(run_id="another-run"), "run_id")
+        lineage_case("missing-loader-capture", lambda o, t: t.pop("loader_capture"), "loader_capture")
+        lineage_case("missing-boundary-capture", lambda o, t: t["steps"][0].pop("capture"), "capture")
+        lineage_case("broken-input-chain", lambda o, t: t["steps"][1].update(input_sha256="0" * 64), "transformation chain")
+        def inject_module(obs, trace):
+            trace["loaded_artifacts"].append({"path": str(pathlib.Path(__file__).resolve()), "sha256": digest_file(pathlib.Path(__file__))})
+            obs["loaded_artifacts"] = trace["loaded_artifacts"]
+        lineage_case("test-added-module", inject_module, "frozen production loader order")
+        def force_success(obs, trace):
+            capture = read_json(pathlib.Path(trace["steps"][-1]["capture"]["path"]))
+            capture["observation"] = {"success": True}
+            path = allowed / "test" / "tmp" / "forced-success.json"
+            write_json(path, capture)
+            trace["steps"][-1]["capture"] = {"path": str(path), "sha256": digest_file(path)}
+        lineage_case("forced-success-flag", force_success, "boundary value fingerprint")
+        bad = copy.deepcopy(good)
+        bad["version"] = 5
+        case("v5 requires recapture", False, candidate_evidence=bad)
+        bad = copy.deepcopy(good)
+        bad["receipts"][0]["observation"]["substitutions"] = []
+        bad["receipts"][0]["signature"] = receipt_signature(bad["receipts"][0], key)
+        case("unit mock inventory required", False, candidate_evidence=bad)
+        bad_contract = copy.deepcopy(contract)
+        bad_contract["acceptance_scenarios"][0]["input_lineage"]["original_input"]["source_kind"] = []
+        contract_case("malformed source fails closed", False, bad_contract)
         runner.write_text(
             "import hashlib, json, os, pathlib, sys\n"
             f"artifact = pathlib.Path({str(artifact)!r})\n"
@@ -1105,6 +1712,10 @@ def self_test() -> int:
             "  'input_validation': None if is_unit else [{'surface_id': 'gallery-prompt', 'input_driver': 'browser keyboard input', 'synthetic_shortcuts': [], 'observations': {'rendered_target': True, 'hit_test': 'textarea', 'focus': 'textarea', 'first_input': {'length': 1}, 'continuous_input': {'length': 4}, 'event_trace': ['keydown', 'beforeinput', 'input', 'keyup'], 'event_value_snapshot': True, 'value_after_input': {'length': 4, 'sha256': hashlib.sha256(b'test').hexdigest()}, 'root_count_after_input': 1, 'uncaught_errors': [], 'ime_composition': {'committed_once': True, 'event_order': ['compositionstart', 'compositionupdate', 'input', 'compositionend']}, 'commit_readback': {'matched': True}, 'cancel_readback': {'unchanged': True}, 'reload_readback': {'matched': True}}}],\n"
             "  'loaded_artifacts': [{'path': str(artifact), 'sha256': hashlib.sha256(artifact.read_bytes()).hexdigest()}],\n"
             "  'runtime_logs': [str(runtime_log)], 'uncaught_errors': [], 'unobserved_layers': []}\n"
+            f"sys.path.insert(0, {str(pathlib.Path(__file__).resolve().parent)!r})\n"
+            "from lineage_test_fixtures import attach_fixture\n"
+            f"scenarios = {contract['acceptance_scenarios']!r}\n"
+            f"attach_fixture({str(allowed / 'test' / 'tmp')!r}, next(s for s in scenarios if s['scenario_id'] == scenario_id), observation)\n"
             "pathlib.Path(os.environ['TEST_MANAGER_OBSERVATION_PATH']).write_text(json.dumps(observation), encoding='utf-8')\n"
             "raise SystemExit(1 if phase == 'pre_fix' else 0)\n",
             encoding="utf-8",
@@ -1114,7 +1725,7 @@ def self_test() -> int:
             run_check(contract, state, runtime_evidence_path, [sys.executable, str(runner), "unit", "success", scenario_id])
             run_check(contract, state, runtime_evidence_path, [sys.executable, str(runner), "pre_fix", "failure", scenario_id])
             run_check(contract, state, runtime_evidence_path, [sys.executable, str(runner), "post_fix", "success", scenario_id])
-        case("validator executes and signs runtime commands", True, candidate_evidence=read_json(runtime_evidence_path))
+        case("validator executes and signs fixture commands (not product evidence)", True, candidate_evidence=read_json(runtime_evidence_path))
         missing_input_contract = dict(contract)
         missing_input_contract.pop("input_validation")
         contract_case("missing input applicability decision rejected", False, missing_input_contract)
@@ -1160,6 +1771,18 @@ def self_test() -> int:
         contract_case("unmapped requirement rejected", False, omitted_requirement_contract)
         origin_mismatch_contract = {**contract, "runtime_target": {**contract["runtime_target"], "required_origins": ["https://chatgpt.com"]}}
         contract_case("underdeclared origin set rejected", False, origin_mismatch_contract)
+        repeated_user_runs_contract = copy.deepcopy(contract)
+        repeated_user_runs_contract["user_execution"]["max_user_runs"] = 2
+        contract_case("more than one user runtime execution rejected", False, repeated_user_runs_contract)
+        micro_stage_contract = copy.deepcopy(contract)
+        micro_stage_contract["user_execution"]["micro_stage_reassignment"] = True
+        contract_case("micro-stage Test reassignment rejected", False, micro_stage_contract)
+        fail_fast_contract = copy.deepcopy(contract)
+        fail_fast_contract["user_execution"]["continues_independent_targets"] = False
+        contract_case("fail-fast across independent targets rejected", False, fail_fast_contract)
+        split_action_contract = copy.deepcopy(contract)
+        split_action_contract["acceptance_scenarios"][1]["user_action"] = "click a second site Test"
+        contract_case("different user actions across one-run scenarios rejected", False, split_action_contract)
         missing_behavior_analysis = dict(contract)
         missing_behavior_analysis.pop("behavior_change_analysis")
         contract_case("shared guard change without behavior analysis rejected", False, missing_behavior_analysis)
@@ -1227,46 +1850,15 @@ def self_test() -> int:
         phase = os.environ.get("TEST_MANAGER_PHASE", "unit")
         requirement_ids = [item for item in os.environ.get("TEST_MANAGER_REQUIREMENT_IDS", "req-self-test").split(",") if item]
         lifecycle_conditions = [item for item in os.environ.get("TEST_MANAGER_LIFECYCLE", "local_cli").split(",") if item]
-        is_unit = phase == "unit"
-        observation: dict[str, Any] = {
-            "scenario_id": scenario_id,
-            "requirement_ids": requirement_ids,
-            "lifecycle_conditions": lifecycle_conditions,
-            "phase": phase,
-            "outcome": "success" if ok else "failure",
-            "observation_level": "unit" if is_unit else "runtime",
-            "runtime": "Python Test Manager validator self-test",
-            "user_action": os.environ.get("TEST_MANAGER_USER_ACTION", "run Test Manager self-test"),
-            "observed_consumer": os.environ.get("TEST_MANAGER_CONSUMER", "validator self-test result"),
-            "mocked": True if is_unit else False,
+        observation = {
+            "scenario_id": scenario_id, "requirement_ids": requirement_ids,
+            "lifecycle_conditions": lifecycle_conditions, "phase": "unit",
+            "outcome": "success" if ok else "failure", "observation_level": "unit",
+            "runtime": "validator self-test fixtures", "mocked": True,
+            "substitutions": [{"component": "runtime recorder", "stage": "all", "reason": "validator schema self-test only"}],
+            "entry_stage": "validator", "evidence_kind": "validator_self_test",
+            "observed_consumer": "validator self-test result", "user_action": "run self-test",
         }
-        if not is_unit:
-            action_started_ns = time.time_ns()
-            loaded_artifacts = [pathlib.Path(item) for item in os.environ.get("TEST_MANAGER_LOADED_ARTIFACTS", "").split(os.pathsep) if item]
-            runtime_logs = [item for item in os.environ.get("TEST_MANAGER_RUNTIME_LOGS", "").split(os.pathsep) if item]
-            observation.update({
-                "run_id": os.environ.get("TEST_MANAGER_RUN_ID", f"self-test-{phase}"),
-                "action_started_ns": action_started_ns,
-                "action_finished_ns": time.time_ns(),
-                "runtime_provenance": {
-                    "environment": os.environ.get("TEST_MANAGER_RUNTIME_ENVIRONMENT", "local_cli"),
-                    "fixture": False,
-                    "page_origins": [os.environ.get("TEST_MANAGER_RUNTIME_ORIGIN", "local://test-manager")],
-                },
-                "authoritative_outputs": [],
-                "input_fidelity": {
-                    "production_boundary": os.environ.get("TEST_MANAGER_INPUT_BOUNDARY", "Test Manager CLI command execution"),
-                    "driver": "Python CLI argv",
-                    "matches_user_action": True,
-                    "bypassed_layers": [],
-                    "synthetic_shortcuts": [],
-                    "observations": {"command": "self-test", "exit_status": 0 if ok else 1, "result_set": len(results)},
-                },
-                "loaded_artifacts": [{"path": str(path), "sha256": digest_file(path)} for path in loaded_artifacts],
-                "runtime_logs": runtime_logs,
-                "uncaught_errors": [],
-                "unobserved_layers": [],
-            })
         write_json(pathlib.Path(observation_path), observation)
     return 0 if ok else 1
 

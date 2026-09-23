@@ -22,3 +22,11 @@
 - 요청: 테스트할 때 unit test 통과와 실제 제품 동작 확인을 순서대로 수행하고, 두 결과를 같은 시나리오로 연결하는 필수 절차를 Test Manager에 추가한다.
 - 요청: Side Prompt Gallery 자동응답 다운로드 요구가 반복됐는데도 일부 대상만 계약에 넣고 localhost·Headless·오래된 회전 로그를 근거로 잘못 판정한 과정을 분석해 Test Manager를 수정한다.
 - 완료 조건: 모든 요구·사이트별 scenario coverage, 회전 로그 신선도, 실제 Chrome 등록 경로·버전, action 이후 실제 output을 검증기가 강제하고 일부 대상이나 오래된 증거를 거부한다.
+
+## 2026-09-23
+
+### UI Design Implementation Skill 생성 및 백업
+
+- 요청: `ui-design-implementation` Skill을 생성하고 동일한 복사본을 `~/ai/skills`에 두며, `build-design/SKILL.md` 내용을 참조해 새 Skill 내용을 구성한다.
+- 요청: 새 Skill 생성이 끝나면 `~/ai/skills/build-design`을 삭제하고, 현재 `.codex`에서 사용하는 Skill과 `AGENTS.md`를 각각 `~/ai/skills`, `~/ai/codex`에 백업한다.
+- 완료 조건: 설치본과 백업본의 파일 및 SHA-256을 검증하고, `~/ai/skills/build-design`의 제거 상태와 AGENTS 백업 동일성을 확인한다.

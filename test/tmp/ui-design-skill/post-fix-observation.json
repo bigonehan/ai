@@ -1,0 +1,72 @@
+{
+  "scenario_id": "ui-skill-filesystem-sync",
+  "requirement_ids": [
+    "req-ui-skill-backup",
+    "req-remove-and-back-up-active-config",
+    "req-copy-integrity"
+  ],
+  "runtime": "local filesystem Codex skill loader",
+  "user_action": "create ui-design-implementation skill and synchronize installed and backup copies",
+  "observed_consumer": "installed .codex skill tree and ~/ai backup trees",
+  "phase": "post_fix",
+  "outcome": "success",
+  "observation_level": "runtime",
+  "run_id": "ui-skill-post-1790096112860132250",
+  "action_started_ns": 1790096112860132250,
+  "action_finished_ns": 1790096113016711572,
+  "original_input": {
+    "source_kind": "user_action",
+    "source_ref": "/home/tree/ai/Input.md#2026-09-23",
+    "value_type": "action",
+    "byte_length": 81,
+    "sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00"
+  },
+  "entry_stage": "original_input",
+  "substitutions": [],
+  "mocked": false,
+  "loaded_artifacts": [
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/SKILL.md",
+      "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+    },
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/agents/openai.yaml",
+      "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+    },
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/scripts/validate_layout_contract.py",
+      "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+    }
+  ],
+  "uncaught_errors": [],
+  "unobserved_layers": [],
+  "input_fidelity": {
+    "production_boundary": "filesystem package installation and byte readback",
+    "driver": "Python filesystem process",
+    "matches_user_action": true,
+    "bypassed_layers": [],
+    "synthetic_shortcuts": [],
+    "observations": {
+      "requirement_record": true,
+      "installed_skill_tree": true,
+      "backup_skill_tree": true,
+      "agents_backup": true
+    }
+  },
+  "runtime_provenance": {
+    "environment": "local_filesystem",
+    "fixture": false,
+    "page_origins": []
+  },
+  "authoritative_outputs": [],
+  "runtime_logs": [
+    "/home/tree/ai/Input.md"
+  ],
+  "input_lineage": {
+    "start": "original_input",
+    "trace": {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/runtime/ui-skill-post-1790096112860132250/trace.json",
+      "sha256": "84e03cc4b6ddaf6b111fac36739c73ec7344b50f5c6937ec6199f36cb8d66723"
+    }
+  }
+}

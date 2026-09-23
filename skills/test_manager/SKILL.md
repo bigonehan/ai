@@ -1,18 +1,18 @@
 ---
 name: test-manager
-description: Plan, write, run, and review unit, integration, regression, and end-to-end tests with explicit observation-unit selection, producer-consumer contracts, domain identity and duplicate-name collision resolution, semantic side-effect cardinality, propagation tracing, state transitions, retry boundaries, repeated-regression escalation, typed-value validation, real template rendering, URL decoding, Unicode, cross-OS path mapping, and actual file access. Use whenever Codex changes or runs tests, investigates a missed or repeatedly reported regression, claims behavior is verified, or debugs values or files that are present but cannot be consumed.
+description: Plan, write, run, and review unit, integration, regression, and end-to-end tests with explicit observation-unit selection, producer-consumer contracts, external API capture and fixture lineage, domain identity and duplicate-name collision resolution, semantic side-effect cardinality, propagation tracing, state transitions, retry boundaries, repeated-regression escalation, typed-value validation, real template rendering, URL decoding, Unicode, cross-OS path mapping, and actual file access. Use whenever Codex changes or runs tests, investigates a missed or repeatedly reported regression, claims behavior is verified, or debugs values or files that are present but cannot be consumed.
 ---
 
 # Summary
 
 Follow this order and keep each check distinct:
 
-1. Read applicable rules, requirement history, project test commands, and existing tests.
+1. Read applicable rules, requirement history, project test commands, and existing tests. For a missed regression, explain exactly why the old test passed before designing its replacement.
 2. Build a requirement-to-evidence ledger from the current request and `Input.md`, then freeze scope and one acceptance scenario for every target, site, surface, and lifecycle condition.
 3. Split the visible artifact into data records, nodes inside one component root, document-level root or process instances, and pixels; measure each scope before selecting the authoritative observation unit.
-4. Map producer, propagation, consumer, result, ownership, reinjection, reload, restart, and cleanup boundaries, then identify irreversible effects, semantic effect cardinality, fan-out, fan-in, retries, fallbacks, and persistence stages.
+4. Map producer, propagation, consumer, result, ownership, reinjection, reload, restart, and cleanup boundaries, then identify irreversible effects, semantic effect cardinality, fan-out, fan-in, retries, fallbacks, and persistence stages. For external or multistage work, design boundary-level diagnostics before implementation.
 5. Read actual runtime logs or traces, identify the first failing boundary, reproduce the defect on the buggy baseline or an isolated equivalent mutant, and confirm the regression test is red.
-6. Build stateful production-shaped fixtures and the applicable input, value, boundary, failure, restart, and size test matrix. Every contract declares whether user-editable input validation applies.
+6. Build stateful production-shaped fixtures and the applicable input, value, boundary, failure, restart, and size test matrix. Every contract declares whether user-editable input validation and external API consumer validation apply.
 7. Run narrow unit tests and verify exact effect ledgers, payloads, order, consumer state, and final outcomes.
 8. Run the built artifact in its real runtime and observe the authoritative consumer; unit, mock, jsdom, source-string, and helper-return checks cannot replace this step.
    Drive the initiating action through the production input boundary. Direct property assignment, synthetic event dispatch, handler invocation, or state injection is not user-action evidence.
@@ -20,9 +20,52 @@ Follow this order and keep each check distinct:
 10. Validate a runtime evidence record with `scripts/verify_runtime_evidence.py`; report completion only when the gate accepts it.
 11. When delegation is available, require an independent verifier agent to review the requirement, production dependency topology, mutant-red proof, registered suite, and delivered artifact; validate its receipt with `scripts/verify_independent_review.py`.
 
+## Missed-regression gate (read before testing)
+
+For repeated or costly failures, read [references/false-positive-regressions.md](references/false-positive-regressions.md). Record the reported failure, log evidence, the old test’s substitution or omitted boundary, and the assertion that now rejects it. Prove red on the buggy baseline or an isolated equivalent mutant before accepting green. An unchanged passing test is not evidence of a fix.
+
+### Receiver version mismatch missed by Bridge tests
+
+- **요구조건:** When a Bridge is specified to deliver a particular wire schema, determine delivery compatibility from that schema and the receiver capabilities the flow actually needs. Treat build/runtime versions as deployment identity, not a delivery gate, unless the contract explicitly requires a version match.
+- **통과조건:** With the required receiver capabilities present, a `PING=response, expected=0.3.14, actual=0.3.15, missing=none` case proceeds through real prompt submission and the authoritative final consumer; an unsupported schema or missing capability fails. Verify the loaded worker, all requested sites, and the complete Settings Test result in one correlated run. Prove that an exact-version-gate mutant fails the regression.
+- **금지사항:** Do not use only a same-version PING fixture, combine a version mismatch and missing capability in the sole negative case, assert source text that enforces version equality as proof of correct behavior, or declare PING/model selection a full delivery success. Do not dismiss a loaded-worker mismatch without runtime evidence or ask the user to rerun Test for each site or stage.
+- **실제 결과(잘못한 것):** Earlier tests supplied matching versions, confounded the negative case with a missing dependency, and even asserted exact version equality. Review then dropped evidence of a stale loaded worker. The reported production run failed at receiver readiness on a version-only mismatch before prompt submission, so those passing tests did not establish Bridge delivery.
+
+Never inject a production global or import a missing producer solely to make a test run. Follow the actual loader and record unresolved bindings. For timer, retry, queue, tab-lifecycle or paid-send scenarios, declare `requires_effect_safety: true` and the optional v6 effect contract described in that reference. Advance a virtual clock beyond every relevant deadline **after each trigger**, including alarm, response loss and worker restart. Count effects per stable logical request across transport-ID changes, including explicit zero counts for prohibited close, resend, reset and next-batch actions. Verify state from production transitions: failure, timeout and rate limit are not successful completion.
+
+Treat user-run runtime execution as a scarce final observation, not an interactive debugger. Before asking the user to act, exhaust logs, static tracing, unit/integration coverage, mutants, and available browser automation. When a user action is still required, one invocation of the existing Test entrypoint must drive the complete authorized production workflow to its authoritative consumer, collect every reachable stage and independent target outcome, and return one correlated report. Do not rebind the button to one micro-stage and ask the user to repeat it for the next stage. A dependent stage may stop after its prerequisite fails, but other independent sites/items continue. Irreversible effects remain limited by the user's authorization and the workflow's idempotency contract.
+
+Keep evidence levels explicit: unit/mock, status-read, build/copy, and actual runtime consumer verification. Costly generation/submission/retry is not an automatic follow-up to an offline test. Respect the authorized scope and cost constraints; missing runtime evidence remains `runtime-unverified`. A skill-only repair can finish after its offline suite and independent review without claiming that the product was fixed or replaying paid actions. Product runtime gates below apply to product runtime completion claims, not to this narrower skill maintenance result.
+
 # Test Manager
 
 Treat passing tests as evidence only when they exercise the behavior and boundary that can fail in production.
+
+## Original Input and Runtime Evidence
+
+Before creating a runtime recorder or reviewing evidence, read [references/input-lineage.md](references/input-lineage.md). Receipt schema **v6** requires each scenario to connect the original user action/value/file to the production loader, handler, transformations and authoritative consumer. Fingerprint the source without copying private raw values into receipts. Capture the actual boundary values and loader order; a middle-stage payload, injected namespace or forced success readback cannot establish runtime completion.
+
+Mocks remain useful for unit tests. Declare their component, stage and reason in `substitutions`, identify `entry_stage`, and keep their results at unit level. Do not reuse synthetic validator fixtures as product evidence. The validator checks consistency; an independent verifier must inspect the recorder and how its captures were obtained, including the production-owned load list.
+
+For a reported failure in an existing Settings Test workflow, keep the user's single initiating action and full producer-to-consumer path as the observation unit. Internal automated tests may isolate the failed item or stage, but the user-facing Test must not be narrowed and reassigned between runs. In a multi-target workflow, preserve completed targets from duplicate effects while continuing every independent unfinished target in the same run and reporting the complete matrix.
+
+## Single User-Run Hard Gate
+
+For every new or revised contract that requires a user-run runtime action, declare `user_execution` with `manual_run_required: true`, `max_user_runs: 1`, the complete set of `scenario_ids`, `production_path_complete: true`, `continues_independent_targets: true`, `micro_stage_reassignment: false`, and `post_run_debug_source` set to `captured_logs_and_automation`. Every linked scenario must use the same initiating user action. The single action must cover the production path through each scenario's authoritative consumer; a receiver-only, selector-only, ACK-only, or helper-only result is invalid when later authorized boundaries exist.
+
+For each new or revised manual-run contract, also declare `user_execution.action_type` (`settings_test`, `extension_reload`, `generation`, or `other`) and an absolute `user_execution.action_ledger_path` under that project's `test/tmp/`. Backfill all known requests and observed user actions from the current incident before a request. Treat a request that the user reload an extension, regenerate an output, capture a screenshot, or export logs as a user action; agent-controlled automation is distinct. Never reset a ledger to regain the one-run budget. Run `user_action_gate.py reserve` **before writing any user-facing request**; a denied or missing gate means no request. Reserve consumes the budget even if the user has not replied. After the run, record its run ID with `observe`. Before claiming real-runtime completion, run `audit --require-observed`; the runtime evidence validator also checks linked ledgers and run IDs. This checks recorded events, so independently review the conversation against the ledger before relying on it; no local script can intercept an unrecorded chat message.
+
+```text
+python3 scripts/user_action_gate.py init <project/test/tmp/task/action-ledger.json> <task-id>
+python3 scripts/user_action_gate.py record-existing <ledger.json> requested|observed <action-type> <scope> <source-reference> [--run-id <id>]
+python3 scripts/user_action_gate.py reserve <contract.json> <ledger.json> <action-type> <full-workflow-scope> <source-reference>
+python3 scripts/user_action_gate.py observe <ledger.json> <run-id> <source-reference>
+python3 scripts/user_action_gate.py audit <ledger.json> --contract <contract.json> --require-observed --run-id <id>
+```
+
+After that run, use the correlated run ID, captured logs, persisted state, and an authenticated automation profile for diagnosis and safe replay. Do not ask the user for another stage/site/feature click. If the one-run boundary cannot be built safely within current authorization, report the missing boundary before requesting any execution.
+
+Keep v5 evidence archived unchanged. Freeze a v6 contract and recapture missing source, loader and boundary observations; changing a version number is not migration. Missing real-runtime access means `runtime-unverified` for that product scenario. For changes to this skill’s validators, report schema/unit-test results separately without claiming product runtime verification.
 
 ## Scope Contract Hard Gate
 
@@ -77,6 +120,23 @@ When collaboration/delegation is available, the implementation author cannot be 
 4. Declare `independent_verification` in the contract with `author_id`, exact `scenario_ids`, `standard_suite_command`, and exact `reviewed_artifacts`, then run `python3 scripts/verify_independent_review.py validate <contract.json> <receipt.json>`. A missing receipt, identical author/verifier identity, uncovered scenario, stale fixture, unregistered regression, surviving mutant, unresolved finding, failed command, or mismatched artifact hash blocks completion.
 5. After any product or test change made in response to findings, generate a new receipt for the new artifact hashes; do not reuse the earlier review.
 6. If delegation is unavailable, report `runtime-unverified` and name the missing independent-verifier boundary instead of silently self-approving.
+
+## Design-Time Diagnostic Gate for External and Multistage Work
+
+- **요구조건:** Before implementation, map the ordered producer-to-consumer stages and every external call, retry, persistence, and irreversible-effect boundary. Specify a stable logical-operation ID across stages and attempts; record the stage and owning boundary, attempt, outcome, and safe expected/observed values needed to distinguish each failure. Distinguish not submitted, submission outcome unknown, and submitted but not verified.
+- **통과조건:** Exercise the production logging path with the same error text arising at two different boundaries and prove the records identify the first failing stage and owner for each operation. Prove that identical repeated failures each produce a record, later states do not inherit stale error details, and pre-effect failure, lost submission response, post-effect readback failure, and final consumer success remain distinguishable. For a comparison or selection failure, record candidate counts and the decisive criteria or values without raw private input.
+- **금지사항:** Do not rely on message-only logs, suppress records because the message repeats, flatten nested errors into a generic category, or infer a root cause from an unowned `ECONNRESET` or similar error. Do not log raw prompts, credentials, file contents, or sensitive payloads; use IDs, digests, or redacted metadata for sensitive paths. Do not treat an ACK, helper return, or intermediate status as final consumer proof.
+- **실제 결과(잘못한 것):** The Resolve bridge kept only changed status messages and dropped the stage, boundary owner, and expected-versus-observed readback. Its `ECONNRESET`, unmatched-Shot, and post-append failures therefore could not be diagnosed from the historical log even though the workflow had many passing tests.
+
+## External API Consumer Contract Hard Gate
+
+Read [references/external-api-consumer-contract.md](references/external-api-consumer-contract.md) whenever a test target sends to or consumes a response from an external HTTP API, local host API, bridge endpoint, SDK-backed remote service, or API reached through a different OS boundary.
+
+Every new or revised runtime contract must declare `external_api_validation.applicable`, a reason, and `contracts`. Every acceptance scenario must declare `external_api_contract_ids`, including an empty array when it uses no external API. For each applicable API, bind the exact system, operation, method, sanitized endpoint pattern, authoritative execution environment, response field paths and JSON types, capture-derived fixtures, production consumer artifact, and rejected field-name and field-type mutants. A hand-authored success fixture without a safe capture lineage is not contract evidence.
+
+Use a read-only live probe first when the API provides one. Store only an allowlisted schema and non-sensitive status values; never store credentials, authorization headers, cookies, raw bodies, private payloads, or query secrets. If no safe probe exists, record that fact and use a recorded response or authoritative documentation as a lower evidence layer; this does not replace successful live-response evidence at the actual runtime consumer.
+
+Unit evidence must execute the production consumer against the capture-derived fixture and reject both declared mutants. Successful runtime evidence must come from a non-mocked live response in the declared environment and include authoritative consumer readback. A successful connection, HTTP status, parsed helper result, or fixture-only consumer result cannot close the scenario when the final UI, persistence, file, or downstream consumer remains unobserved.
 
 ## Logs-First Diagnosis Hard Gate
 
@@ -197,7 +257,9 @@ For editable UI, capture the rendered target and coordinates, hit-test result, `
 
 Every runtime contract must declare `input_fidelity` with `production_boundary`, `required_observations`, and `forbidden_shortcuts`. Every runtime observation must name the input driver, match that boundary, contain no bypassed layers or synthetic shortcuts, and provide each declared observation. If the production input boundary cannot be automated or directly observed, report `runtime-unverified`.
 
-Use a contract JSON outside the repository. It must contain `task_id`, `workflow`, `user_action`, `expected_outcome`, `unit_observation`, `unit_test_commands`, `authoritative_consumer`, `requirement_coverage`, `acceptance_scenarios`, `incident_history`, `runtime_log_sources`, `input_fidelity`, `runtime_target`, `repeated_report_count`, `allowed_roots`, `watch_roots`, `forbidden_roots`, `adjacent_workflows`, and `delivered_artifacts`. Repeated reports also require `runtime_diagnosis` with a runtime artifact, named failing boundary, and concrete `specific_failing_detail`. Shared control-flow changes additionally require `requires_behavior_preservation: true`, `behavior_change_analysis`, preservation scenarios, and matching lifecycle observations.
+Keep temporary contracts, snapshots, receipts and capture JSON/TXT in the project’s `test/tmp/`; retain runtime-owned configuration and fixtures in their owning paths. It must contain `task_id`, `workflow`, `user_action`, `expected_outcome`, `unit_observation`, `unit_test_commands`, `authoritative_consumer`, `requirement_coverage`, `acceptance_scenarios`, `incident_history`, `runtime_log_sources`, `input_fidelity`, `runtime_target`, `repeated_report_count`, `allowed_roots`, `watch_roots`, `forbidden_roots`, `adjacent_workflows`, and `delivered_artifacts`. Repeated reports also require `runtime_diagnosis` with a runtime artifact, named failing boundary, and concrete `specific_failing_detail`. Shared control-flow changes additionally require `requires_behavior_preservation: true`, `behavior_change_analysis`, preservation scenarios, and matching lifecycle observations.
+
+The contract also requires `external_api_validation` with an explicit applicability decision. Every acceptance scenario requires `external_api_contract_ids`. Applicable API contracts and observations use the schema and lineage rules in [references/external-api-consumer-contract.md](references/external-api-consumer-contract.md).
 
 Capture scope before mutation:
 
@@ -224,7 +286,7 @@ Validation requires every requirement to map to scenarios, every scenario to hav
 Run the gate's own negative and positive fixtures after changing this skill:
 
 ```bash
-python3 /home/tree/ai/skills/test_manager/scripts/verify_runtime_evidence.py self-test
+python3 /home/tree/ai/skills/test_manager/scripts/run_self_tests.py
 ```
 
 ## Observation Unit Selection
@@ -400,6 +462,7 @@ Cover the applicable rows:
 28. Text-like inputs with IME support prove composition without duplicate or lost commits, and a delayed event-target read mutant fails.
 29. Commit and cancel routes read the authoritative consumer independently; required persistence is read back after reload or restart.
 30. Input evidence stores only length and SHA-256 for entered values and cannot expose raw user text.
+31. Every scenario declares its external API contract IDs; applicable APIs use a safe capture-derived fixture, execute the production consumer, reject a field-name mutant, and reach the live authoritative consumer in the declared environment.
 
 If a row is relevant but cannot be tested, state the gap before claiming completion.
 
@@ -438,6 +501,7 @@ Before reporting success, answer:
 - Did the runtime test drive the production input boundary without property assignment, synthetic event dispatch, direct `click()`, handler invocation, or state injection?
 - For editable UI, did it verify hit testing, Shadow DOM-aware focus, keyboard input, event/default-prevention traces, commit, reload persistence, and hostile host-page interference?
 - Does the contract explicitly declare whether input validation applies, and does every applicable surface have a linked scenario and complete runtime receipt?
+- Does the contract explicitly declare whether external API validation applies, and does every linked scenario prove capture lineage, production-consumer execution, environment identity, mutant rejection, and live consumer readback?
 - Did first-character, continuous, IME, rerender/root survival, commit, cancel, and persistence checks run where their surface flags require them?
 - Does a released-event-target mutant fail, and are entered values represented only by length and SHA-256 in evidence?
 - Was the bundled value/path self-test run when those boundaries apply?

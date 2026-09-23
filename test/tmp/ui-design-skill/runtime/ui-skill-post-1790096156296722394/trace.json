@@ -1,0 +1,97 @@
+{
+  "evidence_kind": "runtime_capture",
+  "scenario_id": "ui-skill-filesystem-sync",
+  "run_id": "ui-skill-post-1790096156296722394",
+  "phase": "post_fix",
+  "outcome": "success",
+  "original_input": {
+    "source_kind": "user_action",
+    "source_ref": "/home/tree/ai/Input.md#2026-09-23",
+    "value_type": "action",
+    "byte_length": 81,
+    "sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00"
+  },
+  "substitutions": [],
+  "loader_sources": [
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+      "sha256": "746e70d5b3ae13009190522f2bc7be073afd920aeef25bfd60cbddcde8cc5404"
+    }
+  ],
+  "loaded_artifacts": [
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/SKILL.md",
+      "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+    },
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/agents/openai.yaml",
+      "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+    },
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/scripts/validate_layout_contract.py",
+      "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+    }
+  ],
+  "loader_capture": {
+    "path": "/home/tree/ai/test/tmp/ui-design-skill/runtime/ui-skill-post-1790096156296722394/loader.json",
+    "sha256": "f938e71b5e8e3474b08feb12447e483c0781bf21d240191eace3b87abb40223b"
+  },
+  "steps": [
+    {
+      "id": "requirement-input",
+      "role": "input",
+      "interface": "dated requirement record",
+      "at_ns": 1790096156296722395,
+      "substituted": false,
+      "input_sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00",
+      "output_sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00",
+      "status": "success",
+      "capture": {
+        "path": "/home/tree/ai/test/tmp/ui-design-skill/runtime/ui-skill-post-1790096156296722394/step-0.json",
+        "sha256": "2abbb407ab4fcdc6353b55719f101006aa5498fead2c87abb99b28843ad115db"
+      }
+    },
+    {
+      "id": "skill-copy-loader",
+      "role": "loader",
+      "interface": "filesystem skill package copy",
+      "at_ns": 1790096156296722396,
+      "substituted": false,
+      "input_sha256": "bd37cc99abc68127030439a8e5936946d252b495b48e0cb672a88d505f017e00",
+      "output_sha256": "379b6bf0dd5074d610bcfe0a26eb4b7d623922f2d6d77e0671c91e2023bd8f06",
+      "status": "success",
+      "capture": {
+        "path": "/home/tree/ai/test/tmp/ui-design-skill/runtime/ui-skill-post-1790096156296722394/step-1.json",
+        "sha256": "4f22cecd9786bbf08e54f6e6df8f2d54efc5dd838c4d2b7db397f5fc80f3cb42"
+      }
+    },
+    {
+      "id": "skill-validator",
+      "role": "handler",
+      "interface": "skill-creator quick validation and layout-validator self-test",
+      "at_ns": 1790096156296722397,
+      "substituted": false,
+      "input_sha256": "379b6bf0dd5074d610bcfe0a26eb4b7d623922f2d6d77e0671c91e2023bd8f06",
+      "output_sha256": "4ec07a9c28adb8ff0a6c18be8a2ba51f85dc964a814e5b49544a6219f70232f8",
+      "status": "success",
+      "capture": {
+        "path": "/home/tree/ai/test/tmp/ui-design-skill/runtime/ui-skill-post-1790096156296722394/step-2.json",
+        "sha256": "f78777a98d42533f2bc0090f83f524ef79ed48794cad0445a43efe7a65217c84"
+      }
+    },
+    {
+      "id": "installed-and-backup-readback",
+      "role": "consumer",
+      "interface": "installed .codex skill tree and ~/ai backup trees",
+      "at_ns": 1790096156296722398,
+      "substituted": false,
+      "input_sha256": "4ec07a9c28adb8ff0a6c18be8a2ba51f85dc964a814e5b49544a6219f70232f8",
+      "output_sha256": "901d60cefbaf150ed5b56bb910e53fd3c32534f5032a98cfe2a71e3c747689ed",
+      "status": "success",
+      "capture": {
+        "path": "/home/tree/ai/test/tmp/ui-design-skill/runtime/ui-skill-post-1790096156296722394/step-3.json",
+        "sha256": "61ec99302db0336da71074fdab074bc051b0bbfbc9480caf7aec21aede231e50"
+      }
+    }
+  ]
+}

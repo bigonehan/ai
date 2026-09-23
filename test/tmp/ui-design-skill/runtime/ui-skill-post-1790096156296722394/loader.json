@@ -1,0 +1,25 @@
+{
+  "run_id": "ui-skill-post-1790096156296722394",
+  "scenario_id": "ui-skill-filesystem-sync",
+  "phase": "post_fix",
+  "loader_sources": [
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/verify_skill_backup.py",
+      "sha256": "746e70d5b3ae13009190522f2bc7be073afd920aeef25bfd60cbddcde8cc5404"
+    }
+  ],
+  "artifact_order": [
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/SKILL.md",
+      "sha256": "79d0da03a3c3ece1fadc111e71896a7ed57344038b51062e569d874b825a3c55"
+    },
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/agents/openai.yaml",
+      "sha256": "ada4bac658002091336d1060776fd7b70df89a612c545e113be6f63537d48032"
+    },
+    {
+      "path": "/home/tree/ai/test/tmp/ui-design-skill/staging/ui-design-implementation/scripts/validate_layout_contract.py",
+      "sha256": "62892a1c8bcc5647a4f7ae7eac5987b1eb02a616ea4f945e641f1f7a7edc5ef6"
+    }
+  ]
+}

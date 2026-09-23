@@ -1,0 +1,25 @@
+{
+  "scenario_id": "test-manager-self-test",
+  "requirement_ids": [
+    "req-self-test"
+  ],
+  "lifecycle_conditions": [
+    "local_cli"
+  ],
+  "phase": "unit",
+  "outcome": "success",
+  "observation_level": "unit",
+  "runtime": "validator self-test fixtures",
+  "mocked": true,
+  "substitutions": [
+    {
+      "component": "runtime recorder",
+      "stage": "all",
+      "reason": "validator schema self-test only"
+    }
+  ],
+  "entry_stage": "validator",
+  "evidence_kind": "validator_self_test",
+  "observed_consumer": "validator self-test result",
+  "user_action": "run self-test"
+}

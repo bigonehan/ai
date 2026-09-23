@@ -1,0 +1,20 @@
+{
+  "scenario_id": "ui-skill-filesystem-sync",
+  "run_id": "ui-skill-post-1790095701103337777",
+  "phase": "post_fix",
+  "step_id": "skill-validator",
+  "at_ns": 1790095701103337780,
+  "input_sha256": "dc8dde1fd50b84b1268429dbee156a07eb71d5ef3f01f43bd06048d9af439e77",
+  "output_sha256": "dc8dde1fd50b84b1268429dbee156a07eb71d5ef3f01f43bd06048d9af439e77",
+  "status": "success",
+  "channel": "filesystem",
+  "observation": {
+    "source_ref": "/home/tree/ai/Input.md#2026-09-23",
+    "readback": {
+      "value_type": "skill-tree-digest",
+      "byte_length": 194,
+      "sha256": "dc8dde1fd50b84b1268429dbee156a07eb71d5ef3f01f43bd06048d9af439e77"
+    },
+    "consumer": null
+  }
+}
