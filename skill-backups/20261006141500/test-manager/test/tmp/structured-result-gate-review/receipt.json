@@ -1,0 +1,68 @@
+{
+  "author_id": "/root",
+  "verifier_id": "/root/test_manager_review",
+  "contract_digest": "b23500788365b866adc95cc0203b4fa760d4134efd17320f8b23952f8cd7df76",
+  "scenario_ids": [
+    "structured-result-gate"
+  ],
+  "command_results": [
+    {
+      "argv": [
+        "python3",
+        "scripts/run_self_tests.py"
+      ],
+      "exit_code": 0,
+      "output_sha256": "88d3802e4c7818444780b33c682380bf66d0bed0ebe92223fb94f46e7d218fc4"
+    }
+  ],
+  "mutant_rejected": true,
+  "standard_suite_registered": true,
+  "stale_fixture_check": true,
+  "negative_scope_checked": true,
+  "reviewed_artifacts": [
+    {
+      "path": "/home/tree/ai/skills/test_manager/Input.md",
+      "sha256": "14f3d9c643932f9a31b6448725f455e69e87d7ba9951db24659845741e43c69e"
+    },
+    {
+      "path": "/home/tree/ai/skills/test_manager/SKILL.md",
+      "sha256": "fe673bd6904d332dd8c1ab230bf0e9560a102ac11a1ddd5db10f903a8e7757dc"
+    },
+    {
+      "path": "/home/tree/ai/skills/test_manager/scripts/verify_runtime_evidence.py",
+      "sha256": "3b94e5e75b4f14457ad874a65bd3b95f428f3ca65a31eeacbd8a18d1f895b63e"
+    }
+  ],
+  "lineage_reviews": [
+    {
+      "scenario_id": "structured-result-gate",
+      "runtime_observation": {
+        "path": "/home/tree/ai/skills/test_manager/test/tmp/structured-result-gate-review/runtime-observation.json",
+        "sha256": "f8698d7d6cb0d70f0644dde68fa904525dc4b2f013a92977ea7a95d5df88ada6"
+      },
+      "original_input_review": "2026-10-01 Input.md requirement and structured-result acceptance scenario compared",
+      "mock_boundary_review": "offline validator fixture limits and actual node consumer execution reviewed",
+      "loader_order_review": "run_self_tests.py registration and verify_runtime_evidence.py consumer path inspected",
+      "recorder_artifacts": [
+        {
+          "path": "/home/tree/ai/skills/test_manager/scripts/verify_runtime_evidence.py",
+          "sha256": "3b94e5e75b4f14457ad874a65bd3b95f428f3ca65a31eeacbd8a18d1f895b63e"
+        }
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "summary": "Promise-only predicate expression was accepted",
+      "disposition": "fixed"
+    },
+    {
+      "summary": "collapsed status values and missing projected error detail were accepted",
+      "disposition": "fixed"
+    },
+    {
+      "summary": "stale consumer receipt and inert argv path mention were accepted",
+      "disposition": "fixed"
+    }
+  ]
+}

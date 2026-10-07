@@ -46,16 +46,6 @@ Every user request that names an action, effect, or completion condition creates
 
 The continuation order is mandatory: identify the first failed boundary; repair the owning code, configuration, loader, or artifact; rebuild and redeploy; reload or reconnect the same runtime; replay the same production start action; and read the authoritative consumer. Repeat this order for every safe agent-owned failure. For a file/download contract, the terminal predicate includes the new file's existence, nonzero size, SHA-256, and actual byte readback. If only a user-exclusive action remains, use the input gate for one continuation request; do not convert that request into a completion or failure report.
 
-### Delegated completion-loop contract
-
-When delegation is available and the user requests continuation until completion, the main session owns one active completion contract and the authoritative consumer decision. A worker's `complete` message is only a candidate result until the main session reads its diff, logs, receipt, artifact hashes, and persisted consumer state.
-
-For every non-success worker result, the main session must create the next bounded work item from the newly identified first failing boundary and delegate it again. A re-delegation is a new cycle, not a blind retry: reproduce the failure, identify its cause, implement a new improvement at the owning boundary, test it, record the worker's success/failure judgment, and compare any success with the original user requirement. The work item must include: owner boundary, concrete repair objective, unchanged adjacent scope, exact production replay, expected evidence, and the completion predicate. The required loop is `delegate → reproduce → identify cause → implement improvement → test → inspect worker judgment → independent review → reload/reconnect → replay → read consumer`.
-
-Do not send a terminal conclusion between loop iterations. `runtime-unverified`, `incomplete`, `failed`, `blocked`, missing evidence, and validator rejection are work-queue states while any worker-owned or main-session-owned repair, test, reload, replay, or readback remains. If worker creation, slot allocation, or lifecycle management fails, execute the same work item in the main session and retry independent delegation later.
-
-The loop terminates only when the authoritative consumer predicate is true, or when the handoff-readiness table proves that exactly one user-exclusive action remains and the input gate is used for that continuation action. For file outputs, require a new file, nonzero size, SHA-256, and actual byte readback; never promote a request, ACK, intermediate receipt, or existing file.
-
 Before a user handoff, classify every unverified boundary:
 
 - **Agent-executable:** source and loader tracing; stateful unit or integration fixtures; production-artifact execution in an available process; timers; `play`, `pause`, `ended`, `error`, `updateend`, `buffered`, and duration transitions; message/port disconnect and reconnect; worker restart; retry and timeout advancement; conversion; filesystem or download-adapter readback; persisted-state inspection; log correlation; and reversible mutants. Implement missing observability and exercise these boundaries without user input.
@@ -159,7 +149,7 @@ When collaboration/delegation is available, the implementation author cannot be 
 3. Record a JSON receipt containing distinct `author_id` and `verifier_id`, scenario IDs, reviewed artifact SHA-256 values, commands, `mutant_rejected`, `standard_suite_registered`, `stale_fixture_check`, `negative_scope_checked`, findings, and dispositions.
 4. Declare `independent_verification` in the contract with `author_id`, exact `scenario_ids`, `standard_suite_command`, and exact `reviewed_artifacts`, then run `python3 scripts/verify_independent_review.py validate <contract.json> <receipt.json>`. A missing receipt, identical author/verifier identity, uncovered scenario, stale fixture, unregistered regression, surviving mutant, unresolved finding, failed command, or mismatched artifact hash blocks completion.
 5. After any product or test change made in response to findings, generate a new receipt for the new artifact hashes; do not reuse the earlier review.
-6. If delegation is unavailable, the main session performs the independent review checks itself and records the missing verifier as a review limitation. Do not stop an active completion contract or emit a terminal runtime result solely because a worker cannot be created; use `runtime-unverified` only after all agent-executable repair and consumer-readback paths are exhausted.
+6. If delegation is unavailable, report `runtime-unverified` and name the missing independent-verifier boundary instead of silently self-approving.
 
 ## Design-Time Diagnostic Gate for External and Multistage Work
 

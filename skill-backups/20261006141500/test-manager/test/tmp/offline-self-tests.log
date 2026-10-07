@@ -1,0 +1,262 @@
+{
+  "checks": [
+    {
+      "name": "integer",
+      "passed": true
+    },
+    {
+      "name": "numeric string rejected",
+      "passed": true
+    },
+    {
+      "name": "error tuple rejected",
+      "passed": true
+    },
+    {
+      "name": "opaque string preserved",
+      "passed": true
+    },
+    {
+      "name": "template applied",
+      "passed": true
+    },
+    {
+      "name": "template unresolved",
+      "passed": true
+    },
+    {
+      "name": "template partial",
+      "passed": true
+    },
+    {
+      "name": "malformed percent rejected",
+      "passed": true
+    },
+    {
+      "name": "double encoding reported",
+      "passed": true
+    },
+    {
+      "name": "plus preserved",
+      "passed": true
+    },
+    {
+      "name": "windows to WSL",
+      "passed": true
+    },
+    {
+      "name": "WSL to windows",
+      "passed": true
+    },
+    {
+      "name": "unicode file byte read",
+      "passed": true
+    }
+  ],
+  "failures": [],
+  "ok": true
+}
+{
+  "ok": true,
+  "checks": [
+    {
+      "name": "synthetic v6 schema fixtures accepted (validator unit test only)",
+      "passed": true
+    },
+    {
+      "name": "middle-entry",
+      "passed": true
+    },
+    {
+      "name": "missing-original",
+      "passed": true
+    },
+    {
+      "name": "injected-namespace",
+      "passed": true
+    },
+    {
+      "name": "skipped-handler",
+      "passed": true
+    },
+    {
+      "name": "wrong-run",
+      "passed": true
+    },
+    {
+      "name": "missing-loader-capture",
+      "passed": true
+    },
+    {
+      "name": "missing-boundary-capture",
+      "passed": true
+    },
+    {
+      "name": "broken-input-chain",
+      "passed": true
+    },
+    {
+      "name": "test-added-module",
+      "passed": true
+    },
+    {
+      "name": "forced-success-flag",
+      "passed": true
+    },
+    {
+      "name": "v5 requires recapture",
+      "passed": true
+    },
+    {
+      "name": "unit mock inventory required",
+      "passed": true
+    },
+    {
+      "name": "malformed source fails closed",
+      "passed": true
+    },
+    {
+      "name": "validator executes and signs fixture commands (not product evidence)",
+      "passed": true
+    },
+    {
+      "name": "missing input applicability decision rejected",
+      "passed": true
+    },
+    {
+      "name": "applicable input contract without surfaces rejected",
+      "passed": true
+    },
+    {
+      "name": "input surface omitting event snapshot evidence rejected",
+      "passed": true
+    },
+    {
+      "name": "raw input text in evidence rejected",
+      "passed": true
+    },
+    {
+      "name": "first input root disappearance rejected",
+      "passed": true
+    },
+    {
+      "name": "uncaught input exception rejected",
+      "passed": true
+    },
+    {
+      "name": "deferred event read without synchronous snapshot rejected",
+      "passed": true
+    },
+    {
+      "name": "IME duplicate or missing commit rejected",
+      "passed": true
+    },
+    {
+      "name": "commit consumer mismatch rejected",
+      "passed": true
+    },
+    {
+      "name": "cancel mutation rejected",
+      "passed": true
+    },
+    {
+      "name": "persistence readback mismatch rejected",
+      "passed": true
+    },
+    {
+      "name": "released event target mutant fails before deferred updater",
+      "passed": true
+    },
+    {
+      "name": "one of two required targets rejected",
+      "passed": true
+    },
+    {
+      "name": "unmapped requirement rejected",
+      "passed": true
+    },
+    {
+      "name": "underdeclared origin set rejected",
+      "passed": true
+    },
+    {
+      "name": "shared guard change without behavior analysis rejected",
+      "passed": true
+    },
+    {
+      "name": "unreachable preserved fallback rejected",
+      "passed": true
+    },
+    {
+      "name": "behavior removal without requirement authorization rejected",
+      "passed": true
+    },
+    {
+      "name": "synthetic user action rejected",
+      "passed": true
+    },
+    {
+      "name": "active lifecycle cannot satisfy inactive scenario",
+      "passed": true
+    },
+    {
+      "name": "localhost fixture rejected as live site",
+      "passed": true
+    },
+    {
+      "name": "isolated headless browser rejected as user Chrome",
+      "passed": true
+    },
+    {
+      "name": "wrong loaded extension version rejected",
+      "passed": true
+    },
+    {
+      "name": "missing final download rejected",
+      "passed": true
+    },
+    {
+      "name": "fabricated command rejected",
+      "passed": true
+    },
+    {
+      "name": "repeated report without runtime logs rejected",
+      "passed": true
+    },
+    {
+      "name": "vague diagnosis rejected before functional fix",
+      "passed": true
+    },
+    {
+      "name": "missing unit receipt rejected",
+      "passed": true
+    },
+    {
+      "name": "unit and runtime scenario mismatch rejected",
+      "passed": true
+    },
+    {
+      "name": "empty evidence rejected",
+      "passed": true
+    },
+    {
+      "name": "forbidden adjacent scope rejected",
+      "passed": true
+    },
+    {
+      "name": "unsigned self-attestation rejected",
+      "passed": true
+    },
+    {
+      "name": "rotated newest log discovered",
+      "passed": true
+    }
+  ]
+}
+Independent verifier receipt self-test passed
+................
+----------------------------------------------------------------------
+Ran 16 tests in 0.054s
+
+OK
+All Test Manager offline self-tests passed; product runtime remains unverified.

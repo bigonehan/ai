@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run CDP Browser"
+  short_description: "Open and attach to a run_cdp CDP browser for browser workflows"
+  default_prompt: "Use $run-cdp to open or attach to a run_cdp browser and verify the CDP endpoint before browser automation."

@@ -30,3 +30,12 @@
 - 요청: `ui-design-implementation` Skill을 생성하고 동일한 복사본을 `~/ai/skills`에 두며, `build-design/SKILL.md` 내용을 참조해 새 Skill 내용을 구성한다.
 - 요청: 새 Skill 생성이 끝나면 `~/ai/skills/build-design`을 삭제하고, 현재 `.codex`에서 사용하는 Skill과 `AGENTS.md`를 각각 `~/ai/skills`, `~/ai/codex`에 백업한다.
 - 완료 조건: 설치본과 백업본의 파일 및 SHA-256을 검증하고, `~/ai/skills/build-design`의 제거 상태와 AGENTS 백업 동일성을 확인한다.
+
+## 2026-09-24
+
+### 전역 설정 백업 우선 및 Python 승인 규칙
+
+- 요청: 사용자 Skill 또는 전역설정을 추가·수정할 때 `/home/tree/ai` 안의 백업본을 먼저 갱신·검증한 뒤 활성 `.codex` 파일을 갱신한다.
+- 요청: 새 `.py` 파일의 설계·생성·수정이 필요하면 `nf`로 이유를 알리고 사용자 동의를 먼저 받는다. 기존 승인된 Python 도구 실행은 이 별도 동의 대상에서 제외한다.
+- 요청: 두 전역 규칙을 적용한 뒤 `260828.스킬생성.md`를 근거로 `staged-feature-plan` Skill을 Python validator 없이 복원하고 백업본을 먼저 만든다.
+- 완료 조건: 관리 원본과 활성본의 파일 목록 및 SHA-256이 일치하고, 전역 규칙에서 존재하지 않는 staged plan validator 참조가 제거된다.

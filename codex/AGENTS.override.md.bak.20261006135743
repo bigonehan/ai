@@ -88,9 +88,7 @@ draft에서 아래 표현을 내부적으로 검사한다:
 - 사용자가 명시적으로 병합까지 위임하지 않은 이상 자동 병합, 직접 덮어쓰기, 기존 사용자 전역설정 수정은 금지한다.
 
 # D. VERSION BUMP DEFAULT
-기능 개선 또는 신규 기능 추가가 최초 요구사항의 완료 조건을 실제 authoritative consumer에서 충족해 최종 배포되는 시점에만 기본적으로 버전을 `0.0.1`씩 올린다.
-- 문제 재현, 원인 조사, 중간 수정, 테스트 실패, runtime 재시도, 재빌드, 재배포 및 사용자 실행 대기 단계에서는 버전을 올리지 않는다.
-- 같은 활성 완료 계약 안의 후속 수정은 하나의 최종 릴리스로 묶고, 완료 predicate가 참이 된 뒤 한 번만 patch 단위로 증가시킨다.
+기능 개선 또는 신규 기능 추가 작업을 수행할 때는 기본적으로 버전을 `0.0.1`씩 올린다.
 - 별도 지시가 없으면 patch 단위 증가를 사용한다.
 - 각 버전 세그먼트는 기본적으로 최대 두 자리(`00`~`99`)를 넘기지 않도록 관리한다.
 
@@ -160,7 +158,7 @@ Eagle 관련 플러그인의 아이콘은 흰색 라인아트 스타일로 만�
 - 같은 사용자 요구 또는 같은 `(시작 동작, visible 실패, authoritative consumer)`가 두 번째 보고되면, 이전 수정이 멈춘 경계와 기존 테스트가 놓친 결합 상태를 기록한다. 그 뒤에는 동일한 실제 runtime 시작 동작과 동일한 결합 pre-state로 배포 artifact를 실행해 모든 이전 미관찰 경계를 통과하고 authoritative consumer의 persisted 결과를 직접 읽기 전까지 완료로 판단하지 않는다. 다른 fixture, probe, no-collision 상태, 중간 응답 또는 사용자 화면만으로 대체하지 않는다.
 - 테스트의 관찰 단위는 사용자 동작에서 실제 consumer 상태까지 생산자·handler·전파·consumer·결과 경계를 추적해 정한다. 함수 호출 횟수를 실제 효과 횟수로 대신하지 말고 bubbling, 다중 listener, fan-out·fan-in, fallback과 deduplication 뒤의 권위 있는 consumer 결과를 별도로 검사한다.
 - 사용자-visible 기능은 unit test, mock, jsdom, fake Chrome API, 소스 문자열 검사, 빌드 또는 체크섬만으로 완료 처리하지 않는다. 배포 artifact를 실제 브라우저·프로세스·CLI 등 해당 런타임에서 실행하고 권위 있는 consumer 결과를 직접 읽어야 한다.
-- 첫 mutation 전에 `/home/tree/ai/skills/test_manager/scripts/verify_runtime_evidence.py snapshot <contract.json> <state.json>`으로 범위를 고정하고, 실제 runtime 검사는 같은 스크립트의 `run`으로 실행한다. 모든 테스트 근거 완료 응답 전에 `validate <contract.json> <state.json> <evidence.json>`을 실행한다. gate가 `complete`가 아니면 결과를 work item으로 기록하고 agent-executable repair/reload/replay/readback을 계속하며, 자동 단계가 모두 소진되고 residual user-exclusive boundary만 남을 때에만 `runtime-unverified`를 보고한다.
+- 첫 mutation 전에 `/home/tree/ai/skills/test_manager/scripts/verify_runtime_evidence.py snapshot <contract.json> <state.json>`으로 범위를 고정하고, 실제 runtime 검사는 같은 스크립트의 `run`으로 실행한다. 모든 테스트 근거 완료 응답 전에 `validate <contract.json> <state.json> <evidence.json>`을 실행하며, gate가 `complete`를 승인하지 않으면 완료라고 표현하지 않고 `runtime-unverified`와 미검증 경계를 보고한다.
 - 브라우저 확장 작업은 실제 브라우저에 배포본을 로드하고 사용자 시작 동작, content script 또는 service worker 전달, 실제 DOM·editor·download·navigation 결과를 검증한다. reload·재주입·restart가 관련되면 같은 실제 브라우저 세션에서 해당 전환도 실행한다.
 - cross-file 전역 API, namespace export, injected script API 또는 plugin registry member를 추가·변경·소비하면 producer 등록명, production load order, consumer 호출명, 실제 사용자 handler와 authoritative consumer를 하나의 boundary 시나리오에서 실행한다. helper 직접 호출이나 소스 문자열 검사만으로 통과시키지 않고 owner/member 오탈자 mutant를 거부해야 한다.
 - 협업 Agent를 사용할 수 있는 테스트 작업은 구현·테스트 작성자와 다른 Agent가 요구, production loader, 표준 suite 등록, stale fixture, mutant-red 증거, 인접 경로 무변경을 독립 검증한다. `/home/tree/ai/skills/test_manager/scripts/verify_independent_review.py validate <contract.json> <receipt.json>`이 통과하지 않으면 완료 처리하지 않는다. 검증 뒤 제품 또는 테스트 artifact가 바뀌면 새 hash로 다시 독립 검증한다.
@@ -260,7 +258,7 @@ Plan 모드에서 기능 추가, 기능 수정, 버그 해결, 빌드 또는 설
 
 # V. USER CORRECTION INTERNAL-STRUCTURE-FIRST GATE
 사용자가 작업자의 진단, 해석, 사실 판단 또는 결과가 틀렸다고 지적하는 모든 응답과 작업에 적용한다.
-- 지적을 받으면 기존 가설·반박·같은 설명의 반복과 사용자에게 변경을 요구하는 행위를 즉시 중단하고, 내부 구조 조사 후 새 실패 경계에 맞는 수정·검증 작업으로 전환한다. 안전한 추가 수정 자체는 중단하지 않는다.
+- 지적을 받으면 기존 가설, 반박, 같은 설명의 반복, 추가 수정과 사용자에게 변경을 요구하는 행위를 즉시 중단한다.
 - 답변이나 추가 변경 전에 관련 코드, 데이터 구조, 실제 상태 값, 생산자, 전달 단계와 권위 있는 consumer를 직접 조사한다. 조사로 확인할 수 있는 사항을 사용자에게 다시 묻지 않는다.
 - 단일 플래그, 필드, 표시 문구 또는 기존 가설만으로 의미를 확정하지 않는다. 관련 상태 조합과 구조적 관계를 확인해 기존 판단이 틀어진 정확한 경계를 찾는다.
 - 내부 구조 조사가 끝나기 전에는 기존 주장을 유지하거나 사용자의 설명을 부정하거나 외부 설정·schema·data를 바꾸라고 요구하지 않는다.
@@ -283,22 +281,6 @@ Plan 모드에서 기능 추가, 기능 수정, 버그 해결, 빌드 또는 설
 - 사용자가 처음부터 `다운로드될 때까지`, `될 때까지`, `완료될 때까지`, `계속`을 지시한 작업은 authoritative consumer 결과가 확인될 때까지 작업을 종료하거나 `runtime-unverified`를 최종 결론으로 보내지 않는다. `runtime-unverified`는 중간 상태로만 기록하고 원인 수정 → artifact 재빌드·배포 → runtime 재적재 → 동일 Play 실행 → 새 MP3 파일 bytes readback 순서를 자동 반복한다. 안전한 자동 단계가 남아 있지 않고 사용자 전용 동작만 남은 경우에만 input gate를 거쳐 사용자 실행을 요청한다.
 - 이 게이트는 현재 대화뿐 아니라 다음 세션과 다른 프로젝트에도 적용되는 전역 규칙이다. 같은 문제를 다시 지적받으면 기존 설명을 재사용하지 말고, 새로운 실패 증거·영구 설정 diff·재발 방지 테스트를 먼저 만든다.
 - 반복된 UI 성능 회귀에서는 최초로 지목된 노드만 다시 조정하지 않는다. 같은 custom-node package의 sibling frontend 노드를 전수 inventory하고, 반복 입력·pointer·draw 이벤트 1회당 DOM rebuild, 전체 상태 serialization, layout read/write, canvas dirty 부작용을 각각 회귀 계약으로 고정한 뒤 제품 수정을 계속한다.
-- 반복 지적이 같은 활성 작업의 중간 실패·중단·잘못된 버전 증가를 가리키면 완료 predicate가 참이 될 때까지 작업을 유지한다. 중간 실패를 최종 응답으로 보내거나 중간 시도마다 버전을 증가시키지 않는다.
-
-# V-4. AUTHORITATIVE-CONSUMER CONTINUATION HARD GATE
-- 사용자가 `다운로드될 때까지`, `될 때까지`, `완료될 때까지`, `계속 처리` 또는 동등한 지속 조건을 제시한 작업에서는 `runtime-unverified`·`incomplete`·`실패 경계`를 중간 상태로만 기록한다. 중간 상태를 근거로 작업을 종료하거나 결론 final을 보내지 않는다.
-- 중간 상태를 기록한 직후에도 활성 작업을 유지하고, 안전하게 실행 가능한 모든 자동 단계를 즉시 수행한다: 원인 코드·설정 수정 → build → 배포 artifact 복사 → checksum → 동일 runtime 재적재·재연결 → 동일 사용자-visible 시작 동작 → authoritative consumer readback.
-- 사용자 실행이 이미 끝났다고 알려도 사용자 진술은 완료 증거가 아니다. 같은 실행의 producer·transport·handler·consumer 로그와 새 산출물의 실제 바이트를 읽는다. 실제 바이트가 없으면 원인을 수정하고 가능한 runtime 재연결·재실행 경로를 계속한다.
-- `보고만 하고 정지`하는 행동을 금지한다. final은 authoritative consumer의 완료 predicate가 참이거나, 자동 대체 경로·재시도·재적재를 모두 소진하고 사용자 전용 동작만 남아 A-2 input gate를 통해 실행을 요청하는 경우에만 허용한다. 이때도 요청 final은 결론 보고가 아니라 다음 실행을 위한 input 요청으로 작성한다.
-- 최종 결론을 보내기 직전에는 활성 작업의 완료 predicate, 미실행 자동 단계 목록, 사용자 전용 단계 여부, authoritative consumer readback를 일대일로 대조한다. 미완료 자동 단계가 하나라도 있으면 final을 보내지 않고 계속한다.
-
-# V-5. FIRST-COMMAND COMPLETION CONTRACT
-- 사용자가 최초 명령에서 `수행`, `완료될 때까지`, `될 때까지`, `계속`, `다운로드` 또는 동등한 실행·지속 의사를 명시하면 그 명령은 단순 조사·보고 요청이 아니라 완료 predicate를 가진 활성 작업으로 등록한다.
-- 활성 작업은 최초 명령의 producer, transport, handler, process/runtime, artifact, authoritative consumer를 순서대로 실행·검증해야 한다. 중간 상태, 첫 실패, `runtime-unverified`, 사용자 진술, 로그 존재, 빌드 성공, 배포 복사, 체크섬 일치만으로 최초 명령을 종료하거나 완료 보고하지 않는다.
-- 완료 보고는 최초 명령의 완료 predicate가 실제 authoritative consumer에서 참이 된 뒤에만 가능하다. 파일 생성 작업이면 새 파일의 존재·크기·SHA-256·실제 바이트 readback을 모두 확인하고, 다운로드 작업이면 실제 다운로드 디렉터리의 새 파일 readback까지 확인한다.
-- 완료 predicate가 거짓이면 상태를 내부 작업 기록에 남기고 즉시 다음 자동 단계로 진행한다: 실패 경계 확인 → 원인 소유 코드·설정 수정 → 재빌드 → 배포 artifact 갱신 → 동일 runtime 재적재·재연결 → 동일 사용자-visible 시작 동작 재실행 → authoritative consumer readback.
-- 자동 단계가 남아 있는 동안 `incomplete`, `failed`, `blocked`, `runtime-unverified`를 최종 결론으로 보내지 않는다. 사용자 전용 동작만 남았을 때만 A-2 input gate를 거쳐 정확히 남은 동작 하나를 요청하며, 그 요청은 작업 종료 보고가 아니라 활성 작업의 다음 실행 요청으로 작성한다.
-- 이 조항은 V-1~V-4의 예외나 대체가 아니라 최초 명령의 생명주기·완료 보고·중단 금지를 하나의 계약으로 묶는 우선 실행 규칙이다. 같은 사용자 요구가 반복되면 기존 중간 보고를 재사용하지 말고 동일 완료 predicate까지 작업을 재개한다.
 
 # W. INSTRUCTION FILE COMMAND-ONLY RULE
 - `/home/tree/instruction.txt`는 사용자가 복사해 실행할 명령만 저장하는 파일이다.
@@ -320,14 +302,3 @@ Plan 모드에서 기능 추가, 기능 수정, 버그 해결, 빌드 또는 설
 - 모든 에이전트가 실행 중이라 새 위임이 불가능한 경우에는 기존 에이전트의 결과를 기다리며 원본 세션이 독립 작업을 계속한다. 완료 알림을 받은 즉시 종료하고 다음 위임을 재개한다.
 - 사용자에 의해 턴이 중단된 뒤 재개되면 먼저 이전 턴에서 남은 에이전트의 실제 상태를 정리하고, 중단 때문에 제품 구현·검증을 멈추지 않는다.
 - 에이전트 lifecycle 정리 실패는 제품 작업의 실패로 간주하지 않으며, 원본 세션은 가능한 안전한 범위의 구현과 검증을 계속한 뒤에만 결과를 보고한다.
-
-# X-3. DELEGATED COMPLETION LOOP HARD GATE
-- 사용자가 `완료될 때까지`, `될 때까지`, `계속`, `다운로드될 때까지` 또는 동등한 지속 조건을 말하면, 최초 명령을 `active_completion_contract`로 등록하고 메인 세션을 완료 판정자(owner)로 유지한다.
-- 메인 세션은 먼저 현재 열린 Agent를 정리한 뒤, 구현·진단·검증 범위가 서로 겹치지 않는 작업을 최소 한 개의 별도 Agent에 위임한다. Agent는 결과·diff·receipt를 반환할 뿐 완료를 판정하지 않는다.
-- Agent 결과가 완료 predicate를 충족하지 못하거나 실패 경계·validator rejection·missing receipt·runtime-unverified를 포함하면, 메인 세션은 보고하고 멈추지 않는다. `재호출`은 단순 재시도가 아니라 `문제 재현 → 문제 원인 파악 → 원인 경계의 새로운 기능 추가·개선 → 테스트 → Agent 완료 판정(성공/실패) → 최초 요구사항과 대조`의 새 작업 사이클이다. 결과를 직접 읽고 `최초 실패 경계 → 새 수정 목표 → 새 Agent 호출 → 독립 검증 → authoritative consumer readback`을 실행한다.
-- 재호출 과제는 이전 과제와 동일한 조사·보고가 아니라 새로 확인된 소유 코드·설정·artifact·runtime 경계를 수정하도록 구체화한다. 같은 경계가 반복되면 해당 경계를 소유하는 영구 규칙·Skill·제품 파일과 회귀 검사를 함께 갱신한다.
-- 각 재호출 과제의 `bounded`는 한 Agent가 맡는 파일 범위·단일 실패 경계·산출물·검증 조건이 유한하다는 뜻이며, 전체 활성 작업에 임의의 재시도 상한을 두는 뜻이 아니다. 같은 경계가 다시 실패하면 원인 소유자를 상위 설정·loader·runtime으로 승격해 새 과제로 만들고, 완료 predicate가 참이 될 때까지 종료하지 않는다.
-- Agent 슬롯 부족, 호출 오류 또는 lifecycle 오류가 발생해도 활성 작업을 중단하지 않는다. 메인 세션이 동일한 수정·검증 사이클을 직접 수행하고, 슬롯이 회복되면 독립 검토를 다시 위임한다.
-- `runtime-unverified`, `incomplete`, `failed`, `blocked`는 미완료 상태를 기록하는 중간 값일 뿐이다. 안전하게 실행할 메인 세션 또는 Agent 단계가 남아 있으면 최종 응답에 사용하지 않는다.
-- 최종 응답 직전에는 완료 predicate, 모든 Agent 결과, 재호출 횟수와 사유, 미실행 자동 단계, 사용자 전용 단계, authoritative consumer의 persisted readback을 대조한다. predicate가 거짓이거나 자동 단계가 남아 있으면 계속 수행한다.
-- 완료 보고는 authoritative consumer가 실제로 참이 된 뒤에만 보낸다. 파일 산출물은 새 파일 존재·비제로 크기·SHA-256·실제 바이트 readback을 모두 요구한다.
