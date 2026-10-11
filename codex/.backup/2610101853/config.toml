@@ -1,0 +1,33 @@
+model = "gpt-6-sol"
+model_reasoning_effort = "medium"
+project_doc_max_bytes = 131072
+[projects."/home/tree"]
+trust_level = "trusted"
+
+[projects."/home/tree/extensions"]
+trust_level = "trusted"
+
+[projects."/home/tree/Config"]
+trust_level = "trusted"
+
+[projects."/home/tree/ai"]
+trust_level = "trusted"
+
+[tui]
+screen_reader_detection_done = true
+
+[tui.model_availability_nux]
+gpt-6-astra = 4
+"gpt-6.1-sol" = 4
+
+[hooks.state]
+
+[hooks.state."/home/tree/.codex/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:5dc7b9edfa38d3fdd86f7ed2993f33efde8e04447e27ce6c98798685ed69beb8"
+enabled = true
+
+[hooks.state."/home/tree/.codex/hooks.json:post_tool_use:0:0"]
+trusted_hash = "sha256:242b52172c9929913b521a80f38bb670da64eb9c13814fb3705c289fd9a41e2e"
+
+[hooks.state."/home/tree/.codex/hooks.json:stop:0:0"]
+trusted_hash = "sha256:b1a1101184ed60528bf56f6933947703e965ce781d6b6e1e97cd9027ee96efb0"

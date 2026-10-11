@@ -1,1 +1,5 @@
 **/test/tmp/
+skills/initial-project/.env
+skills/initial-project/.env.*
+skills/*/.env
+skills/*/.env.*

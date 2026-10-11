@@ -1,0 +1,9 @@
+{
+  "name": "stagehand-access-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@browserbasehq/stagehand": "4.1.0",
+    "zod": "4.4.3"
+  }
+}

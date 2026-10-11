@@ -1,0 +1,4 @@
+interface:
+  display_name: "Work Project"
+  short_description: "Manage tasks in an initialized project"
+  default_prompt: "Use $work-project (requested alias: work_project) to split the request into bounded tasks, track them in Grist Table26, and complete them with verification."
