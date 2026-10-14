@@ -1,4 +1,0 @@
-interface:
-  display_name: "Stagehand Access"
-  short_description: "Stagehand runtime, AI model key and visible browser sessions for extensions work"
-  default_prompt: "Use $stagehand-access: open a visible (headless: false) Stagehand session with scripts/stagehand.mjs on the shared CDP endpoint and dedicated profile; the model and API key come from the skill's .env."

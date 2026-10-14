@@ -1,0 +1,4 @@
+interface:
+  display_name: "Initial Project"
+  short_description: "Initialize project records and task tracking"
+  default_prompt: "Use $initialize-project (requested alias: initial_project) to initialize a new project and create its Obsidian, Grist, AGENTS.md, Input.md, and task records."

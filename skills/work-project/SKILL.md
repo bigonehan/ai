@@ -11,7 +11,7 @@ Read the nearest `AGENTS.md`, `Input.md`, applicable Table7 management document,
 
 ## Grist access
 
-Every Grist read and write (Table7 project rows, Table26 task rows, readback after writes) goes through the `grist-access` skill: `python3 ~/.codex/skills/grist-access/scripts/grist.py <command>`. It loads the API key from its own `.env`. Do not ask the user for an API key, do not type a key into a command, and do not call the Grist REST API with curl, fetch, or ad-hoc scripts. If the script reports a `config` or `connection` error, report that boundary instead of working around it.
+Every Grist read and write (Table7 project rows, Table26 task rows, readback after writes) goes through the `access-grist` skill: `python3 ~/.codex/skills/access-grist/scripts/grist.py <command>`. It loads the API key from its own `.env`. Do not ask the user for an API key, do not type a key into a command, and do not call the Grist REST API with curl, fetch, or ad-hoc scripts. If the script reports a `config` or `connection` error, report that boundary instead of working around it.
 
 Typical calls: `task <Raw ID>` to read a row, `task-update <Raw ID> --fields '{"H": "작업"}'` for a stage change, `task-update <Raw ID> --fields '{"I": "...", "J": "..."}'` for the failure record, `task-add --fields '{"A": <Table7 Raw ID>, "G": "기능", "B": "...", "H": "초안"}'` for a new row. The script rejects a `$H` value outside the Korean stages, rejects `검증`/`완료` (written only by `task-submit`/`task-complete`) and any `$K` write (only `task-goal`).
 
@@ -54,8 +54,8 @@ Typical calls: `task <Raw ID>` to read a row, `task-update <Raw ID> --fields '{"
    - [x] <flow check>
      근거: <command or readback → actual value>
    ```
-   Then `grist.py flow-wait --project <dir>`. It reruns submitted and hidden tests (failures go back to `교정`), checks the flow record, and writes `$H=대기` with the `[사용자]` lines in `$D`. Ask the user only now, for those lines.
-7. **Complete (main).** After the user confirms, append per row:
+   Then `grist.py flow-wait --project <dir>`. It reruns submitted and hidden tests (failures go back to `교정`), checks the flow record, and writes `$H=대기` with the `[사용자]` lines in `$D`. Ask the user only now, for those lines: the final report after `flow-wait` always ends by asking the user to check them (or the delivered behaviour when there are none) and saying the rows become `완료` once confirmed.
+7. **Complete (main).** When the user confirms (in this or a later session, including "tested, it works"), first handle the header rows still at `대기`: append per row:
    ```
    ## 완료 판정 #<id>
    - [x] [<유형>] <exact goal line text>
@@ -63,7 +63,7 @@ Typical calls: `task <Raw ID>` to read a row, `task-update <Raw ID> --fields '{"
    ```
    and run `grist.py task-complete <id> --project <dir>`. Its `unchecked`/`missing_evidence` output is the next bounded task.
 
-A single small request may be one row handled by the main session itself with the same commands. Judgments inside the gates come from `jev-access`; they are not a separate step.
+A single small request may be one row handled by the main session itself with the same commands. Judgments inside the gates come from `access-jev`; they are not a separate step.
 
 Markdown change records, project `AGENTS.md`, `Input.md`, Table26 state, command output, and the product's real consumer are the work records.
 

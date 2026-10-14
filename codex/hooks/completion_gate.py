@@ -10,7 +10,7 @@ After MAX_BLOCKS consecutive blocks for one thread with no $H change the stop is
 in $D and announced with nf so the loop cannot burn tokens forever. A Grist
 failure never locks the session; it is reported through systemMessage.
 
-Main-session stops also get the jev-access J2 judgment of last_assistant_message
+Main-session stops also get the access-jev J2 judgment of last_assistant_message
 (skipped when jev is missing or failing). With JEV_MODE=enforce a question that
 asks the user for something other than the four allowed actions is blocked even
 in 대기/완료, and a stop that presents a failure as the outcome gets a sharper reason.
@@ -24,14 +24,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-GRIST = Path.home() / ".codex/skills/grist-access/scripts/grist.py"
+GRIST = Path.home() / ".codex/skills/access-grist/scripts/grist.py"
 STATE_DIR = Path.home() / ".codex/tmp/completion_gate"
 MAIN_ALLOWED = ("완료", "대기")
 AGENT_ALLOWED = ("검증", "완료")
 AGENT_TASK = re.compile(r"(?:^|/)t26_(\d+)$")
 MAX_BLOCKS = 3
-CMD = "python3 ~/.codex/skills/grist-access/scripts/grist.py"
-JEV = Path.home() / ".codex/skills/jev-access/scripts/jev.py"
+CMD = "python3 ~/.codex/skills/access-grist/scripts/grist.py"
+JEV = Path.home() / ".codex/skills/access-jev/scripts/jev.py"
 FAILURE_REASON = ("마지막 메시지가 실패를 결론으로 종료하고 있어요. CDP·runner·Stagehand 실패와 runtime-unverified는 종료 사유가 아니에요. "
                   "최초 실패 경계를 `$I`에 쓰고 원인 수정 → 재빌드·배포 → 재연결 → 같은 흐름 재실행 → consumer readback을 계속하세요. ")
 QUESTION_REASON = ("사용자에게 넘길 수 있는 동작은 로그인·인증, 결제·비용, 비가역 외부 전송, 브라우저 밖 OS 앱 조작뿐이에요. "
