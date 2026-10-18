@@ -1,0 +1,7 @@
+{
+ "exit": 2,
+ "stdout": "",
+ "stderr": "usage: jev scope [-h] --request-file REQUEST_FILE --goal-file GOAL_FILE\n                 [--row ROW]\njev scope: error: argument --row: invalid int value: 'abc'\n",
+ "requests": [],
+ "log": []
+}

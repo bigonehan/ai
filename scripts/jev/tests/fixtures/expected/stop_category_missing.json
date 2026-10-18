@@ -1,0 +1,17 @@
+{
+ "exit": 0,
+ "stdout": "{\n \"ok\": true,\n \"mode\": \"shadow\",\n \"verdict\": \"uncertain\",\n \"command\": \"stop\",\n \"items\": [\n  {\n   \"name\": \"category\",\n   \"value\": null,\n   \"confidence\": null,\n   \"verdict\": \"uncertain\"\n  }\n ],\n \"category\": null,\n \"usage\": null\n}\n",
+ "stderr": "",
+ "requests": [
+  {
+   "method": "POST",
+   "path": "/v1/systemone",
+   "authorization": "Bearer sk-test-SECRET-123",
+   "content_type": "application/json",
+   "body": "{\"model\": \"jev-test\", \"state\": \"# 마지막 메시지\\n작업을 마쳤습니다. cargo test 12개 통과.\\n\", \"questions\": {\"category\": {\"type\": \"choice\", \"instructions\": \"이 AI 작업 에이전트의 마지막 메시지는 어떤 종류인가?\", \"criteria\": {\"완료 보고\": \"The work is finished and the message reports the verified result.\", \"사용자 질문\": \"The message asks the user a question or asks the user to perform an action.\", \"실패를 결론으로 종료\": \"The message stops because a tool, browser, CDP or runtime step failed and presents that failure as the outcome.\", \"진행 보고\": \"The message reports progress and says or implies the agent's own work is still continuing (next steps it will do itself), without a finished result or a user-only blocker.\", \"질문 답변\": \"The message answers the user's latest question or request for explanation, advice or information; it does not report task work as finished or continuing.\", \"대기 보고\": \"The task is waiting on a user-only action, user-provided data or a user decision, and the message states exactly what the user must do or provide next.\"}}, \"allowed_action\": {\"type\": \"noul\", \"instructions\": \"메시지가 사용자에게 요청하는 것은 다음 셋 중 하나다: (1) 로그인·인증, 결제·비용, 되돌릴 수 없는 외부 전송, 브라우저 밖 OS 앱 조작 중 하나의 동작; (2) 대상 .py 파일 경로와 수정 이유를 밝힌 .py 생성·수정 동의; (3) 수정을 시작하기 전에 구체적인 해석 둘 이상과 각 해석의 결과 차이를 제시한 선택 요청. '진행할까요', '확인해 주세요', 결과 검증·화면 확인 요청처럼 이 형식을 갖추지 않은 질문은 해당하지 않는다\"}}}"
+  }
+ ],
+ "log": [
+  "{\"at\": \"{AT}\", \"command\": \"stop\", \"row\": null, \"state_sha256\": \"a97cd6e07f8d1ffcdd22bc7a5beee5b622be2d1f37ae0e87d3186bd20a667ca6\", \"mode\": \"shadow\", \"verdict\": \"uncertain\", \"items\": [{\"name\": \"category\", \"value\": null, \"confidence\": null, \"verdict\": \"uncertain\"}]}"
+ ]
+}

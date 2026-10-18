@@ -1,0 +1,7 @@
+{
+ "exit": 0,
+ "stdout": "usage: jev [-h] {scope,match,stop} ...\n\nTypeSafe Jev judgments for the Table26 gates, without handling the API key.\n\nCalled by access-grist `grist` and the Codex completion hook, not by Codex\ndirectly. The key is read from this skill's `.env` (or the environment) and is\nnever printed. All output is JSON on stdout.\n\nUsage:\n  jev scope --request-file F --goal-file G [--row N]   # J3: goal lines grounded in the request, request covered\n  jev match --goal-file G --output-file O [--row N]    # J1: actual output satisfies each [값]/[상태]/[화면] line\n  jev stop --message-file M                            # J2: classify the final assistant message\n\nVerdicts: a Noul value (or Choice confidence) >= JEV_PASS is `pass`, < JEV_FLOOR\nis `fail`, anything between is `uncertain`. JEV_MODE=shadow (default) tells the\ncaller to log only; `enforce` lets it reject on `fail`.\n\npositional arguments:\n  {scope,match,stop}\n\noptions:\n  -h, --help          show this help message and exit\n",
+ "stderr": "",
+ "requests": [],
+ "log": []
+}

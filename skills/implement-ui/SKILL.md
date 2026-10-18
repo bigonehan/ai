@@ -21,7 +21,7 @@ Measure the same semantic target after the change with `getBoundingClientRect()`
 Write the observations as JSON and run:
 
 ```bash
-python3 scripts/validate_layout_contract.py <layout-contract.json>
+scripts/bin/validate-layout-contract <layout-contract.json>
 ```
 
 The default tolerance is `1px`. A nonzero result blocks completion and any request for the user to refresh or reconfirm the same size requirement.

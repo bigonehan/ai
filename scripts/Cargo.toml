@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "agent-rules",
+    "grist",
+    "jev",
+    "read-architecture",
+    "architecture-context",
+    "completion-gate",
+    "initialization-gate",
+]
+
+[profile.release]
+opt-level = 3

@@ -15,6 +15,7 @@
 //   node stagehand.mjs status
 //   node stagehand.mjs install
 //   node stagehand.mjs open [--url URL] [--extension DIR[,DIR]] [--port 9222]
+//   node stagehand.mjs doctor [--restart-runtime] [--close-hung] [--port 9222]
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -69,6 +70,83 @@ function attachExtension(port, extensions) {
     throw new Error(`stagehand-extension-unloadable: the browser at port ${port} lacks --enable-unsafe-extension-debugging, so Stagehand cannot load its runtime; ${restart}`);
   }
   return {};
+}
+
+/** Probe page targets over a browser CDP connection, reload unresponsive ones and optionally restart the Stagehand Runtime. */
+// An unresponsive page (hung renderer) stalls the Runtime's page attach during init, and a session
+// that ended without close() leaves the Runtime "initialized"; both surface as the two errors below.
+export async function runDoctor(cdp, { probeTimeoutMs = 1500, settleMs = 4000, restartRuntime = false, closeHung = false, sleep = (ms) => new Promise((accept) => setTimeout(accept, ms)) } = {}) {
+  const timed = (promise) => Promise.race([promise, new Promise((accept) => setTimeout(() => accept({ timeout: true }), probeTimeoutMs))]);
+  const targets = (await cdp.call("Target.getTargets")).result?.targetInfos || [];
+  const pages = targets.filter((target) => target.type === "page");
+  const probe = async (target, beforeEval) => {
+    const attached = await timed(cdp.call("Target.attachToTarget", { targetId: target.targetId, flatten: true }));
+    const sessionId = attached.result?.sessionId;
+    if (!sessionId) return false;
+    try {
+      if (beforeEval) await beforeEval(sessionId);
+      const answer = await timed(cdp.call("Runtime.evaluate", { expression: "document.readyState", returnByValue: true }, sessionId));
+      return !answer.timeout && !answer.error;
+    } finally {
+      cdp.call("Target.detachFromTarget", { sessionId }).catch?.(() => {});
+    }
+  };
+  const hung = [];
+  for (const target of pages) if (!(await probe(target))) hung.push({ targetId: target.targetId, url: target.url });
+  const stillHung = [];
+  for (const target of hung) {
+    const answered = await probe(target, async (sessionId) => {
+      await timed(cdp.call("Page.reload", {}, sessionId));
+      await sleep(settleMs);
+    });
+    if (!answered) stillHung.push(target);
+  }
+  // A busy-looping renderer ignores reload; closing it is the only fix, so it is opt-in.
+  const closed = [];
+  if (closeHung) {
+    for (const target of stillHung) {
+      const answer = await timed(cdp.call("Target.closeTarget", { targetId: target.targetId }));
+      if (!answer.timeout && !answer.error) closed.push(target);
+    }
+  }
+  let runtimeRestarted = false;
+  if (hung.length || restartRuntime) {
+    const runtimeUrl = `chrome-extension://${extensionIdFor(STAGEHAND_EXTENSION_DIR)}/service-worker.js`;
+    const worker = targets.find((target) => target.type === "service_worker" && target.url === runtimeUrl);
+    if (worker) {
+      const attached = await timed(cdp.call("Target.attachToTarget", { targetId: worker.targetId, flatten: true }));
+      const sessionId = attached.result?.sessionId;
+      if (sessionId) {
+        // Reload after replying so the evaluate itself is answered.
+        const answer = await timed(cdp.call("Runtime.evaluate", { expression: "setTimeout(() => chrome.runtime.reload(), 50), true", returnByValue: true }, sessionId));
+        runtimeRestarted = !answer.timeout && !answer.error;
+        if (runtimeRestarted) await sleep(settleMs);
+      }
+    }
+  }
+  return { checked: pages.length, hung, stillHung, closed, runtimeRestarted };
+}
+
+/** Browser-level CDP connection for runDoctor. */
+async function browserCdp(port) {
+  const version = await endpointVersion(port);
+  if (!version) throw new Error(`endpoint-absent: no browser answers at http://127.0.0.1:${port}`);
+  const socket = new WebSocket(version.webSocketDebuggerUrl);
+  await new Promise((accept, reject) => { socket.onopen = accept; socket.onerror = () => reject(new Error("endpoint-unreachable: browser websocket failed")); });
+  let nextId = 0;
+  const pending = new Map();
+  socket.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.id && pending.has(message.id)) { pending.get(message.id)(message); pending.delete(message.id); }
+  };
+  return {
+    call: (method, params = {}, sessionId) => new Promise((accept) => {
+      nextId += 1;
+      pending.set(nextId, accept);
+      socket.send(JSON.stringify({ id: nextId, method, params, ...(sessionId ? { sessionId } : {}) }));
+    }),
+    close: () => socket.close(),
+  };
 }
 
 function loadEnv() {
@@ -129,7 +207,14 @@ export function status() {
   };
 }
 
-export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT } = {}) {
+export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT, logSteps = Boolean(process.env.STAGEHAND_STEP_LOG) } = {}) {
+  const startedAt = Date.now();
+  const logStep = (stage, extra = "") => {
+    const elapsedMs = Date.now() - startedAt;
+    if (logSteps || elapsedMs >= 3000) {
+      process.stderr.write(`[stagehand-step] ${stage} +${elapsedMs}ms${extra ? ` (${extra})` : ""}\n`);
+    }
+  };
   const env = loadEnv();
   const entry = runtimeEntry();
   const { localBrowser, Stagehand } = await import(pathToFileURL(entry.path).href);
@@ -137,6 +222,7 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT 
   let mode;
   if (await endpointVersion(port)) {
     const extension = attachExtension(port, extensions);
+    logStep("cdp-attach-start", `port=${port}`);
     // Stagehand loads its helper extension on connect; the first attempts can
     // race its service worker ("No target with given id").
     for (let attempt = 1; ; attempt += 1) {
@@ -150,10 +236,12 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT 
       }
     }
     mode = "attach";
+    logStep("cdp-attach-done", `mode=${mode}`);
   } else {
     // The allow-list must keep the Stagehand Runtime, or its service worker never starts.
     const allowed = [...extensions.map((dir) => resolve(dir)), STAGEHAND_EXTENSION_DIR].join(",");
     const args = extensions.length ? [`--load-extension=${allowed}`, `--disable-extensions-except=${allowed}`] : [];
+    logStep("browser-launch-start", `port=${port}`);
     browser = await localBrowser.launch({
       headless: false,
       executablePath: CHROMIUM,
@@ -164,23 +252,40 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT 
       args,
     });
     mode = "launch";
+    logStep("browser-launch-done", `mode=${mode}`);
   }
   const model = env.STAGEHAND_MODEL && env.STAGEHAND_API_KEY
     ? { model: { modelName: env.STAGEHAND_MODEL, apiKey: env.STAGEHAND_API_KEY } }
     : {};
-  const stagehand = await Stagehand.create({ browser, ...model, logging: { level: "off" } });
+  let stagehand;
+  try {
+    logStep("stagehand-create-start");
+    stagehand = await Stagehand.create({ browser, ...model, logging: { level: "off" } });
+    logStep("stagehand-create-done");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/already initialized|initialization is already in progress|initialization timed out/u.test(message)) {
+      throw new Error(`runtime-stuck: ${message}; run \`node ${join(SKILL_DIR, "scripts", "stagehand.mjs")} doctor --restart-runtime\` and see references/attach-notes.md`);
+    }
+    throw error;
+  }
   let page;
   if (url) {
+    logStep("page-resolve-start", url);
     // Reuse a blank tab or one already on this URL; page URLs may be async.
     for (const candidate of await stagehand.browser.context.pages()) {
       const current = await candidate.url();
-      if (current === "about:blank" || current === url) {
+      if (current === "about:blank" || current === url || (url.endsWith("/") && current.startsWith(url))) {
         page = candidate;
         break;
       }
     }
     page = page || (await stagehand.browser.context.newPage());
-    if ((await page.url()) !== url) await page.goto(url);
+    const currentUrl = await page.url();
+    if (currentUrl !== url && !(url.endsWith("/") && currentUrl.startsWith(url))) {
+      await page.goto(url);
+    }
+    logStep("page-resolve-done", await page.url());
   }
   const version = await endpointVersion(port);
   return {
@@ -192,7 +297,20 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT 
     browserVersion: version?.Browser,
     headless: /Headless/i.test(version?.["User-Agent"] || ""),
     stagehandVersion: entry.version,
-    close: () => stagehand.close(),
+    logStep,
+    close: async () => {
+      logStep("session-close-start");
+      try {
+        await stagehand.close();
+      } finally {
+        logStep("session-close-done");
+        for (const handle of process._getActiveHandles?.() || []) {
+          if (handle && handle !== process.stdout && handle !== process.stderr && handle !== process.stdin) {
+            try { handle.unref?.(); } catch {}
+          }
+        }
+      }
+    },
   };
 }
 
@@ -207,6 +325,8 @@ if (invokedPath && realpathSync(fileURLToPath(import.meta.url)) === invokedPath)
     if (flag === "--url") { options.url = value; index += 1; }
     else if (flag === "--extension") { options.extensions = value.split(",").filter(Boolean); index += 1; }
     else if (flag === "--port") { options.port = Number(value); index += 1; }
+    else if (flag === "--restart-runtime") { options.restartRuntime = true; }
+    else if (flag === "--close-hung") { options.closeHung = true; }
     else { console.error(JSON.stringify({ ok: false, error: `unknown option ${flag}` })); process.exit(2); }
   }
   try {
@@ -223,6 +343,14 @@ if (invokedPath && realpathSync(fileURLToPath(import.meta.url)) === invokedPath)
       });
       if (result.status !== 0) process.exit(result.status ?? 1);
       console.log(JSON.stringify(status()));
+    } else if (command === "doctor") {
+      const cdp = await browserCdp(options.port || DEFAULT_PORT);
+      try {
+        console.log(JSON.stringify(await runDoctor(cdp, { restartRuntime: options.restartRuntime === true, closeHung: options.closeHung === true })));
+      } finally {
+        cdp.close();
+      }
+      process.exit(0);
     } else if (command === "open") {
       const session = await openStagehand(options);
       const title = session.page ? await session.page.title() : "";

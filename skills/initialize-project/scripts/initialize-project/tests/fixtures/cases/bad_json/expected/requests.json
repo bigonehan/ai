@@ -1,0 +1,20 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/docs/testdoc/tables/Table7/columns",
+    "auth": "Bearer test-key",
+    "body": null
+  },
+  {
+    "method": "GET",
+    "path": "/api/docs/testdoc/tables/Table26/columns",
+    "auth": "Bearer test-key",
+    "body": null
+  },
+  {
+    "method": "GET",
+    "path": "/api/docs/testdoc/tables/Table7/records",
+    "auth": "Bearer test-key",
+    "body": null
+  }
+]

@@ -1,0 +1,17 @@
+# <PROJECT>/.ai/docs/architecture.md
+# 도메인
+- 화면 : 사용자 화면
+- 저장 : 데이터 저장
+
+# 구조
+- src/ : 소스 코드, 화면과 저장
+- test/, `docs/` : 테스트와 문서
+- test/tmp/ : 임시 파일
+
+# 작업 후보 파일 (query: alpha beta gamma)
+- src/deep/mix.txt : 3/3개 키워드, 4줄
+- docs/guide.md : 2/3개 키워드, 4줄
+- src/main.js : 2/3개 키워드, 3줄
+- test/run.sh : 1/3개 키워드, 2줄
+- src/util.js : 1/3개 키워드, 1줄
+다음 단계: 후보 파일에서 `rg -n "<키워드>" <파일>`로 위치를 찾고 그 범위만 읽는다.

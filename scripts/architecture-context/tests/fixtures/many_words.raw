@@ -1,0 +1,24 @@
+# /home/tree/extensions/save_current_page/.ai/docs/architecture.md
+# 도메인
+- 페이지 저장 : 현재 페이지 또는 선택한 1:1 영역을 캡처해 Obsidian·Eagle·Grist에 저장하는 Manifest V3 Chrome 확장.
+- 영역 선택 : content script가 페이지 위에 선택 UI를 띄우고 영역을 잘라 낸다.
+- 저장 클라이언트 : Obsidian·Eagle·Grist별 저장 요청과 연결 확인(설정의 Test).
+- 설정·진단 : API 키·저장 경로 설정, Grist 토큰 가져오기, 개발 모드 진단 기록, 완료 알림.
+# 구조
+- 루트 : 확장 원본(manifest, service worker, content script·style, 저장 클라이언트, 공용 core).
+- icons/ : 확장 아이콘.
+- scripts/ : 검사·아이콘 생성 스크립트.
+- tests/ : 단위·경계 테스트(tests/fixtures = 입력 자료). test/tmp/ : 검증 임시 파일.
+
+# 작업 후보 파일 (query: one two three four five six seven eight)
+- tests/core.test.cjs : 4/8개 키워드, 12줄
+- tests/background.test.cjs : 3/8개 키워드, 33줄
+- core.js : 3/8개 키워드, 14줄
+- content.js : 3/8개 키워드, 12줄
+- tests/content.test.cjs : 3/8개 키워드, 10줄
+- content.css : 2/8개 키워드, 20줄
+- clients.js : 2/8개 키워드, 6줄
+- background.js : 1/8개 키워드, 4줄
+- tests/clients.test.cjs : 1/8개 키워드, 2줄
+- icons/save-current-page.svg : 1/8개 키워드, 1줄
+다음 단계: 후보 파일에서 `rg -n "<키워드>" <파일>`로 위치를 찾고 그 범위만 읽는다.

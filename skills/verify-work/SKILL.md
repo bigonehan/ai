@@ -44,9 +44,16 @@ Use the same scenario and meaningful input at every layer. A helper return, ACK,
 
 The default project test command runs unit and production-boundary checks only. An explicit project runtime command is reserved for the final whole-flow check after all Table26 items are complete. Do not substitute a mock browser, blank page, endpoint health, target discovery, build output, or log existence for the final consumer readback. If user-only action remains, set `$H=대기` and request one exact action only after all agent-executable checks are exhausted.
 
+## Verification bottleneck diagnosis and source repair
+
+- When verification or API/runtime exploration takes 5 minutes or more, immediately add intermediate step logging (`[verify-step] <boundary> <elapsed_ms>`) across each boundary (`cdp-attach`, `extension-ready`, `start-action`, `transport`, `consumer-readback`, `session-close`) to identify the exact stage where the bottleneck occurs. Do not mask it by slapping a hard command timeout on it.
+- A single API lookup, gate check, or verification path taking minutes means there is a defect or bottleneck in the source code itself (e.g., blocking `stdin`/IPC reads, unclosed keep-alive WebSocket/timer handles after `session.close()`, backgrounded processes holding parent stdio pipes without `</dev/null` and `disown`, repeated full-file scans or regex compilation inside loops, or unbounded polling).
+- Immediately inspect the running process and intermediate step logs, pinpoint the exact bottleneck boundary, and fix the source code so the operation completes at normal speed. Record the bottleneck cause and fix in `.ai/changes/` (`### 메모`) or `.ai/docs/performance.md`.
+- `openStagehand()`'s `session.close()` unrefs remaining keep-alive handles automatically; in custom scripts, ensure all timers/sockets are closed or call `process.exit(0)` after `await session.close()` in `finally`.
+
 ## Failure and completion
 
 When a test fails, keep the item open, set `$H=진단`, preserve the combined reproducing state, repair the owning boundary, and rerun the same sequence. When the implementation agent finishes, the main session reads the diff and test output and compares them with the `Input.md` requirement. It sets `$H=완료` on a passing predicate, or dispatches one bounded repair and sets `$H` back to `진단`. A separate verifier agent runs only under the conditions in `work-project`.
 
-The only maintained script is `scripts/check_correct_path.py` (value, template, and path boundary self-test). Do not create contract or evidence files for any test.
+The only maintained script is `scripts/bin/check-correct-path` (value, template, and path boundary self-test). Do not create contract or evidence files for any test.
 

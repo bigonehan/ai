@@ -1,0 +1,7 @@
+{
+ "exit": 0,
+ "stdout": "usage: jev stop [-h] --message-file MESSAGE_FILE\n\noptions:\n  -h, --help            show this help message and exit\n  --message-file MESSAGE_FILE\n",
+ "stderr": "",
+ "requests": [],
+ "log": []
+}

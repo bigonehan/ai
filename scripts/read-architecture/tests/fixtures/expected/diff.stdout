@@ -1,0 +1,16 @@
+# <PROJECT>/.ai/docs/architecture.md
+# 도메인
+- 핵심 : 핵심 기능
+
+# 구조
+- src/ : 소스, lib/ 폴더를 참조
+- `assets/` : 이미지
+- src/old/ : 옛 코드
+
+# 구조 차이 (작업 범위면 architecture.md도 고친다)
+- 문서에만 있음: assets, src/old
+- 문서에 없음: extra
+
+# 작업 후보 파일 (query: )
+- 일치 없음: 키워드를 바꾸거나 위 # 구조에서 폴더를 고른다
+다음 단계: 후보 파일에서 `rg -n "<키워드>" <파일>`로 위치를 찾고 그 범위만 읽는다.

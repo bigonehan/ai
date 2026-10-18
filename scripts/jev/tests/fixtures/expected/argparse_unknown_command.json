@@ -1,0 +1,7 @@
+{
+ "exit": 2,
+ "stdout": "",
+ "stderr": "usage: jev [-h] {scope,match,stop} ...\njev: error: argument command: invalid choice: 'judge' (choose from 'scope', 'match', 'stop')\n",
+ "requests": [],
+ "log": []
+}

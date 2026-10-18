@@ -1,0 +1,9 @@
+[package]
+name = "agent-rules"
+version = "0.0.1"
+edition = "2021"
+description = "~/ai/rules/Agents.md 단일 원본을 읽고 고치고 Codex·Claude·Antigravity 전역 규칙으로 동기화한다"
+
+[[bin]]
+name = "agent-rules"
+path = "src/main.rs"

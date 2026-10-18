@@ -1,0 +1,1 @@
+{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"[architecture] missing .ai/docs/architecture.md\n[architecture] project: /home/tree/extensions/temp_project\n[architecture] 작업 전에 .ai/docs/architecture.md를 실제 프로젝트 기준으로 작성한다(# 도메인: 항목 : 설명, # 구조: 루트와 2차 폴더, 파일 이름 없이).\n아키텍처 문서를 작성한 뒤 이 스크립트를 다시 실행하고 파일 탐색을 시작하세요."}}

@@ -1,0 +1,6 @@
+# /home/tree/extensions/plus_test/.ai/docs/architecture.md
+# 도메인
+- 덧셈 함수 : 작업 흐름(work-project) 검증용 예제. plus(a, b)를 제공한다.
+# 구조
+- 루트 : plus 모듈, AGENTS.md·Input.md.
+- test/ : node --test 테스트.

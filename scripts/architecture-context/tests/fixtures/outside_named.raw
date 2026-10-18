@@ -1,0 +1,30 @@
+# /home/tree/extensions/jw_downloader/.ai/docs/architecture.md
+# 도메인
+- 오디오 탐지 : 현재 탭의 video·audio·source 요소와 JW Player 재생목록에서 MP3/M4A 주소를 찾아 선택 다운로드한다(Manifest V3 Chrome 확장).
+- Suno 캡처 : 암호화된 M4A 대신 페이지가 복호화해 재생기로 넘기는 오디오 조각을 캡처해 48kHz stereo 192kbps MP3 하나로 변환한다(offscreen 문서 + MP3 worker).
+- ElevenLabs 연동 : 페이지 hook·주입·bridge로 생성 음성을 받아 다운로드한다.
+- 팝업·진단 : 탐지 결과 목록·다운로드 UI, 캡처 상태와 진단 로그.
+# 구조
+- 루트 : 확장 원본 스크립트(탐지·캡처·bridge·hook·offscreen·popup·download)와 각 모듈 옆의 *.test.js, manifest.
+- icons/ : 확장 아이콘.
+- scripts/ : 빌드·보조 스크립트.
+- test/tmp/ : 검증 임시 파일.
+- dist/ : 빌드 산출물(배포 대상 `/mnt/h/code/jw_downloader`).
+
+# 작업 후보 파일 (query: fix jw_downloader src x.js please)
+- extractor.test.js : 1/5개 키워드, 11줄
+- extractor.js : 1/5개 키워드, 8줄
+- offscreen.integration.test.js : 1/5개 키워드, 3줄
+- AGENTS.md : 1/5개 키워드, 3줄
+- elevenlabs-hook.js : 1/5개 키워드, 3줄
+- README.md : 1/5개 키워드, 3줄
+- main-hook.transition.test.js : 1/5개 키워드, 2줄
+- manifest.test.js : 1/5개 키워드, 2줄
+- capture-protocol.test.js : 1/5개 키워드, 1줄
+- offscreen.js : 1/5개 키워드, 1줄
+- package.json : 1/5개 키워드, 1줄
+- main-hook.js : 1/5개 키워드, 1줄
+- scripts/mp3-worker-bundle.mjs : 1/5개 키워드, 1줄
+- offscreen.html : 1/5개 키워드, 1줄
+- popup.html : 1/5개 키워드, 1줄
+다음 단계: 후보 파일에서 `rg -n "<키워드>" <파일>`로 위치를 찾고 그 범위만 읽는다.

@@ -1,0 +1,3 @@
+[architecture] missing .ai/docs/architecture.md
+[architecture] project: <PROJECT>/nothing
+[architecture] 작업 전에 .ai/docs/architecture.md를 실제 프로젝트 기준으로 작성한다(# 도메인: 항목 : 설명, # 구조: 루트와 2차 폴더, 파일 이름 없이).

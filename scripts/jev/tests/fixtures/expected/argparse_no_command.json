@@ -1,0 +1,7 @@
+{
+ "exit": 2,
+ "stdout": "",
+ "stderr": "usage: jev [-h] {scope,match,stop} ...\njev: error: the following arguments are required: command\n",
+ "requests": [],
+ "log": []
+}

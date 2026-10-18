@@ -1,0 +1,58 @@
+{
+  "args": [
+    "--project-root",
+    "<ROOT>/project",
+    "--project-name",
+    "demo_proj",
+    "--vault-root",
+    "<ROOT>/vault",
+    "--operation-id",
+    "op-dup"
+  ],
+  "mock": {
+    "rows": [
+      {
+        "id": 1198,
+        "fields": {
+          "C": "작업관리기",
+          "Obsidian_Id": "작업/종류/프로젝트/관리/작업관리기/작업관리기-문서.md"
+        }
+      },
+      {
+        "id": 40,
+        "fields": {
+          "C": "demo_proj",
+          "Obsidian_Id": "다른/경로.md"
+        }
+      }
+    ],
+    "table7_columns": [
+      {
+        "id": "C",
+        "fields": {
+          "label": "프로젝트"
+        }
+      },
+      {
+        "id": "Obsidian_Id",
+        "fields": {
+          "label": "Obsidian_Id"
+        }
+      }
+    ],
+    "table26_columns": [
+      {
+        "id": "H",
+        "fields": {
+          "label": "상태"
+        }
+      }
+    ],
+    "fail": null
+  },
+  "env": {
+    "GRIST_API_KEY": "test-key",
+    "GRIST_DOC_ID": "testdoc"
+  },
+  "files": {}
+}

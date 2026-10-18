@@ -1,0 +1,4 @@
+{
+  "home/": null,
+  "project/test/tmp/op-http.json": "{\n  \"status\": \"runtime-unverified\",\n  \"first_failing_boundary\": \"grist-http\",\n  \"error\": \"grist-http: GET /tables/Table26/columns HTTP 403 응답으로 Grist 요청이 거부됐습니다. denied by mock\",\n  \"operation_id\": \"op-http\"\n}\n"
+}

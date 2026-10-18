@@ -1,0 +1,1275 @@
+{
+ "cases": [
+  {
+   "name": "codex_stop_blocks_uninitialized_project",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/alpha",
+      "session_id": "s-uninit",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": [],
+      "uninitialized": "/w/alpha"
+     }
+    }
+   ]
+  },
+  {
+   "name": "claude_style_stop_on_clean_project_passes",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/gamma",
+      "session_id": "s-clean",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": []
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_rows_waiting_and_done_pass",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "끝났어요"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기"
+       },
+       {
+        "id": 2,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_draft_row_blocks_with_assign_step",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "초안"
+       },
+       {
+        "id": 2,
+        "H": "검증"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_work_row_blocks_with_wait_step",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       },
+       {
+        "id": 2,
+        "H": "검증"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_correction_and_diagnosis_rows_wait_step",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       3,
+       4
+      ],
+      "rows": [
+       {
+        "id": 3,
+        "H": "교정"
+       },
+       {
+        "id": 4,
+        "H": "진단"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_all_verified_blocks_with_flow_wait_step",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "검증"
+       },
+       {
+        "id": 2,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_block_limit_releases_and_restarts",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-limit",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업",
+        "D": "2. 메모"
+       },
+       {
+        "id": 2,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-limit",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업",
+        "D": "2. 메모"
+       },
+       {
+        "id": 2,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-limit",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업",
+        "D": "2. 메모"
+       },
+       {
+        "id": 2,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-limit",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업",
+        "D": "2. 메모"
+       },
+       {
+        "id": 2,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-limit",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1,
+       2
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업",
+        "D": "2. 메모"
+       },
+       {
+        "id": 2,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_stage_change_restarts_count",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-reset",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-reset",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-reset",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "교정"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_pass_clears_state",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-clear",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-clear",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "완료"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "sync_failure_note_on_block",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "env": {
+      "FAKE_SYNC_EXIT": "3",
+      "FAKE_SYNC_ERR": "  sync boom: 연결 실패  "
+     }
+    }
+   ]
+  },
+  {
+   "name": "sync_failure_note_on_pass",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "env": {
+      "FAKE_SYNC_EXIT": "3",
+      "FAKE_SYNC_ERR": "  sync boom: 연결 실패  "
+     }
+    }
+   ]
+  },
+  {
+   "name": "gate_failure_reports_system_message",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "env": {
+      "FAKE_GATE_EXIT": "2",
+      "FAKE_GATE_ERR": "gate boom"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop"
+     },
+     "env": {
+      "FAKE_GATE_EXIT": "2",
+      "FAKE_GATE_ERR": "gate boom",
+      "FAKE_SYNC_EXIT": "3",
+      "FAKE_SYNC_ERR": "  sync boom: 연결 실패  "
+     }
+    }
+   ]
+  },
+  {
+   "name": "subagent_t26_work_row_blocks",
+   "transcripts": {
+    "sub": "{\"timestamp\":\"t\",\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-161\",\"agent_path\":\"/root/t26_161\"}}"
+   },
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop",
+      "last_assistant_message": "진행 중"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "작업",
+        "D": "1. 시작"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "subagent_t26_verified_row_passes",
+   "transcripts": {
+    "sub": "{\"timestamp\":\"t\",\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-161\",\"agent_path\":\"/root/t26_161\"}}"
+   },
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop",
+      "last_assistant_message": "진행 중"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "검증"
+       }
+      ],
+      "project_dir": "/w/beta",
+      "uninitialized": "/w/alpha"
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "subagent_t26_without_project_dir_or_memo",
+   "transcripts": {
+    "sub": "{\"timestamp\":\"t\",\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-161\",\"agent_path\":\"/root/t26_161\"}}"
+   },
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "교정",
+        "D": ""
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "helper_subagent_is_not_gated",
+   "transcripts": {
+    "sub": "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-h\",\"agent_path\":\"/root/helper\"}}"
+   },
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "subagent_block_limit_releases",
+   "transcripts": {
+    "sub": "{\"timestamp\":\"t\",\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-161\",\"agent_path\":\"/root/t26_161\"}}"
+   },
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "작업",
+        "D": "1. 시작"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "작업",
+        "D": "1. 시작"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "작업",
+        "D": "1. 시작"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:sub}",
+      "hook_event_name": "SubagentStop"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "작업",
+        "D": "1. 시작"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "agent_transcript_path_and_agent_id_win",
+   "transcripts": {
+    "sub": "{\"timestamp\":\"t\",\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-161\",\"agent_path\":\"/root/t26_161\"}}",
+    "main": "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-main\"}}"
+   },
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "transcript_path": "{T:main}",
+      "hook_event_name": "SubagentStop",
+      "agent_transcript_path": "{T:sub}",
+      "agent_id": "agent-x"
+     },
+     "gate": {
+      "raw_ids": [
+       161
+      ],
+      "rows": [
+       {
+        "id": 161,
+        "H": "진단"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "main_transcript_meta_id_names_thread",
+   "transcripts": {
+    "main": "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thr-main\"}}"
+   },
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "transcript_path": "{T:main}"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "j2_progress_report_blocks_waiting_rows_and_releases",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-j2",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "진행 중입니다"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기",
+        "D": "4. 로그인 대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-j2",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "진행 중입니다"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기",
+        "D": "4. 로그인 대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-j2",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "진행 중입니다"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기",
+        "D": "4. 로그인 대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "j2_failure_conclusion_with_work_rows",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "실패했어요"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "실패를 결론으로 종료",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "pass"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "j2_disallowed_question_enforce_blocks",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "확인해 주세요?"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "사용자 질문",
+      "mode": "enforce",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "pass"
+       },
+       {
+        "name": "allowed_action",
+        "verdict": "fail"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "j2_question_shadow_passes",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "확인해 주세요?"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "사용자 질문",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "pass"
+       },
+       {
+        "name": "allowed_action",
+        "verdict": "fail"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "j2_question_enforce_with_work_rows",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "확인해 주세요?"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "사용자 질문",
+      "mode": "enforce",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "pass"
+       },
+       {
+        "name": "allowed_action",
+        "verdict": "fail"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "jev_failure_is_ignored",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "진행 중"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     },
+     "env": {
+      "FAKE_JEV_EXIT": "1"
+     }
+    }
+   ]
+  },
+  {
+   "name": "empty_message_skips_jev",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "  \n "
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "대기"
+       }
+      ],
+      "project_dir": "/w/beta"
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "no_rows_skips_jev",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "s-main",
+      "hook_event_name": "Stop",
+      "last_assistant_message": "진행 중"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": []
+     },
+     "jev": {
+      "category": "진행 보고",
+      "mode": "shadow",
+      "items": [
+       {
+        "name": "category",
+        "verdict": "uncertain"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "thread_name_is_sanitized",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/beta",
+      "session_id": "a/b:c 한",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "missing_cwd_and_session_use_defaults",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [
+       1
+      ],
+      "rows": [
+       {
+        "id": 1,
+        "H": "작업"
+       }
+      ],
+      "project_dir": "/w/beta"
+     }
+    }
+   ]
+  },
+  {
+   "name": "uninitialized_block_limit_releases",
+   "transcripts": {},
+   "runs": [
+    {
+     "event": {
+      "cwd": "/w/alpha",
+      "session_id": "s-un",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": [],
+      "uninitialized": "/w/alpha"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/alpha",
+      "session_id": "s-un",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": [],
+      "uninitialized": "/w/alpha"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/alpha",
+      "session_id": "s-un",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": [],
+      "uninitialized": "/w/alpha"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/alpha",
+      "session_id": "s-un",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": [],
+      "uninitialized": "/w/alpha"
+     }
+    },
+    {
+     "event": {
+      "cwd": "/w/alpha",
+      "session_id": "s-un",
+      "hook_event_name": "Stop"
+     },
+     "gate": {
+      "raw_ids": [],
+      "rows": [],
+      "uninitialized": "/w/alpha"
+     }
+    }
+   ]
+  }
+ ]
+}

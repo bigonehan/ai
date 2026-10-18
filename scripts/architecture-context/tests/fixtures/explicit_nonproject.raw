@@ -1,0 +1,32 @@
+# /home/tree/extensions/web_prompt_bridge/.ai/docs/architecture.md
+# 도메인
+- 통합 게이트웨이 : Grist Video Maker 요청(초기화 문서·배경 생성·List 이미지·영상)을 검증·저장하고 requestId로 상관관계를 관리하며 결과를 Grist로 돌려주는 유일한 경로다.
+- Runner 연결 : 설치된 Web Prompt Runner를 이름으로 찾아 작업을 보내고 응답을 받는다. 탭·작업 순서, 재시도·제한 시간, rate limit 정지를 소유한다.
+- Grist 페이지 수신기 : Grist 위젯과 postMessage로 통신하는 content script.
+- 통합 계약 : 참여자·workflow 메시지 타입·응답 경로를 정의한 계약 파일과 검사 스크립트.
+- Eagle·모바일 : Eagle Bridge 토큰·주소, 모바일 relay 설정.
+# 구조
+- 루트 : background·core·Grist 수신기·popup 원본과 manifest.
+- contracts/ : Grist–Bridge–Runner 통합 계약.
+- scripts/ : 빌드·검사·계약 검증 스크립트.
+- tests/ : node:test 기반 단위·경계 테스트.
+- dist/ : 빌드 산출물(배포 대상, `H:\code\web_prompt_bridge`).
+- test/tmp/ : 검증 임시 파일(Git 제외).
+
+# 작업 후보 파일 (query: see test foo bridge)
+- background.js : 3/4개 키워드, 129줄
+- tests/bridge-core.test.cjs : 3/4개 키워드, 110줄
+- bridge-core.js : 3/4개 키워드, 76줄
+- tests/document-model-test.test.cjs : 3/4개 키워드, 43줄
+- README.md : 3/4개 키워드, 13줄
+- tests/double-prompt.test.cjs : 3/4개 키워드, 12줄
+- tests/document-vidgenius.test.cjs : 3/4개 키워드, 11줄
+- tests/video-generation.test.cjs : 3/4개 키워드, 9줄
+- grist-bridge.js : 2/4개 키워드, 49줄
+- tests/grist-bridge.test.cjs : 2/4개 키워드, 27줄
+- tests/web-rename.test.cjs : 2/4개 키워드, 16줄
+- tests/background-waves.test.cjs : 2/4개 키워드, 11줄
+- tests/background-late-result.test.cjs : 2/4개 키워드, 10줄
+- tests/background-batch-port.test.cjs : 2/4개 키워드, 9줄
+- tests/extension-relocation.test.cjs : 2/4개 키워드, 8줄
+다음 단계: 후보 파일에서 `rg -n "<키워드>" <파일>`로 위치를 찾고 그 범위만 읽는다.

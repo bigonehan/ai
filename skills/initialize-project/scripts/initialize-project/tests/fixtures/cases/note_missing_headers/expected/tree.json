@@ -1,0 +1,6 @@
+{
+  "home/": null,
+  "out/fail.json": "{\n  \"status\": \"runtime-unverified\",\n  \"first_failing_boundary\": \"obsidian-readback\",\n  \"error\": \"obsidian-readback: 프로젝트 문서에 # 📆·# 📍 헤더가 없습니다.\",\n  \"operation_id\": \"op-nofoot\"\n}\n",
+  "project/": null,
+  "vault/구현/진행/261018.nofoot/261018.nofoot-개발.md": "# 📋\n- nofoot\n# 📍\n\n"
+}

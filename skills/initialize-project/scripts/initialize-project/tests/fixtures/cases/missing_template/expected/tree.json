@@ -1,0 +1,4 @@
+{
+  "home/": null,
+  "project/test/tmp/op-tpl.json": "{\n  \"status\": \"runtime-unverified\",\n  \"first_failing_boundary\": \"ENOENT\",\n  \"error\": \"ENOENT: no such file or directory, access '<ROOT>/vault/없음/없는-문서.md'\",\n  \"operation_id\": \"op-tpl\"\n}\n"
+}

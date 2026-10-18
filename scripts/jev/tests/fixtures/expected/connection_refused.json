@@ -1,0 +1,7 @@
+{
+ "exit": 2,
+ "stdout": "",
+ "stderr": "{\"ok\": false, \"boundary\": \"connection\", \"error\": \"[Errno 111] Connection refused\", \"mode\": \"shadow\"}\n",
+ "requests": [],
+ "log": []
+}

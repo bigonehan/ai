@@ -1,0 +1,9 @@
+{
+ "exit": 0,
+ "stdout": "{\n \"ok\": true,\n \"mode\": \"shadow\",\n \"verdict\": \"pass\",\n \"command\": \"match\",\n \"items\": [],\n \"usage\": null\n}\n",
+ "stderr": "",
+ "requests": [],
+ "log": [
+  "{\"at\": \"{AT}\", \"command\": \"match\", \"row\": null, \"state_sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\", \"mode\": \"shadow\", \"verdict\": \"pass\", \"items\": []}"
+ ]
+}

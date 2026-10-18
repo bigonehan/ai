@@ -1,4 +1,8 @@
 **/test/tmp/
+**/target/
+**/.env
+**/.env.*
+!**/.env.example
 skills/initial-project/.env
 skills/initial-project/.env.*
 skills/*/.env

@@ -1,21 +1,21 @@
 ---
 name: access-jev
-description: TypeSafe Jev judgments (goal scope J3, output-vs-goal match J1, final-message classification J2) for the Table26 gates. Run inside access-grist `grist.py` and the Codex completion hook; Codex does not call it directly.
+description: TypeSafe Jev judgments (goal scope J3, output-vs-goal match J1, final-message classification J2) for the Table26 gates. Run inside access-grist `grist` and the Codex completion hook; Codex does not call it directly.
 metadata:
   short-description: Jev judgments behind the Table26 gates
 ---
 
 # Jev Access
 
-`scripts/jev.py` sends a state and typed questions to TypeSafe Jev (`POST https://api.typesafe.ai/v1/systemone`) and prints a JSON verdict. It is a backend of the gates, not a step in the work procedure:
+`~/ai/scripts/bin/jev` sends a state and typed questions to TypeSafe Jev (`POST https://api.typesafe.ai/v1/systemone`) and prints a JSON verdict. It is a backend of the gates, not a step in the work procedure:
 
 | Caller | Command | Judgment |
 |---|---|---|
-| `grist.py task-goal` | `scope --request-file F --goal-file G` | **J3** every goal line is grounded in the newest `Input.md` request, and the request is fully covered |
-| `grist.py task-submit`, `flow-wait` (`[화면]`), `task-complete` (`근거:`) | `match --goal-file G --output-file O` | **J1** the actual output satisfies each `[값]`/`[상태]`/`[화면]` line |
-| `~/.codex/hooks/completion_gate.py` (main Stop) | `stop --message-file M` | **J2** final message is 완료 보고 / 사용자 질문 / 실패를 결론으로 종료 / 진행 보고, and, only for 사용자 질문, whether the requested user action is one of the four allowed |
+| `grist task-goal` | `scope --request-file F --goal-file G` | **J3** every goal line is grounded in the newest `Input.md` request, and the request is fully covered |
+| `grist task-submit`, `flow-wait` (`[화면]`), `task-complete` (`근거:`) | `match --goal-file G --output-file O` | **J1** the actual output satisfies each `[값]`/`[상태]`/`[화면]` line |
+| `~/ai/scripts/bin/completion-gate` (main Stop) | `stop --message-file M` | **J2** final message is 완료 보고 / 사용자 질문 / 실패를 결론으로 종료 / 진행 보고 / 질문 답변 / 대기 보고, and, only for 사용자 질문, whether it asks for one of the four allowed actions, a `.py` consent naming path and reason, or a choice between concrete interpretations before editing |
 
-Do not run `jev.py` as part of project work and do not paste its output into Grist; the gates record a one-line summary in `.ai/changes`.
+Do not run `jev` as part of project work and do not paste its output into Grist; the gates record a one-line summary in `.ai/changes`.
 
 ## Configuration
 

@@ -1,12 +1,36 @@
 {
   "description": "Completion gate: the main session ends only when its Table26 rows are 대기/완료; a t26_<RawID> subagent only when its row is 검증/완료.",
   "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/tree/ai/scripts/bin/architecture-context",
+            "timeout": 20,
+            "statusMessage": "프로젝트 구조 확인"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/tree/ai/scripts/bin/architecture-context",
+            "timeout": 20,
+            "statusMessage": "요청 대상 구조 확인"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /home/tree/.codex/hooks/completion_gate.py",
+            "command": "/home/tree/ai/scripts/bin/completion-gate",
             "timeout": 60,
             "statusMessage": "Grist 종료 조건 확인"
           }
@@ -18,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /home/tree/.codex/hooks/completion_gate.py",
+            "command": "/home/tree/ai/scripts/bin/completion-gate",
             "timeout": 60,
             "statusMessage": "Grist 담당 작업 제출 확인"
           }
