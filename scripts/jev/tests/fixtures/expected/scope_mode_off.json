@@ -1,9 +1,0 @@
-{
- "exit": 0,
- "stdout": "{\n \"ok\": true,\n \"mode\": \"off\",\n \"verdict\": \"fail\",\n \"command\": \"scope\",\n \"items\": [\n  {\n   \"name\": \"g1\",\n   \"line\": \"[값] 같은 입력이면 stdout JSON과 exit code가 같다\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g2\",\n   \"line\": \"[상태] cargo test 통과\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g3\",\n   \"line\": \"[불변] API 키는 출력에 없다\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g4\",\n   \"line\": \"[화면] 결과 화면이 보인다\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g5\",\n   \"line\": \"[수치] 0.9 이상\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g6\",\n   \"line\": \"[사용자] 사용자가 확인한다\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"coverage\",\n   \"line\": \"요청 전체 반영\",\n   \"value\": 0.3,\n   \"verdict\": \"fail\"\n  }\n ],\n \"usage\": {\n  \"input_tokens\": 120,\n  \"output_tokens\": 8\n }\n}\n",
- "stderr": "",
- "requests": [],
- "log": [
-  "{\"at\": \"{AT}\", \"command\": \"scope\", \"row\": null, \"state_sha256\": \"93abe4b0c30175602b7e9bd94d870749d645ab406c5b1a81f844536cf34e6a9d\", \"mode\": \"off\", \"verdict\": \"fail\", \"items\": [{\"name\": \"g1\", \"line\": \"[값] 같은 입력이면 stdout JSON과 exit code가 같다\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"g2\", \"line\": \"[상태] cargo test 통과\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"g3\", \"line\": \"[불변] API 키는 출력에 없다\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"g4\", \"line\": \"[화면] 결과 화면이 보인다\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"g5\", \"line\": \"[수치] 0.9 이상\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"g6\", \"line\": \"[사용자] 사용자가 확인한다\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"coverage\", \"line\": \"요청 전체 반영\", \"value\": 0.3, \"verdict\": \"fail\"}]}"
- ]
-}

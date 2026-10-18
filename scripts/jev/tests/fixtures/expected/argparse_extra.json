@@ -1,7 +1,0 @@
-{
- "exit": 2,
- "stdout": "",
- "stderr": "usage: jev [-h] {scope,match,stop} ...\njev: error: unrecognized arguments: extra\n",
- "requests": [],
- "log": []
-}

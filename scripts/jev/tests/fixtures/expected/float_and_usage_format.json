@@ -1,17 +1,0 @@
-{
- "exit": 0,
- "stdout": "{\n \"ok\": true,\n \"mode\": \"shadow\",\n \"verdict\": \"fail\",\n \"command\": \"scope\",\n \"items\": [\n  {\n   \"name\": \"g1\",\n   \"line\": \"[값] a\",\n   \"value\": 1e-05,\n   \"verdict\": \"fail\"\n  },\n  {\n   \"name\": \"g2\",\n   \"line\": \"[상태] b\",\n   \"value\": 1.0,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g3\",\n   \"line\": \"[화면] c\",\n   \"value\": 2.5e+16,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"coverage\",\n   \"line\": \"요청 전체 반영\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  }\n ],\n \"usage\": {\n  \"tokens\": [\n   1,\n   2,\n   []\n  ],\n  \"empty\": {},\n  \"note\": \"a\\\"b\\\\c\\n\\t\\u0001é/ \",\n  \"n\": -0.0,\n  \"big\": 12345678901234567,\n  \"dup\": 2\n }\n}\n",
- "stderr": "",
- "requests": [
-  {
-   "method": "POST",
-   "path": "/v1/systemone",
-   "authorization": "Bearer sk-test-SECRET-123",
-   "content_type": "application/json",
-   "body": "{\"model\": \"jev-test\", \"state\": \"# 사용자 요청\\nRust로 jev를 옮긴다.\\n- scope/match/stop 같은 출력\\n\\n\\n# 목표\\n- [값] a\\n- [상태] b\\n- [화면] c\\n\", \"questions\": {\"g1\": {\"type\": \"noul\", \"instructions\": \"이 목표 조건은 위 사용자 요청에 명시되었거나 요청에서 직접 따라 나온다: [값] a\"}, \"g2\": {\"type\": \"noul\", \"instructions\": \"이 목표 조건은 위 사용자 요청에 명시되었거나 요청에서 직접 따라 나온다: [상태] b\"}, \"g3\": {\"type\": \"noul\", \"instructions\": \"이 목표 조건은 위 사용자 요청에 명시되었거나 요청에서 직접 따라 나온다: [화면] c\"}, \"coverage\": {\"type\": \"noul\", \"instructions\": \"사용자 요청의 모든 요구가 아래 목표 조건들에 빠짐없이 반영되어 있다:\\n- [값] a\\n- [상태] b\\n- [화면] c\\n\"}}}"
-  }
- ],
- "log": [
-  "{\"at\": \"{AT}\", \"command\": \"scope\", \"row\": null, \"state_sha256\": \"a677f3d6ccc05856b7dcceaae6853038e3f31b8e8de6a5b7ad321dbc405ee942\", \"mode\": \"shadow\", \"verdict\": \"fail\", \"items\": [{\"name\": \"g1\", \"line\": \"[값] a\", \"value\": 1e-05, \"verdict\": \"fail\"}, {\"name\": \"g2\", \"line\": \"[상태] b\", \"value\": 1.0, \"verdict\": \"pass\"}, {\"name\": \"g3\", \"line\": \"[화면] c\", \"value\": 2.5e+16, \"verdict\": \"pass\"}, {\"name\": \"coverage\", \"line\": \"요청 전체 반영\", \"value\": 0.95, \"verdict\": \"pass\"}]}"
- ]
-}

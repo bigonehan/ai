@@ -1,7 +1,0 @@
-{
- "exit": 1,
- "stdout": "",
- "stderr": "ValueError: could not convert string to float: 'abc'\n",
- "requests": [],
- "log": []
-}

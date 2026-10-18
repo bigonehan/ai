@@ -1,1 +1,0 @@
-{"hookSpecificOutput":{"additionalContext":"# /home/tree/extensions/plus_test/.ai/docs/architecture.md\n# 도메인\n- 덧셈 함수 : 작업 흐름(work-project) 검증용 예제. plus(a, b)를 제공한다.\n# 구조\n- 루트 : plus 모듈, AGENTS.md·Input.md.\n- test/ : node --test 테스트.\n위 구조에서 대상 폴더를 고른 뒤 rg -n으로 위치를 찾고 필요한 범위만 읽으세요."}}

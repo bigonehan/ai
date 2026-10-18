@@ -1,1 +1,0 @@
-{"status":"runtime-unverified","first_failing_boundary":"grist-http","error":"grist-http: GET /tables/Table26/columns HTTP 403 응답으로 Grist 요청이 거부됐습니다. denied by mock"}

@@ -1,4 +1,0 @@
-{
-  "home/": null,
-  "project/test/tmp/op-dup.json": "{\n  \"status\": \"runtime-unverified\",\n  \"first_failing_boundary\": \"initialize-project\",\n  \"error\": \"Table7 Raw ID 또는 Obsidian_Id readback 값이 일치하지 않습니다.\",\n  \"operation_id\": \"op-dup\"\n}\n"
-}

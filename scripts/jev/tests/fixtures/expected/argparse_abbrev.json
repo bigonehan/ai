@@ -1,9 +1,0 @@
-{
- "exit": 0,
- "stdout": "{\n \"ok\": true,\n \"mode\": \"shadow\",\n \"verdict\": \"pass\",\n \"command\": \"match\",\n \"items\": [\n  {\n   \"name\": \"g1\",\n   \"line\": \"[값] 같은 입력이면 stdout JSON과 exit code가 같다\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g2\",\n   \"line\": \"[상태] cargo test 통과\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  },\n  {\n   \"name\": \"g3\",\n   \"line\": \"[화면] 결과 화면이 보인다\",\n   \"value\": 0.95,\n   \"verdict\": \"pass\"\n  }\n ],\n \"usage\": {\n  \"input_tokens\": 120,\n  \"output_tokens\": 8\n }\n}\n",
- "stderr": "",
- "requests": [],
- "log": [
-  "{\"at\": \"{AT}\", \"command\": \"match\", \"row\": -4, \"state_sha256\": \"f08706564617ecde9c204edc533af928aa7914b7118922e68bce0e7be08fc001\", \"mode\": \"shadow\", \"verdict\": \"pass\", \"items\": [{\"name\": \"g1\", \"line\": \"[값] 같은 입력이면 stdout JSON과 exit code가 같다\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"g2\", \"line\": \"[상태] cargo test 통과\", \"value\": 0.95, \"verdict\": \"pass\"}, {\"name\": \"g3\", \"line\": \"[화면] 결과 화면이 보인다\", \"value\": 0.95, \"verdict\": \"pass\"}]}"
- ]
-}

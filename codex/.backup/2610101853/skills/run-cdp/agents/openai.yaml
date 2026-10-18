@@ -1,4 +1,0 @@
-interface:
-  display_name: "Run CDP Browser"
-  short_description: "Visible (headless: false) Stagehand browser check on the shared CDP endpoint"
-  default_prompt: "Use $run-cdp: open the project's target in the visible dedicated-profile Chromium through the stagehand-access skill (scripts/stagehand.mjs) (attach to 127.0.0.1:9222 or launch with headless: false), drive the real start action with Stagehand, and read back the authoritative consumer."

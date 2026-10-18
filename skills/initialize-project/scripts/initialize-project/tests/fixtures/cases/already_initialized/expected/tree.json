@@ -1,9 +1,0 @@
-{
-  "home/": null,
-  "project/.ai/changes/": null,
-  "project/.ai/docs/architecture.md": "a\n",
-  "project/.ai/docs/performance.md": "p\n",
-  "project/AGENTS.md": "## 작업 상태\n- Table7 Raw ID: 1300\n- Table26 task Raw ID: 7\n",
-  "project/test/tmp/initialization-receipt.json": "{\n  \"operation_id\": \"op-again\",\n  \"status\": \"complete\",\n  \"project_root\": \"<ROOT>/project\",\n  \"obsidian\": {\n    \"project\": {\n      \"path\": \"구현/진행/261018.demo_proj/261018.demo_proj-개발.md\",\n      \"bytes\": 51,\n      \"sha256\": \"e036ea46b766663cbe28b30e5a21e2a111622bc732c520f233cd0f77fc4fbdab\"\n    }\n  },\n  \"grist\": {\n    \"transport\": \"grist-rest-api\",\n    \"table7\": {\n      \"raw_id\": 1300,\n      \"obsidian_path\": \"구현/진행/261018.demo_proj/261018.demo_proj-개발.md\"\n    }\n  },\n  \"tasks\": [],\n  \"files\": {\n    \"agents\": \"<ROOT>/project/AGENTS.md\",\n    \"docs\": {\n      \"architecture.md\": false,\n      \"performance.md\": false\n    }\n  }\n}\n",
-  "vault/구현/진행/261018.demo_proj/261018.demo_proj-개발.md": "# 📋\n- 기존\n# 📍\n- 기능\n# 💡\n# 📆\n🔖\n"
-}

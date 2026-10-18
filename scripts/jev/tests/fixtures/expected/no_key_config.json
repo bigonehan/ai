@@ -1,7 +1,0 @@
-{
- "exit": 2,
- "stdout": "",
- "stderr": "{\"ok\": false, \"boundary\": \"config\", \"error\": \"TYPESAFE_API_KEY is not set (expected in {HOME}/.codex/skills/access-jev/.env)\", \"mode\": \"enforce\"}\n",
- "requests": [],
- "log": []
-}

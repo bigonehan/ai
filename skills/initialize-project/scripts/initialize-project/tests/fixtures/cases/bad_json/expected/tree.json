@@ -1,4 +1,0 @@
-{
-  "home/": null,
-  "project/test/tmp/op-json.json": "{\n  \"status\": \"runtime-unverified\",\n  \"first_failing_boundary\": \"grist-response\",\n  \"error\": \"grist-response: JSON 응답을 읽을 수 없습니다 (HTTP 200).\",\n  \"operation_id\": \"op-json\"\n}\n"
-}

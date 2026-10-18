@@ -1075,7 +1075,7 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
 
 #[cfg(test)]
 mod tests {
-    use super::format_judge;
+    use super::{format_judge, register_item};
 
     #[test]
     fn format_judge_cases() {
@@ -1105,5 +1105,36 @@ mod tests {
             format_judge("기타 작업", "태그 없는 판정 요약"),
             "[상태] 태그 없는 판정 요약"
         );
+    }
+
+    #[test]
+    fn register_item_writes_judge_format() {
+        let tmp = std::env::temp_dir().join(format!("grist-unit-reg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let rec = register_item(&tmp, 42, "랜더링 성능 개선", "개선", "[상태] 랜더링 성능 개선").unwrap();
+        let text = std::fs::read_to_string(&rec).unwrap();
+        assert!(text.contains("## [구현] 랜더링 성능 개선 (#42)\n- 유형 : 개선\n- 판정 : [상태] 랜더링 성능 개선\n### 목표\n"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn judge_docs_and_work_project_split_cases() {
+        let agents = std::fs::read_to_string("/home/tree/extensions/AGENTS.md").unwrap();
+        assert!(agents.contains("판정 : [값|상태]"));
+
+        let skill_dir = crate::util::home().join("ai/skills/work-project");
+        let skill_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+        assert!(skill_md.contains("판정 : [값|상태]"));
+        assert!(skill_md.contains("references/start.md"));
+        assert!(skill_md.contains("references/work.md"));
+        assert!(skill_md.contains("references/verify.md"));
+        assert!(skill_md.lines().count() <= 115);
+
+        for rel in ["references/start.md", "references/work.md", "references/verify.md"] {
+            assert!(skill_dir.join(rel).is_file(), "missing {rel}");
+        }
     }
 }

@@ -1,9 +1,0 @@
-{
-  "home/": null,
-  "out/receipt.json": "{\n  \"operation_id\": \"op-other\",\n  \"status\": \"complete\",\n  \"project_root\": \"<ROOT>/project\",\n  \"obsidian\": {\n    \"project\": {\n      \"path\": \"구현/진행/261018.other_tool/261018.other_tool-개발.md\",\n      \"bytes\": 182,\n      \"sha256\": \"5b911024c6f1662588d9a10eaf6dca98eaa27e7f5e4c9f3b30c3103971236488\"\n    }\n  },\n  \"grist\": {\n    \"transport\": \"grist-rest-api\",\n    \"table7\": {\n      \"raw_id\": 1199,\n      \"obsidian_path\": \"구현/진행/261018.other_tool/261018.other_tool-개발.md\"\n    }\n  },\n  \"tasks\": [],\n  \"files\": {\n    \"agents\": \"<ROOT>/project/AGENTS.md\",\n    \"docs\": {\n      \"architecture.md\": false,\n      \"performance.md\": true\n    }\n  }\n}\n",
-  "project/.ai/changes/": null,
-  "project/.ai/docs/architecture.md": "기존 구조\n",
-  "project/.ai/docs/performance.md": "\n# 병목 구간\n- {랜더링시 혹은 계산식에서 발견된 중복된 구간이나 병목지점 기록 } \n# 참조 사항 \n- {성능 개선 작업시 확인해야하는 기록등을 기록}\n",
-  "project/AGENTS.md": "## 작업 상태\n- Table7 Raw ID: 1199\n- Table26 task Raw ID: (task-add 후 기록)\n- 현재 작업: 초기화\n- Runtime: <대상 URL> / <artifact> / <시작 동작> / <authoritative consumer>\n\n# 기존 규칙\n- 유지\n",
-  "vault/구현/진행/261018.other_tool/261018.other_tool-개발.md": "[[261018|📁]]\n# 📋\n- other_tool\n# 📍\n# 🏗 \n### 도메인 \n### 폴더\n\n# 💡\n추가 피드백 및 아이디어 \n# ❓\n> [!warning] \n# 💭\n\n# 📜\n\n# 🗂\n# 📼\n# 📆\n🔖\n"
-}

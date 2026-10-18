@@ -1,4 +1,0 @@
-{
-  "home/": null,
-  "project/test/tmp/op-transport.json": "{\n  \"status\": \"runtime-unverified\",\n  \"first_failing_boundary\": \"grist-transport\",\n  \"error\": \"grist-transport: fetch failed\",\n  \"operation_id\": \"op-transport\"\n}\n"
-}

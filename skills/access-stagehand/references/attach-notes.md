@@ -3,11 +3,9 @@
 세션을 열기 전에 이 문서를 읽고 `먼저 할 일`부터 따른다. 초기화·attach가 실패했거나 열기에 30초 넘게 걸렸다면, 작업을 끝내기 전에 아래 `기록` 형식으로 항목을 추가한다. 같은 원인이면 기존 항목의 `재발`에 날짜와 프로젝트를 덧붙인다. 원인이 확인되어 스크립트나 절차가 바뀌면 `먼저 할 일`을 고친다. 비밀값·쿠키·프롬프트 원문은 적지 않는다.
 
 ## 먼저 할 일
-1. `node ~/.codex/skills/access-stagehand/scripts/stagehand.mjs open --url about:blank`로 attach만 먼저 확인한다(정상 1~5초).
-2. `runtime-stuck`, `A Stagehand instance is already initialized`, `Stagehand initialization is already in progress`, `Stagehand initialization timed out`이 나오면 다른 재시도 전에 `node ~/.codex/skills/access-stagehand/scripts/stagehand.mjs doctor --restart-runtime`을 한 번 실행하고 1번을 다시 한다.
-   - `doctor`는 page target마다 `Runtime.evaluate`로 응답을 확인하고, 응답 없는 탭은 새로고침한 뒤 Stagehand Runtime service worker를 재시작한다.
-   - 결과 JSON의 `stillHung`가 비어 있지 않으면 새로고침으로 풀리지 않은 탭이다. 같은 명령에 `--close-hung`를 붙여 그 탭만 닫는다. 이런 탭이 남아 있으면 새 Runtime 초기화가 60초 timeout으로 실패한다.
-3. 스크립트는 `try { … } finally { await session.close(); }`로 끝내고, 셸 `timeout`은 스크립트 예상 시간보다 길게 잡는다. close 없이 강제 종료된 클라이언트는 4.1.0에서 Runtime을 고착시키지 않았지만(261014 재현 실패), 열어 둔 탭이 쌓이지 않게 한다.
+1. `openStagehand()`는 이제 attach 직전에 자동으로 방치된 이전 Stagehand 클라이언트 프로세스를 정리(`killStaleStagehandClients`)하고 `runDoctor(..., { restartRuntime: true, closeHung: true })`로 무응답 탭 복구 및 Stagehand Runtime service worker 재시작을 수행하며, 유휴 세션 자동 해제 타이머(`leaseTimeoutMs`, 기본 90초)와 0.3초대의 빠른 `session.close()`를 내장한다.
+2. 수동 점검이 필요할 때만 `node ~/.codex/skills/access-stagehand/scripts/stagehand.mjs doctor --restart-runtime --close-hung` 또는 `node ~/.codex/skills/access-stagehand/scripts/stagehand.mjs open --url about:blank`를 실행한다(정상 ~1초).
+3. 스크립트는 `try { … } finally { await session.close(); }`로 끝내고, 셸 `timeout`은 스크립트 예상 시간보다 길게 잡는다.
 4. Grist 위젯처럼 iframe 안의 요소는 `page.locator("iframe >> <selector>")`로 다룬다. Stagehand 4의 page에는 `frames()`가 없다.
 5. Grist 레코드 이동은 화면 좌표 클릭(`page.click(x, y)`) 대신 URL 앵커 `#a1.s<section id>.r<row id>`로 연다. section id는 `~/ai/scripts/bin/grist get _grist_Views_section`의 `parentId`(=page의 viewRef)로 찾는다.
 

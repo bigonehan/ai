@@ -1,7 +1,0 @@
-{
- "exit": 0,
- "stdout": "usage: jev match [-h] --goal-file GOAL_FILE --output-file OUTPUT_FILE\n                 [--row ROW]\n\noptions:\n  -h, --help            show this help message and exit\n  --goal-file GOAL_FILE\n  --output-file OUTPUT_FILE\n  --row ROW\n",
- "stderr": "",
- "requests": [],
- "log": []
-}

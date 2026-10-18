@@ -1,9 +1,0 @@
-{
-  "home/": null,
-  "project/.ai/changes/": null,
-  "project/.ai/docs/architecture.md": "# 도메인 \n{파일 이름은 기록하지 않고 관리하는 도메인 단위로 항목 : 설명 형식으로 작성하여 새로운 에이전트가 현재 폴더와 파일구조에 대해서 대}\n# 구조\n{폴더 구조 형태에 대해서 설명한다. 루트와 2차 child}\n",
-  "project/.ai/docs/performance.md": "\n# 병목 구간\n- {랜더링시 혹은 계산식에서 발견된 중복된 구간이나 병목지점 기록 } \n# 참조 사항 \n- {성능 개선 작업시 확인해야하는 기록등을 기록}\n",
-  "project/AGENTS.md": "## 작업 상태\n- Table7 Raw ID: 1199\n- Table26 task Raw ID: (task-add 후 기록)\n- 현재 작업: 초기화\n- Runtime: <대상 URL> / <artifact> / <시작 동작> / <authoritative consumer>\n\n",
-  "project/test/tmp/initialization-receipt.json": "{\n  \"operation_id\": \"initialize-project-1792292400000\",\n  \"status\": \"complete\",\n  \"project_root\": \"<ROOT>/project\",\n  \"obsidian\": {\n    \"project\": {\n      \"path\": \"구현/진행/261018.demo_proj/261018.demo_proj-개발.md\",\n      \"bytes\": 201,\n      \"sha256\": \"cf8c9d9e1bb08aa5a883c25b66a7ecc3e9e422ef957ecb7f036ce9825f574616\"\n    }\n  },\n  \"grist\": {\n    \"transport\": \"grist-rest-api\",\n    \"table7\": {\n      \"raw_id\": 1199,\n      \"obsidian_path\": \"구현/진행/261018.demo_proj/261018.demo_proj-개발.md\"\n    }\n  },\n  \"tasks\": [],\n  \"files\": {\n    \"agents\": \"<ROOT>/project/AGENTS.md\",\n    \"docs\": {\n      \"architecture.md\": true,\n      \"performance.md\": true\n    }\n  }\n}\n",
-  "vault/구현/진행/261018.demo_proj/261018.demo_proj-개발.md": "[[261018|📁]]\n# 📋\n- 데모 설명 # 📋 $ $1 끝\n# 📍\n# 🏗 \n### 도메인 \n### 폴더\n\n# 💡\n추가 피드백 및 아이디어 \n# ❓\n> [!warning] \n# 💭\n\n# 📜\n\n# 🗂\n# 📼\n# 📆\n🔖\n"
-}

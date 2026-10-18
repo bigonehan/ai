@@ -72,10 +72,31 @@ function attachExtension(port, extensions) {
   return {};
 }
 
+/** Terminate any lingering Stagehand client processes (except current PID) that may still hold an open session. */
+export function killStaleStagehandClients(currentPid = process.pid) {
+  const ps = spawnSync("ps", ["-eo", "pid=,args="], { encoding: "utf8" });
+  const killed = [];
+  for (const rawLine of (ps.stdout || "").split("\n")) {
+    const match = rawLine.trim().match(/^(\d+)\s+(.*)$/u);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const args = match[2];
+    if (!pid || pid === currentPid || pid === process.ppid) continue;
+    if (args.includes("--remote-debugging-port=") || args.includes("chrome-linux64/chrome")) continue;
+    if (args.includes("stagehand.mjs") || args.includes("openStagehand")) {
+      try {
+        process.kill(pid, "SIGTERM");
+        killed.push(pid);
+      } catch {}
+    }
+  }
+  return killed;
+}
+
 /** Probe page targets over a browser CDP connection, reload unresponsive ones and optionally restart the Stagehand Runtime. */
 // An unresponsive page (hung renderer) stalls the Runtime's page attach during init, and a session
 // that ended without close() leaves the Runtime "initialized"; both surface as the two errors below.
-export async function runDoctor(cdp, { probeTimeoutMs = 1500, settleMs = 4000, restartRuntime = false, closeHung = false, sleep = (ms) => new Promise((accept) => setTimeout(accept, ms)) } = {}) {
+export async function runDoctor(cdp, { probeTimeoutMs = 1500, settleMs = 1200, restartRuntime = false, closeHung = false, sleep = (ms) => new Promise((accept) => setTimeout(accept, ms)) } = {}) {
   const timed = (promise) => Promise.race([promise, new Promise((accept) => setTimeout(() => accept({ timeout: true }), probeTimeoutMs))]);
   const targets = (await cdp.call("Target.getTargets")).result?.targetInfos || [];
   const pages = targets.filter((target) => target.type === "page");
@@ -114,13 +135,25 @@ export async function runDoctor(cdp, { probeTimeoutMs = 1500, settleMs = 4000, r
     const runtimeUrl = `chrome-extension://${extensionIdFor(STAGEHAND_EXTENSION_DIR)}/service-worker.js`;
     const worker = targets.find((target) => target.type === "service_worker" && target.url === runtimeUrl);
     if (worker) {
-      const attached = await timed(cdp.call("Target.attachToTarget", { targetId: worker.targetId, flatten: true }));
+      const oldTargetId = worker.targetId;
+      const attached = await timed(cdp.call("Target.attachToTarget", { targetId: oldTargetId, flatten: true }));
       const sessionId = attached.result?.sessionId;
       if (sessionId) {
         // Reload after replying so the evaluate itself is answered.
         const answer = await timed(cdp.call("Runtime.evaluate", { expression: "setTimeout(() => chrome.runtime.reload(), 50), true", returnByValue: true }, sessionId));
         runtimeRestarted = !answer.timeout && !answer.error;
-        if (runtimeRestarted) await sleep(settleMs);
+        if (runtimeRestarted) {
+          await sleep(120);
+          for (let i = 0; i < 30; i += 1) {
+            const refreshed = (await timed(cdp.call("Target.getTargets")))?.result?.targetInfos || [];
+            const nextWorker = refreshed.find((t) => t.type === "service_worker" && t.url === runtimeUrl && t.targetId !== oldTargetId);
+            if (nextWorker) {
+              await sleep(150);
+              break;
+            }
+            await sleep(100);
+          }
+        }
       }
     }
   }
@@ -207,7 +240,15 @@ export function status() {
   };
 }
 
-export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT, logSteps = Boolean(process.env.STAGEHAND_STEP_LOG) } = {}) {
+let activeInProcessSession = null;
+
+export async function openStagehand({
+  url,
+  extensions = [],
+  port = DEFAULT_PORT,
+  logSteps = Boolean(process.env.STAGEHAND_STEP_LOG),
+  leaseTimeoutMs = Number(process.env.STAGEHAND_LEASE_TIMEOUT_MS) || 90_000,
+} = {}) {
   const startedAt = Date.now();
   let currentStage = "init";
   const logStep = (stage, extra = "") => {
@@ -223,60 +264,90 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT,
     process.stderr.write(`[stagehand-bottleneck] stage=${currentStage} elapsed=${elapsedMs}ms activeHandles=${handles.join(",")}\n`);
   }, 60000);
   watchdog.unref?.();
+  if (activeInProcessSession) {
+    try {
+      await activeInProcessSession.close();
+    } catch {}
+    activeInProcessSession = null;
+  }
+  const killedClients = killStaleStagehandClients(process.pid);
+  if (killedClients.length) {
+    await new Promise((accept) => setTimeout(accept, 200));
+  }
   const env = loadEnv();
   const entry = runtimeEntry();
   const { localBrowser, Stagehand } = await import(pathToFileURL(entry.path).href);
   let browser;
   let mode;
-  if (await endpointVersion(port)) {
-    const extension = attachExtension(port, extensions);
-    logStep("cdp-attach-start", `port=${port}`);
-    // Stagehand loads its helper extension on connect; the first attempts can
-    // race its service worker ("No target with given id").
-    for (let attempt = 1; ; attempt += 1) {
+  const connectOrLaunch = async () => {
+    if (await endpointVersion(port)) {
+      const extension = attachExtension(port, extensions);
+      // Reset the Stagehand Runtime service worker and recover any hung tabs before connecting,
+      // so an unclosed previous session or heavy tab never causes a 60s initialization timeout.
       try {
-        browser = await localBrowser.connect({ cdpUrl: `http://127.0.0.1:${port}`, ...extension });
-        break;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (!message.includes("No target with given id") || attempt === 4) throw error;
-        await new Promise((accept) => setTimeout(accept, 1000));
+        const cdp = await browserCdp(port);
+        try {
+          await runDoctor(cdp, { restartRuntime: true, closeHung: true, settleMs: 600 });
+        } finally {
+          cdp.close();
+        }
+      } catch {}
+      logStep("cdp-attach-start", `port=${port}`);
+      // Stagehand loads its helper extension on connect; the first attempts can
+      // race its service worker ("No target with given id").
+      for (let attempt = 1; ; attempt += 1) {
+        try {
+          browser = await localBrowser.connect({ cdpUrl: `http://127.0.0.1:${port}`, ...extension });
+          break;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (!message.includes("No target with given id") || attempt === 4) throw error;
+          await new Promise((accept) => setTimeout(accept, 500));
+        }
       }
+      mode = "attach";
+      logStep("cdp-attach-done", `mode=${mode}`);
+    } else {
+      // The allow-list must keep the Stagehand Runtime, or its service worker never starts.
+      const allowed = [...extensions.map((dir) => resolve(dir)), STAGEHAND_EXTENSION_DIR].join(",");
+      const args = extensions.length ? [`--load-extension=${allowed}`, `--disable-extensions-except=${allowed}`] : [];
+      logStep("browser-launch-start", `port=${port}`);
+      browser = await localBrowser.launch({
+        headless: false,
+        executablePath: CHROMIUM,
+        userDataDir: PROFILE_DIR,
+        preserveUserDataDir: true,
+        port,
+        keepAlive: true,
+        args,
+      });
+      mode = "launch";
+      logStep("browser-launch-done", `mode=${mode}`);
     }
-    mode = "attach";
-    logStep("cdp-attach-done", `mode=${mode}`);
-  } else {
-    // The allow-list must keep the Stagehand Runtime, or its service worker never starts.
-    const allowed = [...extensions.map((dir) => resolve(dir)), STAGEHAND_EXTENSION_DIR].join(",");
-    const args = extensions.length ? [`--load-extension=${allowed}`, `--disable-extensions-except=${allowed}`] : [];
-    logStep("browser-launch-start", `port=${port}`);
-    browser = await localBrowser.launch({
-      headless: false,
-      executablePath: CHROMIUM,
-      userDataDir: PROFILE_DIR,
-      preserveUserDataDir: true,
-      port,
-      keepAlive: true,
-      args,
-    });
-    mode = "launch";
-    logStep("browser-launch-done", `mode=${mode}`);
-  }
+  };
   const model = env.STAGEHAND_MODEL && env.STAGEHAND_API_KEY
     ? { model: { modelName: env.STAGEHAND_MODEL, apiKey: env.STAGEHAND_API_KEY } }
     : {};
   let stagehand;
-  try {
-    logStep("stagehand-create-start");
-    stagehand = await Stagehand.create({ browser, ...model, logging: { level: "off" } });
-    logStep("stagehand-create-done");
-  } catch (error) {
-    clearInterval(watchdog);
-    const message = error instanceof Error ? error.message : String(error);
-    if (/already initialized|initialization is already in progress|initialization timed out/u.test(message)) {
-      throw new Error(`runtime-stuck: ${message}; run \`node ${join(SKILL_DIR, "scripts", "stagehand.mjs")} doctor --restart-runtime\` and see references/attach-notes.md`);
+  for (let createAttempt = 1; ; createAttempt += 1) {
+    try {
+      await connectOrLaunch();
+      logStep("stagehand-create-start");
+      stagehand = await Stagehand.create({ browser, ...model, logging: { level: "off" } });
+      logStep("stagehand-create-done");
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (createAttempt < 3 && /No target with given id|already initialized|initialization is already in progress/u.test(message)) {
+        await new Promise((accept) => setTimeout(accept, 400));
+        continue;
+      }
+      clearInterval(watchdog);
+      if (/already initialized|initialization is already in progress|initialization timed out/u.test(message)) {
+        throw new Error(`runtime-stuck: ${message}; run \`node ${join(SKILL_DIR, "scripts", "stagehand.mjs")} doctor --restart-runtime\` and see references/attach-notes.md`);
+      }
+      throw error;
     }
-    throw error;
   }
   let page;
   if (url) {
@@ -298,7 +369,42 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT,
   }
   const version = await endpointVersion(port);
   logStep("session-ready");
-  return {
+  let closed = false;
+  const closeSession = async () => {
+    if (closed) return;
+    closed = true;
+    if (activeInProcessSession === session) {
+      activeInProcessSession = null;
+    }
+    clearInterval(watchdog);
+    clearTimeout(leaseTimer);
+    logStep("session-close-start");
+    try {
+      await Promise.race([
+        stagehand.close(),
+        new Promise((accept) => setTimeout(accept, 1500)),
+      ]);
+    } catch {}
+    try {
+      const cdp = await browserCdp(port);
+      try {
+        await runDoctor(cdp, { restartRuntime: true, settleMs: 200 });
+      } finally {
+        cdp.close();
+      }
+    } catch {}
+    logStep("session-close-done");
+    for (const handle of process._getActiveHandles?.() || []) {
+      if (handle && handle !== process.stdout && handle !== process.stderr && handle !== process.stdin) {
+        try { handle.unref?.(); } catch {}
+      }
+    }
+  };
+  const leaseTimer = setTimeout(() => {
+    void closeSession();
+  }, leaseTimeoutMs);
+  leaseTimer.unref?.();
+  const session = {
     stagehand,
     page,
     mode,
@@ -308,21 +414,10 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT,
     headless: /Headless/i.test(version?.["User-Agent"] || ""),
     stagehandVersion: entry.version,
     logStep,
-    close: async () => {
-      clearInterval(watchdog);
-      logStep("session-close-start");
-      try {
-        await stagehand.close();
-      } finally {
-        logStep("session-close-done");
-        for (const handle of process._getActiveHandles?.() || []) {
-          if (handle && handle !== process.stdout && handle !== process.stderr && handle !== process.stdin) {
-            try { handle.unref?.(); } catch {}
-          }
-        }
-      }
-    },
+    close: closeSession,
   };
+  activeInProcessSession = session;
+  return session;
 }
 
 // Run as a CLI also when started through a symlinked skill path.

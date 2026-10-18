@@ -1,7 +1,0 @@
-{
- "exit": 0,
- "stdout": "usage: jev scope [-h] --request-file REQUEST_FILE --goal-file GOAL_FILE\n                 [--row ROW]\n\noptions:\n  -h, --help            show this help message and exit\n  --request-file REQUEST_FILE\n  --goal-file GOAL_FILE\n  --row ROW\n",
- "stderr": "",
- "requests": [],
- "log": []
-}
