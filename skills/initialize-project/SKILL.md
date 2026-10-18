@@ -19,7 +19,7 @@ Use this skill only for a genuinely new project or one missing its Table7 Raw ID
    - the project `AGENTS.md` standard header `## 작업 상태` (`- Table7 Raw ID`, `- Table26 task Raw ID`, `- 현재 작업`, `- Runtime`), prepended to an existing file;
    - `.ai/docs/architecture.md` and `.ai/docs/performance.md` from the 작업관리기 templates, and `.ai/changes/`.
    Read back the Obsidian bytes and `~/ai/scripts/bin/grist project <Table7 Raw ID>`. Never record credentials, authorization data, raw private payloads, or full private paths in output.
-3. Record the first request exactly as `work-project` steps 0–1 do: `grist request-record` (writes `Input.md` with `# 요구 사항`/`# 세부 사항`, today's `.ai/changes/YYMMDD.<제목>.md` with `# 작업`/`# 완료`/`# 진행`, and the note's `# 📆`), then `grist task-add --project <dir> --type <유형>` per `# 세부 사항` line (`$H=초안`), put the ids in the `AGENTS.md` header, and write each goal with `grist task-goal` (detail → changes `### 목표`, summary → `$K`).
+3. Record the first request exactly as `work-project` steps 0–1 do: `grist request-record` (writes `Input.md` with `# 요구 사항`/`# 세부 사항`, today's `.ai/changes/YYMMDD.<제목>.md` with `# 작업`/`# 완료`/`# 진행`, and the note's `# 📆`), then `grist task-add --project <dir> --type <유형> --judge "[값|상태] <한줄 판정 내용>"` per `# 세부 사항` line (`$H=초안`), put the ids in the `AGENTS.md` header, and write each goal with `grist task-goal` (detail → changes `### 목표`, summary → `$K`).
 4. Fill `.ai/docs/architecture.md` (domains and root/second-level folders, no file names) and the note's `# 🏗` from the actual project; keep the project `AGENTS.md` under 32KB.
 5. Split only stated requirements into atomic items. Do not invent relationships, fields, transports, or adjacent workflows.
 

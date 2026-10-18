@@ -46,10 +46,11 @@ The default project test command runs unit and production-boundary checks only. 
 
 ## Verification bottleneck diagnosis and source repair
 
-- When verification or API/runtime exploration takes 5 minutes or more, immediately add intermediate step logging (`[verify-step] <boundary> <elapsed_ms>`) across each boundary (`cdp-attach`, `extension-ready`, `start-action`, `transport`, `consumer-readback`, `session-close`) to identify the exact stage where the bottleneck occurs. Do not mask it by slapping a hard command timeout on it.
+- Whenever a verification or runtime check command is sent to the background (`task-*`), **always set a 5-minute early-terminating wakeup timer (`schedule` with `DurationSeconds=300`, `TimerCondition="<task-id>"`) in the same turn before ending the turn**. Never end a turn waiting on a background verification task without a 300-second wakeup timer, because a hung background process will never wake the agent on its own.
+- When the 5-minute timer fires (or when verification/API exploration takes 5 minutes or more), immediately inspect the task log and intermediate step logs (`[verify-step]` / `[stagehand-step]` / `[stagehand-bottleneck]`) across each boundary (`cdp-attach`, `extension-ready`, `start-action`, `transport`, `consumer-readback`, `session-close`) to identify the exact stage where the bottleneck occurs. Do not mask it by slapping a hard command timeout on it.
 - A single API lookup, gate check, or verification path taking minutes means there is a defect or bottleneck in the source code itself (e.g., blocking `stdin`/IPC reads, unclosed keep-alive WebSocket/timer handles after `session.close()`, backgrounded processes holding parent stdio pipes without `</dev/null` and `disown`, repeated full-file scans or regex compilation inside loops, or unbounded polling).
 - Immediately inspect the running process and intermediate step logs, pinpoint the exact bottleneck boundary, and fix the source code so the operation completes at normal speed. Record the bottleneck cause and fix in `.ai/changes/` (`### 메모`) or `.ai/docs/performance.md`.
-- `openStagehand()`'s `session.close()` unrefs remaining keep-alive handles automatically; in custom scripts, ensure all timers/sockets are closed or call `process.exit(0)` after `await session.close()` in `finally`.
+- `openStagehand()`'s `session.close()` unrefs remaining keep-alive handles automatically and emits `[stagehand-bottleneck]` every 60s while open; in custom scripts, ensure all timers/sockets are closed or call `process.exit(0)` after `await session.close()` in `finally`.
 
 ## Failure and completion
 

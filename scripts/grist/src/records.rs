@@ -390,6 +390,35 @@ pub fn edit_item<T, F: FnOnce(&mut Vec<String>) -> T>(project_dir: &Path, raw_id
     })
 }
 
+pub fn format_judge(title: &str, judge: &str) -> String {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^\s*\[([^\]]+)\]\s*(.*?)\s*$").unwrap());
+    let cleaned_title = util::strip(
+        title
+            .trim_start()
+            .strip_prefix("[구현]")
+            .or_else(|| title.trim_start().strip_prefix("<구현>"))
+            .unwrap_or(title),
+    );
+    let fallback_body = if cleaned_title.is_empty() { "동작 확인" } else { cleaned_title };
+    let j = util::strip(judge);
+    if j.is_empty() || (j.starts_with("목표의 ") && j.ends_with(" 줄")) {
+        return format!("[상태] {fallback_body}");
+    }
+    if let Some(caps) = re.captures(j) {
+        let tag = match caps[1].trim() {
+            "값" => "값",
+            "상태" => "상태",
+            _ => "상태",
+        };
+        let rest = util::strip(&caps[2]);
+        let body = if rest.is_empty() { fallback_body } else { rest };
+        format!("[{tag}] {body}")
+    } else {
+        format!("[상태] {j}")
+    }
+}
+
 pub fn register_item(project_dir: &Path, raw_id: i64, title: &str, kind: &str, judge: &str) -> R<PathBuf> {
     with_lock(&project_dir.join(".ai").join("changes"), || {
         if let Some(existing) = item_file(project_dir, raw_id) {
@@ -404,11 +433,7 @@ pub fn register_item(project_dir: &Path, raw_id: i64, title: &str, kind: &str, j
         add_numbered(&mut lines, start, end, &format!("{title} (#{raw_id})"));
         let start = find(&lines, 1, "진행", 0, None).unwrap();
         let end = span(&lines, start, 1);
-        let judge_str = if judge.is_empty() {
-            "목표의 [연결]/[기능]/[수정] 줄"
-        } else {
-            judge
-        };
+        let judge_str = format_judge(title, judge);
         let heading_line = if title.starts_with('<') || title.starts_with('[') {
             format!("## {title} (#{raw_id})")
         } else {
@@ -1046,4 +1071,39 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
         apply_row(&project_dir, raw_id, &fields)?;
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_judge;
+
+    #[test]
+    fn format_judge_cases() {
+        assert_eq!(format_judge("랜더링 성능 개선", ""), "[상태] 랜더링 성능 개선");
+        assert_eq!(
+            format_judge("랜더링 성능 개선", "목표의 [값]/[상태]/[수치] 줄"),
+            "[상태] 랜더링 성능 개선"
+        );
+        let legacy_judge = format!("목표의 [{}]/[{}]/[{}] 줄", "연결", "기능", "수정");
+        assert_eq!(
+            format_judge("랜더링 성능 개선", &legacy_judge),
+            "[상태] 랜더링 성능 개선"
+        );
+        assert_eq!(
+            format_judge("기타 작업", "[상태] 랜더링 성능 개선"),
+            "[상태] 랜더링 성능 개선"
+        );
+        assert_eq!(
+            format_judge("기타 작업", "[값] 반환 개수 일치"),
+            "[값] 반환 개수 일치"
+        );
+        assert_eq!(
+            format_judge("기타 작업", "[수치] 응답 지연 감소"),
+            "[상태] 응답 지연 감소"
+        );
+        assert_eq!(
+            format_judge("기타 작업", "태그 없는 판정 요약"),
+            "[상태] 태그 없는 판정 요약"
+        );
+    }
 }

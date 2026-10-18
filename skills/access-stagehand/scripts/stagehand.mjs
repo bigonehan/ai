@@ -209,12 +209,20 @@ export function status() {
 
 export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT, logSteps = Boolean(process.env.STAGEHAND_STEP_LOG) } = {}) {
   const startedAt = Date.now();
+  let currentStage = "init";
   const logStep = (stage, extra = "") => {
+    currentStage = stage;
     const elapsedMs = Date.now() - startedAt;
     if (logSteps || elapsedMs >= 3000) {
       process.stderr.write(`[stagehand-step] ${stage} +${elapsedMs}ms${extra ? ` (${extra})` : ""}\n`);
     }
   };
+  const watchdog = setInterval(() => {
+    const elapsedMs = Date.now() - startedAt;
+    const handles = (process._getActiveHandles?.() || []).map((h) => h?.constructor?.name || "Handle");
+    process.stderr.write(`[stagehand-bottleneck] stage=${currentStage} elapsed=${elapsedMs}ms activeHandles=${handles.join(",")}\n`);
+  }, 60000);
+  watchdog.unref?.();
   const env = loadEnv();
   const entry = runtimeEntry();
   const { localBrowser, Stagehand } = await import(pathToFileURL(entry.path).href);
@@ -263,6 +271,7 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT,
     stagehand = await Stagehand.create({ browser, ...model, logging: { level: "off" } });
     logStep("stagehand-create-done");
   } catch (error) {
+    clearInterval(watchdog);
     const message = error instanceof Error ? error.message : String(error);
     if (/already initialized|initialization is already in progress|initialization timed out/u.test(message)) {
       throw new Error(`runtime-stuck: ${message}; run \`node ${join(SKILL_DIR, "scripts", "stagehand.mjs")} doctor --restart-runtime\` and see references/attach-notes.md`);
@@ -288,6 +297,7 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT,
     logStep("page-resolve-done", await page.url());
   }
   const version = await endpointVersion(port);
+  logStep("session-ready");
   return {
     stagehand,
     page,
@@ -299,6 +309,7 @@ export async function openStagehand({ url, extensions = [], port = DEFAULT_PORT,
     stagehandVersion: entry.version,
     logStep,
     close: async () => {
+      clearInterval(watchdog);
       logStep("session-close-start");
       try {
         await stagehand.close();

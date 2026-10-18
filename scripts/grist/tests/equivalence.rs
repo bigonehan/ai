@@ -699,6 +699,9 @@ fn api_and_management_commands() {
     // Verify changes record contains only `- 목적 :`, `- 결과 :`, `- 상세 :` under 초안/검증/확인 and never `sh t.sh`
     let rec_text = std::fs::read_to_string(&rec_file).unwrap();
     assert!(!rec_text.contains("sh t.sh"), "changes record must not contain test command:\n{}", rec_text);
+    assert!(rec_text.contains("- 판정 : [상태] 추가 작업"), "changes record must have [값|상태] judge line:\n{}", rec_text);
+    assert!(rec_text.contains("- 판정 : [상태] 첫 작업"), "changes record must have [값|상태] judge line:\n{}", rec_text);
+    assert!(!rec_text.contains("목표의 ["), "changes record must not have fixed 목표의 ... 줄:\n{}", rec_text);
     assert!(rec_text.contains("- 목적 : 플래그 읽기"));
     assert!(rec_text.contains("- 목적 : 빈 플래그 거부"));
 
