@@ -1,6 +1,6 @@
 ---
 name: run-cdp
-description: Run a project's web/browser runtime check in a visible (headless: false) WSL Chromium with the dedicated login-keeping profile on the shared CDP endpoint 127.0.0.1:9222, driven by Stagehand through the access-stagehand skill, from the real start action to the authoritative consumer readback.
+description: "Run a project's web/browser runtime check in a visible (headless: false) WSL Chromium with the dedicated login-keeping profile on the shared CDP endpoint 127.0.0.1:9222, driven by Stagehand through the access-stagehand skill, from the real start action to the authoritative consumer readback."
 ---
 
 # Run CDP browser

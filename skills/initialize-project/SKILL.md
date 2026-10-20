@@ -1,26 +1,54 @@
 ---
 name: initialize-project
-description: Initialize a new project with its AGENTS.md, Input.md, Grist Table7/Table26 tracking, Obsidian management record, and atomic task breakdown.
+description: Initialize a new project with its project type (업무, 공방, 게임, 보조), Obsidian documents (프로젝트 이름.md, 일지/프로젝트 이름-개발.md, 노트/, 타입.md), Grist Table7/Table26 tracking, AGENTS.md (# 상태 header from 작업관리기.형식-Agents.md.md), .ai/docs and .ai/changes.
 metadata:
-  short-description: Initialize project tracking without legacy workflow artifacts
+  short-description: Initialize project tracking with project type and new format templates
 ---
 
 # Initial Project (`initial_project` alias)
 
-Use this skill only for a genuinely new project or one missing its Table7 Raw ID or Obsidian management path. Read the nearest rules and resolve the `/home/tree/extensions` Table7 management document before mutation. Existing initialized projects use `work-project`.
+Use this skill only for a genuinely new project or one missing its `# 상태` (`### grist` `ID :` / `### obsidian` `문서 :`) header in `AGENTS.md`. Read the nearest rules and resolve the `/home/tree/extensions` Table7 management document before mutation. Existing initialized projects use `work-project`.
 
 ## Initialization
 
-1. Resolve the project name, Asia/Seoul date and a one-line project description. Do not create a second transport, retry queue, or response reader.
+1. Ask the user to choose the project type (`프로젝트 타입`) from the 4 allowed types:
+   - `업무`, `공방`, `게임`, `보조`
+   Resolve the project name (`<name>`), Asia/Seoul date (`YYMMDD`, `YYYY`, `M월`, `MMDD`), and a one-line project description.
    A new Table7 row starts with `$D` (상태) `진행`, 마감일 `$F` as the Unix timestamp of December 3 of next year (Asia/Seoul year + 1, UTC midnight), and `$K` (상금) left empty.
-2. Run `scripts/bin/initialize-project --project-root <dir> --project-name <name> --description "<한 줄 설명>"`; it reads the Grist credentials from the `access-grist` skill's `.env` and creates (keeping whatever already exists):
-   - the Table7 row with `Obsidian_Id` = `구현/진행/YYMMDD.<name>/YYMMDD.<name>-개발.md`;
-   - that Obsidian note from `작업관리기/작업관리기-초기문서.md` (instruction fences replaced, `# 📋` filled, the user area from `# 💡` untouched);
-   - the project `AGENTS.md` standard header `## 작업 상태` (`- Table7 Raw ID`, `- Table26 task Raw ID`, `- 현재 작업`, `- Runtime`), prepended to an existing file;
-   - `.ai/docs/architecture.md` and `.ai/docs/performance.md` from the 작업관리기 templates, and `.ai/changes/`.
-   Read back the Obsidian bytes and `~/ai/scripts/bin/grist project <Table7 Raw ID>`. Never record credentials, authorization data, raw private payloads, or full private paths in output.
-3. Record the first request exactly as `work-project` steps 0–1 do: `grist request-record` (writes `Input.md` with `# 요구 사항`/`# 세부 사항`, today's `.ai/changes/YYMMDD.<제목>.md` with `# 작업`/`# 완료`/`# 진행`, and the note's `# 📆`), then `grist task-add --project <dir> --type <유형> --judge "[값|상태] <한줄 판정 내용>"` per `# 세부 사항` line (`$H=초안`), put the ids in the `AGENTS.md` header, and write each goal with `grist task-goal` (detail → changes `### 목표`, summary → `$K`).
-4. Fill `.ai/docs/architecture.md` (domains and root/second-level folders, no file names) and the note's `# 🏗` from the actual project; keep the project `AGENTS.md` under 32KB.
+2. Run `scripts/bin/initialize-project --project-root <dir> --project-name <name> --project-type <업무|공방|게임|보조> --description "<한 줄 설명>" [--runtime "<실행 방법 한줄 요약>"]`; it reads the Grist credentials from the `access-grist` skill's `.env` and creates (keeping whatever already exists):
+   - **Obsidian project folder and files**:
+     - `구현/<타입>/YYMMDD.<name>/<name>.md` from `구현/업무/261008.작업관리기/형식/작업관리기.형식-문서.md`:
+       - Top folder link set to `[[구현/<타입>|📁]]`
+       - Under `# 🔨`: `[[<name>-개발.md]]`
+       - Under `# 📆`: `## YYYY` / `### M월` / `MMDD : 문서 생성`
+     - `구현/<타입>/YYMMDD.<name>/일지/<name>-개발.md` from `구현/업무/261008.작업관리기/형식/작업관리기.형식-개발.md`:
+       - Top folder link set to `[[<name>|📁]]`
+       - `# 📋` filled with `- <한 줄 설명>`, instruction fences removed, user area from `# 💡` preserved
+       - Under `# 📆`: `## YYYY` / `### M월`
+     - `구현/<타입>/YYMMDD.<name>/노트/` directory
+     - `구현/<타입>/<타입>.md`: adds `[[<name>]]` under `# 🗄`
+   - **Grist Table7 row**:
+     - `$Obsidian_Id` = `구현/<타입>/YYMMDD.<name>/일지/<name>-개발.md`
+   - **Project `AGENTS.md` and `.ai/`**:
+     - `AGENTS.md` from `구현/업무/261008.작업관리기/형식/작업관리기.형식-Agents.md.md` with `# 상태` updated:
+       ```markdown
+       # 상태
+       ### grist
+       ID : <Table7 ID>
+       ### obsidian
+       문서 : 구현/<타입>/YYMMDD.<name>/일지/<name>-개발.md
+       ### 실행
+       runtime : <진입지점 혹은 실행 방법 한줄 요약>
+       ```
+     - `.ai/docs/architecture.md` from `구현/업무/261008.작업관리기/형식/작업관리기.형식-architecture.md`
+     - `.ai/docs/performance.md` from `구현/업무/261008.작업관리기/형식/작업관리기.형식-performance.md`
+     - `.ai/changes/` directory
+   Read back the Obsidian bytes and `~/ai/scripts/bin/grist project <Table7 ID>`. Never record credentials, authorization data, raw private payloads, or full private paths in output.
+3. Record the first request exactly as `work-project` steps 0–2 do: summarize `# 요구 사항` in one line, choose a `📐|✒️|⌨️|🚿|✏️|🌍` marker for each `# 세부 사항`, and carry each marked line to changes and Table26 `$B`:
+   - `grist request-record` (writes `Input.md` following `구현/업무/261008.작업관리기/형식/작업관리기.형식-input.md` with `# 요구 사항`/`# 세부 사항`, today's `.ai/changes/YYMMDD.<제목>.md` following `구현/업무/261008.작업관리기/형식/작업관리기.형식-changes.md` with `# 작업`/`# 완료`/`# 진행`, and the development note's `# 📆`),
+   - `grist task-add --project <dir> --type <유형> --judge "[값|상태] <한줄 판정 내용>"` per marked `# 세부 사항` line, with the same line in `$B` (`$H=초안`),
+   - `grist task-goal` (detail → changes `### 목표`, summary → `$K`).
+4. Fill `.ai/docs/architecture.md` (domains and root/second-level folders, no file names) and the development note's `# 🏗` from the actual project; keep the project `AGENTS.md` under 32KB.
 5. Split only stated requirements into atomic items. Do not invent relationships, fields, transports, or adjacent workflows.
 
 ## Grist access
@@ -29,8 +57,6 @@ Every Grist read and write (Table7 project rows, Table26 task rows, readback aft
 
 ## Stages and completion
 
-Table26 `$H` is a Choice column that stores one Korean value: `초안`(초안), `진단`(오류 발생·수정 필요), `작업`(소스 전달·구현 중), `교정`(유닛테스트 중), `검증`(흐름 테스트 중), `확인`(사용자 테스트 필요), or `완료`(최종 완료). English names are aliases only and are never written to `$H`. `검토`(REVIEW) and per-item `RUNTIME` are not stages.
+Table26 `$H` is a Choice column that stores one Korean value: `초안`(초안), `진단`(오류 발생·수정 필요), `작업`(소스 전달·구현 중), `교정`(유닛테스트 중), `검증`(흐름 테스트 중), `확인`(사용자 테스트 필요), or `완료`(최종 완료).
 
 After initialization, item work follows the `work-project` flow: one `t26_<id>` agent per row pins its goal with a failing test (`task-red`, `작업`), runs unit tests (`교정`, or `진단` on error) and submits the passing implementation with `grist task-submit` (`검증`), the main session runs the whole flow and `flow-wait` (`확인`), and `task-complete` writes `완료` after user confirmation. The Codex Stop/SubagentStop hook blocks ending a turn outside those states.
-
-The project rules, Input.md, dated change record, Table26 state, command output, and authoritative consumer are the records. After every item is complete, run one project-level runtime whole flow through the real artifact and consumer.

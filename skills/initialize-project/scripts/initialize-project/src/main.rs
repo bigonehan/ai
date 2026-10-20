@@ -11,14 +11,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_DOC_ID: &str = "au1EbKLtZbrW";
 const DEFAULT_VAULT_ROOT: &str = "/mnt/c/Users/tende/OneDrive/일기장";
-const TEMPLATE_DIR: &str = "작업/종류/프로젝트/관리/작업관리기";
-const DEFAULT_TEMPLATE: &str = "작업/종류/프로젝트/관리/작업관리기/작업관리기-초기문서.md";
+const FORMAT_DIR: &str = "구현/업무/261008.작업관리기/형식";
+const DOC_TEMPLATE: &str = "구현/업무/261008.작업관리기/형식/작업관리기.형식-문서.md";
+const DEV_TEMPLATE: &str = "구현/업무/261008.작업관리기/형식/작업관리기.형식-개발.md";
+const AGENTS_TEMPLATE: &str = "구현/업무/261008.작업관리기/형식/작업관리기.형식-Agents.md.md";
+const ARCH_TEMPLATE: &str = "구현/업무/261008.작업관리기/형식/작업관리기.형식-architecture.md";
+const PERF_TEMPLATE: &str = "구현/업무/261008.작업관리기/형식/작업관리기.형식-performance.md";
+const PROJECT_TYPES: &[&str] = &["업무", "공방", "게임", "보조"];
 const MANAGEMENT_RAW_ID: i64 = 1198;
 const DEFAULT_GRIST_BASE_URL: &str = "http://localhost:8484";
 
 struct Options {
     project_root: String,
     project_name: String,
+    project_type: String,
+    runtime: String,
     operation_id: String,
     doc_id: String,
     table7: String,
@@ -261,6 +268,18 @@ fn parse_args(argv: &[String], env_map: &HashMap<String, String>, ms: i64) -> Re
     if project_root.is_empty() || project_name.is_empty() {
         return Err("--project-root와 --project-name이 필요합니다.".to_string());
     }
+    let project_type = values
+        .get("project-type")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if !PROJECT_TYPES.contains(&project_type.as_str()) {
+        return Err("--project-type은 업무, 공방, 게임, 보조 중 하나여야 합니다.".to_string());
+    }
+    let runtime = values
+        .get("runtime")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "{진입지점 혹은 실행 방법 한줄 요약}".to_string());
     let cwd = cwd_string();
     let resolved_project_root = path_resolve(&cwd, &project_root);
     let vault_raw = values
@@ -307,7 +326,7 @@ fn parse_args(argv: &[String], env_map: &HashMap<String, String>, ms: i64) -> Re
         .get("template-path")
         .cloned()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_TEMPLATE.to_string());
+        .unwrap_or_else(|| DEV_TEMPLATE.to_string());
     let receipt = values.get("receipt").cloned().filter(|s| !s.is_empty());
     let description = values
         .get("description")
@@ -318,6 +337,8 @@ fn parse_args(argv: &[String], env_map: &HashMap<String, String>, ms: i64) -> Re
     Ok(Options {
         project_root: resolved_project_root,
         project_name,
+        project_type,
+        runtime,
         operation_id,
         doc_id,
         table7,
@@ -463,7 +484,20 @@ fn js_replace_first(text: &str, re: &Regex, rep: &str) -> String {
     out
 }
 
-fn render_note(template: &str, prefix: &str, description: &str) -> String {
+fn render_project_doc(template: &str, project_type: &str, project_name: &str, year: i32, month: u32, day: u32) -> String {
+    let folder_re = Regex::new(r"(?m)^\[\[[^|]*\|📁\]\]\s*$").unwrap();
+    let hammer_re = Regex::new(r"(?m)^# 🔨\s*$").unwrap();
+    let cal_re = Regex::new(r"(?m)^# 📆\n## YYYY\n### M월\nMMDD : 문서 생성\n?").unwrap();
+
+    let s1 = js_replace_first(template, &folder_re, &format!("[[구현/{project_type}|📁]]"));
+    let s2 = js_replace_first(&s1, &hammer_re, &format!("# 🔨\n[[{project_name}-개발.md]]"));
+    let cal_block = format!(
+        "# 📆\n## {year}\n### {month}월\n{month:02}{day:02} : 문서 생성\n"
+    );
+    js_replace_first(&s2, &cal_re, &cal_block)
+}
+
+fn render_dev_note(template: &str, project_name: &str, description: &str, year: i32, month: u32) -> String {
     let split_re = Regex::new(r"(?m)^# 💡").unwrap();
     let matches: Vec<_> = split_re.find_iter(template).collect();
     let (head, user) = match matches.as_slice() {
@@ -478,14 +512,78 @@ fn render_note(template: &str, prefix: &str, description: &str) -> String {
     let cal_re = Regex::new(r"(?m)(^# 📆[^\n]*\n)```[^\n]*\n[\s\S]*?^```\s*$\n?").unwrap();
     let blank_re = Regex::new(r"\n{3,}").unwrap();
 
-    let s1 = js_replace_first(head, &folder_re, &format!("[[{prefix}|📁]]"));
+    let s1 = js_replace_first(head, &folder_re, &format!("[[{project_name}|📁]]"));
     let s2 = fence_re.replace_all(&s1, "").into_owned();
     let s3 = js_replace_first(&s2, &desc_re, &format!("# 📋\n- {description}"));
     let s4 = blank_re.replace_all(&s3, "\n\n").into_owned();
     let body_trimmed = s4.trim_end();
 
-    let calendar = cal_re.replace(user, "$1").into_owned();
+    let cal_replacement = format!("$1## {year}\n### {month}월\n");
+    let calendar = cal_re.replace(user, cal_replacement.as_str()).into_owned();
     format!("{body_trimmed}\n\n{calendar}")
+}
+
+fn update_type_doc_content(existing: &str, project_name: &str, year: i32) -> String {
+    let link = format!("[[{project_name}]]");
+    let base = if existing.trim().is_empty() {
+        format!(
+            "[[구현|📁]] \n📋\n# 🏆\n\n# 📒\n# 📚\n# 🗄\n# 📆\n## {year}\n# 💭\n# 📜\n\n# 📼\n🗂\n# 🧙\n\n# 📰\n🔖\n"
+        )
+    } else {
+        existing.to_string()
+    };
+    let mut lines: Vec<String> = base
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect();
+    if lines.last().map(|l| l.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    let cab_idx = lines.iter().position(|l| l.trim() == "# 🗄");
+    if let Some(idx) = cab_idx {
+        let mut end = lines.len();
+        for (i, line) in lines.iter().enumerate().skip(idx + 1) {
+            if line.trim_start().starts_with('#') {
+                end = i;
+                break;
+            }
+        }
+        let already = lines[(idx + 1)..end].iter().any(|l| l.trim() == link);
+        if !already {
+            let mut insert_at = end;
+            while insert_at > idx + 1 && lines[insert_at - 1].trim().is_empty() {
+                insert_at -= 1;
+            }
+            lines.insert(insert_at, link);
+        }
+    } else {
+        lines.push("# 🗄".to_string());
+        lines.push(link);
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn render_status_section(raw_id: i64, dev_file: &str, runtime: &str) -> String {
+    format!(
+        "# 상태\n### grist\nID : {raw_id}\n### obsidian\n문서 : {dev_file}\n### 실행\nruntime : {runtime}\n"
+    )
+}
+
+fn render_agents_md(template: &str, existing_agents: &str, raw_id: i64, dev_file: &str, runtime: &str) -> String {
+    let status_block = render_status_section(raw_id, dev_file, runtime);
+    let source = if existing_agents.trim().is_empty() {
+        template
+    } else {
+        existing_agents
+    };
+    let status_re = Regex::new(
+        r"(?ms)^\s*#\s*상태\s*\n###\s*grist\s*\nID\s*:[^\n]*\n###\s*obsidian\s*\n문서\s*:[^\n]*\n###\s*실행\s*\nruntime\s*:[^\n]*\n?",
+    )
+    .unwrap();
+    if status_re.is_match(source) {
+        return status_re.replace(source, status_block.as_str()).into_owned();
+    }
+    format!("{status_block}\n{}", source.trim_start())
 }
 
 fn encode_uri_component(s: &str) -> String {
@@ -697,15 +795,40 @@ fn add_record(options: &Options, table: &str, fields: Map<String, Value>) -> Res
     )
 }
 
+fn update_record(options: &Options, table: &str, id: i64, fields: Map<String, Value>) -> Result<Value, String> {
+    let body = json!({
+        "records": [
+            { "id": id, "fields": Value::Object(fields) }
+        ]
+    });
+    grist_request(
+        options,
+        "PATCH",
+        &format!("/tables/{}/records?noparse=true", encode_uri_component(table)),
+        Some(&body),
+    )
+}
+
+fn read_agents_template(vault_root: &str) -> Result<String, String> {
+    let primary = relative_file(vault_root, AGENTS_TEMPLATE)?;
+    readable(&primary)
+}
+
 fn initialize(options: &Options, ms: i64) -> Result<Value, String> {
     let prefix = date_prefix(ms);
+    let (year, month, day) = seoul_ymd(ms);
     let timestamp = unix_timestamp(ms);
-    let project_file = format!(
-        "구현/진행/{prefix}.{}/{prefix}.{}-개발.md",
-        options.project_name, options.project_name
-    );
-    let template_file = relative_file(&options.vault_root, &options.template_path)?;
-    let template = readable(&template_file)?;
+    let base_folder = format!("구현/{}/{prefix}.{}", options.project_type, options.project_name);
+    let doc_file = format!("{base_folder}/{}.md", options.project_name);
+    let dev_file = format!("{base_folder}/일지/{}-개발.md", options.project_name);
+    let note_dir_rel = format!("{base_folder}/노트");
+    let type_doc_rel = format!("구현/{}/{}.md", options.project_type, options.project_type);
+
+    let dev_template_file = relative_file(&options.vault_root, &options.template_path)?;
+    let dev_template = readable(&dev_template_file)?;
+    let doc_template_file = relative_file(&options.vault_root, DOC_TEMPLATE)?;
+    let doc_template = readable(&doc_template_file)?;
+    let agents_template = read_agents_template(&options.vault_root)?;
     let project_root = &options.project_root;
 
     let obsidian_col = load_grist_schema(options)?;
@@ -719,12 +842,18 @@ fn initialize(options: &Options, ms: i64) -> Result<Value, String> {
         ));
     }
     let duplicate = existing.iter().find(|r| {
-        r.get(&obsidian_col).and_then(|v| v.as_str()) == Some(project_file.as_str())
+        r.get(&obsidian_col).and_then(|v| v.as_str()) == Some(dev_file.as_str())
             || r.get("C").and_then(|v| v.as_str()) == Some(options.project_name.as_str())
     });
     let mut raw_id = duplicate.and_then(|r| r.get("id").and_then(|v| v.as_i64()));
 
-    if raw_id.is_none() {
+    if let Some(existing_id) = raw_id {
+        if duplicate.and_then(|r| r.get(&obsidian_col).and_then(|v| v.as_str())) != Some(dev_file.as_str()) {
+            let mut upd = Map::new();
+            upd.insert(obsidian_col.clone(), json!(dev_file));
+            update_record(options, &options.table7, existing_id, upd)?;
+        }
+    } else {
         let mut fields = Map::new();
         fields.insert("H".to_string(), json!("코딩"));
         fields.insert("P".to_string(), json!("개인"));
@@ -732,7 +861,7 @@ fn initialize(options: &Options, ms: i64) -> Result<Value, String> {
         fields.insert("M".to_string(), json!("서류"));
         fields.insert("C".to_string(), json!(options.project_name));
         fields.insert("A".to_string(), json!(timestamp));
-        fields.insert(obsidian_col.clone(), json!(project_file));
+        fields.insert(obsidian_col.clone(), json!(dev_file));
         fields.insert("I".to_string(), json!("없음"));
         fields.insert("L".to_string(), json!("없음"));
         fields.insert("K".to_string(), json!(""));
@@ -742,7 +871,7 @@ fn initialize(options: &Options, ms: i64) -> Result<Value, String> {
         add_record(options, &options.table7, fields)?;
         let after = fetch_rows(options, &options.table7)?;
         let created = after.iter().find(|r| {
-            r.get(&obsidian_col).and_then(|v| v.as_str()) == Some(project_file.as_str())
+            r.get(&obsidian_col).and_then(|v| v.as_str()) == Some(dev_file.as_str())
                 && r.get("C").and_then(|v| v.as_str()) == Some(options.project_name.as_str())
         });
         let Some(c) = created.and_then(|r| r.get("id").and_then(|v| v.as_i64())) else {
@@ -757,40 +886,50 @@ fn initialize(options: &Options, ms: i64) -> Result<Value, String> {
         .iter()
         .find(|r| r.get("id").and_then(|v| v.as_i64()) == Some(raw_id));
     if table7_after.and_then(|r| r.get(&obsidian_col).and_then(|v| v.as_str()))
-        != Some(project_file.as_str())
+        != Some(dev_file.as_str())
     {
-        return Err("Table7 Raw ID 또는 Obsidian_Id readback 값이 일치하지 않습니다.".to_string());
+        return Err("Table7 ID 또는 Obsidian_Id readback 값이 일치하지 않습니다.".to_string());
     }
 
-    let rendered = render_note(&template, &prefix, &options.description);
-    let note = create_markdown(&options.vault_root, &project_file, &rendered)?;
-    let has_cal = Regex::new(r"(?m)^# 📆\s*$").unwrap().is_match(&note.content);
-    let has_pin = Regex::new(r"(?m)^# 📍\s*$").unwrap().is_match(&note.content);
+    let rendered_doc = render_project_doc(&doc_template, &options.project_type, &options.project_name, year, month, day);
+    let doc_note = create_markdown(&options.vault_root, &doc_file, &rendered_doc)?;
+
+    let rendered_dev = render_dev_note(&dev_template, &options.project_name, &options.description, year, month);
+    let dev_note = create_markdown(&options.vault_root, &dev_file, &rendered_dev)?;
+    let has_cal = Regex::new(r"(?m)^# 📆\s*$").unwrap().is_match(&dev_note.content);
+    let has_pin = Regex::new(r"(?m)^# 📍\s*$").unwrap().is_match(&dev_note.content);
     if !has_cal || !has_pin {
-        return Err("obsidian-readback: 프로젝트 문서에 # 📆·# 📍 헤더가 없습니다.".to_string());
+        return Err("obsidian-readback: 개발 문서에 # 📆·# 📍 헤더가 없습니다.".to_string());
     }
 
-    let header = format!(
-        "## 작업 상태\n- Table7 Raw ID: {raw_id}\n- Table26 task Raw ID: (task-add 후 기록)\n- 현재 작업: 초기화\n- Runtime: <대상 URL> / <artifact> / <시작 동작> / <authoritative consumer>\n\n"
-    );
-    let agents_file = format!("{project_root}/AGENTS.md");
-    let agents = match readable(&agents_file) {
+    let note_dir_abs = relative_file(&options.vault_root, &note_dir_rel)?;
+    fs::create_dir_all(&note_dir_abs).map_err(|e| e.to_string())?;
+
+    let type_doc_abs = relative_file(&options.vault_root, &type_doc_rel)?;
+    let existing_type_doc = match readable(&type_doc_abs) {
         Ok(c) => c,
         Err(ref e) if e.starts_with("ENOENT:") => String::new(),
         Err(e) => return Err(e),
     };
-    let has_t7_header = Regex::new(r"(?m)^- Table7 Raw ID:").unwrap().is_match(&agents);
-    if !has_t7_header {
-        write_text_atomically(&agents_file, &format!("{header}{agents}"), ms)?;
-    }
+    let updated_type_doc = update_type_doc_content(&existing_type_doc, &options.project_name, year);
+    write_text_atomically(&type_doc_abs, &updated_type_doc, ms)?;
+
+    let agents_file = format!("{project_root}/AGENTS.md");
+    let existing_agents = match readable(&agents_file) {
+        Ok(c) => c,
+        Err(ref e) if e.starts_with("ENOENT:") => String::new(),
+        Err(e) => return Err(e),
+    };
+    let rendered_agents = render_agents_md(&agents_template, &existing_agents, raw_id, &dev_file, &options.runtime);
+    write_text_atomically(&agents_file, &rendered_agents, ms)?;
 
     let mut docs = Map::new();
-    for (name, source) in [
-        ("architecture.md", "작업관리기-architecture.md"),
-        ("performance.md", "작업관리기-performance.md"),
+    for (name, tpl_rel) in [
+        ("architecture.md", ARCH_TEMPLATE),
+        ("performance.md", PERF_TEMPLATE),
     ] {
         let file = format!("{project_root}/.ai/docs/{name}");
-        let tpl_path = relative_file(&options.vault_root, &format!("{TEMPLATE_DIR}/{source}"))?;
+        let tpl_path = relative_file(&options.vault_root, tpl_rel)?;
         let tpl_content = readable(&tpl_path)?;
         let written = write_if_missing(&file, &tpl_content)?;
         docs.insert(name.to_string(), json!(written));
@@ -801,14 +940,23 @@ fn initialize(options: &Options, ms: i64) -> Result<Value, String> {
     evidence.insert("operation_id".to_string(), json!(options.operation_id));
     evidence.insert("status".to_string(), json!("complete"));
     evidence.insert("project_root".to_string(), json!(project_root));
+    evidence.insert("project_type".to_string(), json!(options.project_type));
+    evidence.insert("format_dir".to_string(), json!(FORMAT_DIR));
     evidence.insert(
         "obsidian".to_string(),
         json!({
+            "document": {
+                "path": doc_file,
+                "bytes": doc_note.bytes,
+                "sha256": doc_note.sha256,
+            },
             "project": {
-                "path": project_file,
-                "bytes": note.bytes,
-                "sha256": note.sha256,
-            }
+                "path": dev_file,
+                "bytes": dev_note.bytes,
+                "sha256": dev_note.sha256,
+            },
+            "notes_dir": note_dir_rel,
+            "type_document": type_doc_rel,
         }),
     );
     evidence.insert(
@@ -817,7 +965,7 @@ fn initialize(options: &Options, ms: i64) -> Result<Value, String> {
             "transport": "grist-rest-api",
             "table7": {
                 "raw_id": raw_id,
-                "obsidian_path": project_file,
+                "obsidian_path": dev_file,
             }
         }),
     );
@@ -878,5 +1026,57 @@ fn main() {
             println!("{result}");
         }
         Err(e) => fail_and_exit(&e, &argv, &env_map, ms),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_format_files_exist_in_default_vault() {
+        for relative in [DOC_TEMPLATE, DEV_TEMPLATE, AGENTS_TEMPLATE, ARCH_TEMPLATE, PERF_TEMPLATE] {
+            let file = relative_file(DEFAULT_VAULT_ROOT, relative).unwrap();
+            assert!(Path::new(&file).is_file(), "missing format file: {relative}");
+        }
+    }
+
+    #[test]
+    fn project_type_validation_and_obsidian_rendering() {
+        let env_map = HashMap::new();
+        let bad = vec![
+            "initialize-project".to_string(),
+            "--project-root".to_string(),
+            "/tmp/x".to_string(),
+            "--project-name".to_string(),
+            "demo".to_string(),
+        ];
+        assert!(parse_args(&bad, &env_map, 0).is_err());
+
+        let doc_tpl = "[[구현/[프로젝트타입]|📁]]\n# 📋\n# 🏆\n# 📕\n# 🔨\n# 💾\n# 📚\n# 📆\n## YYYY\n### M월\nMMDD : 문서 생성\n# 💭\n🔖\n";
+        let doc_out = render_project_doc(doc_tpl, "공방", "샘플", 2026, 10, 20);
+        assert!(doc_out.contains("[[구현/공방|📁]]"));
+        assert!(doc_out.contains("# 🔨\n[[샘플-개발.md]]"));
+        assert!(doc_out.contains("# 📆\n## 2026\n### 10월\n1020 : 문서 생성"));
+
+        let dev_tpl = "[[<프로젝트 이름>|📁]]\n# 📋\n```\n설명\n```\n# 📍\n```\n기능\n```\n# 🏗\n# 💡\n# 📆\n```\n형식\n```\n🔖";
+        let dev_out = render_dev_note(dev_tpl, "샘플", "샘플 프로젝트 설명", 2026, 10);
+        assert!(dev_out.contains("[[샘플|📁]]"));
+        assert!(dev_out.contains("# 📋\n- 샘플 프로젝트 설명"));
+        assert!(dev_out.contains("# 📆\n## 2026\n### 10월"));
+
+        let type_out = update_type_doc_content("[[구현|📁]]\n# 🗄\n[[작업관리기]]\n# 📆\n", "샘플", 2026);
+        assert!(type_out.contains("# 🗄\n[[작업관리기]]\n[[샘플]]\n# 📆"));
+
+        let agents_tpl = "# 상태 \n### grist \nID : {grist에서 기록한 table raw ID}\n### obsidian \n문서 : {obsidian 안에 만들어진 개발 문서 Path}\n### 실행 \nruntime : {진입지점 혹은 실행 방법 한줄 요약}\n# 정보 \n# tip\n";
+        let agents_out = render_agents_md(
+            agents_tpl,
+            "",
+            1299,
+            "구현/공방/261020.샘플/일지/샘플-개발.md",
+            "npm test",
+        );
+        assert!(agents_out.contains("# 상태\n### grist\nID : 1299\n### obsidian\n문서 : 구현/공방/261020.샘플/일지/샘플-개발.md\n### 실행\nruntime : npm test"));
+        println!("initialize-project render test OK: {agents_out}");
     }
 }

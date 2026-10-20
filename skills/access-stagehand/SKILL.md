@@ -1,6 +1,6 @@
 ---
 name: access-stagehand
-description: Use Stagehand (browser AI act/observe/extract) for extensions work through scripts/stagehand.mjs, which owns the pinned Stagehand runtime, the AI model name and API key in this skill's .env, and opens a visible (headless: false) session on the shared CDP endpoint with the dedicated profile. Use it whenever a task needs Stagehand, instead of installing Stagehand in a project, asking the user for a model key, or wiring Stagehand by hand.
+description: "Use Stagehand (browser AI act/observe/extract) for extensions work through scripts/stagehand.mjs, which owns the pinned Stagehand runtime, the AI model name and API key in this skill's .env, and opens a visible (headless: false) session on the shared CDP endpoint with the dedicated profile. Use it whenever a task needs Stagehand, instead of installing Stagehand in a project, asking the user for a model key, or wiring Stagehand by hand."
 ---
 
 # Stagehand access

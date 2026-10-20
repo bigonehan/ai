@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const DEFAULT_API_URL: &str = "https://api.typesafe.ai/v1/systemone";
 const STATE_LIMIT: usize = 12000;
 const TIMEOUT_SECS: u64 = 20;
-const MATCH_TYPES: [&str; 3] = ["값", "상태", "화면"];
+const MATCH_TYPES: [&str; 3] = ["연결", "기능", "수정"];
 
 const HELP_TOP: &str = "\
 usage: jev [-h] {scope,match,stop} ...
@@ -22,7 +22,7 @@ never printed. All output is JSON on stdout.
 
 Usage:
   jev scope --request-file F --goal-file G [--row N]   # J3: goal lines grounded in the request, request covered
-  jev match --goal-file G --output-file O [--row N]    # J1: actual output satisfies each [값]/[상태]/[화면] line
+  jev match --goal-file G --output-file O [--row N]    # J1: actual output satisfies each [연결]/[기능]/[수정] line
   jev stop --message-file M                            # J2: classify the final assistant message
 
 Verdicts: a Noul value (or Choice confidence) >= JEV_PASS is `pass`, < JEV_FLOOR
@@ -531,24 +531,14 @@ fn noul_items(cfg: &Config, response: &Value, names: &[(String, String)]) -> Vec
 }
 
 fn goal_lines(goal: &str, filter_types: Option<&[&str]>) -> Vec<(String, String)> {
-    let re = Regex::new(r"^\s*-\s*\[(값|상태|수치|불변|화면|사용자)\]\s*(.+?)\s*$").unwrap();
+    let re = Regex::new(r"^\s*(?:-\s*|\d+\.\s*)\[(연결|기능|수정)\]\s*(.+?)\s*$").unwrap();
     let mut out = Vec::new();
-    let mut had_typed_tag = false;
     for line in splitlines(goal) {
         if let Some(caps) = re.captures(&line) {
-            had_typed_tag = true;
             let kind = caps.get(1).unwrap().as_str();
             let text = py_strip(caps.get(2).unwrap().as_str());
             if filter_types.map(|t| t.contains(&kind)).unwrap_or(true) {
                 out.push((kind.to_string(), text.to_string()));
-            }
-        }
-    }
-    if out.is_empty() && !had_typed_tag {
-        for line in splitlines(goal) {
-            let s = py_strip(&line);
-            if !s.is_empty() && !s.starts_with('#') {
-                out.push(("목표".to_string(), s.to_string()));
             }
         }
     }
@@ -676,7 +666,7 @@ fn run_stop(cfg: &Config, message: &str) -> (String, Vec<Value>, Option<String>,
 (1) 로그인·인증, 결제·비용, 되돌릴 수 없는 외부 전송, 브라우저 밖 OS 앱 조작 중 하나의 동작; \
 (2) 대상 .py 파일 경로와 수정 이유를 밝힌 .py 생성·수정 동의; \
 (3) 수정을 시작하기 전에 구체적인 해석 둘 이상과 각 해석의 결과 차이를 제시한 선택 요청. \
-'진행할까요', '확인해 주세요', 결과 검증·화면 확인 요청처럼 이 형식을 갖추지 않은 질문은 해당하지 않는다"
+'진행할까요', '확인해 주세요', 결과 검증·UI 확인 요청처럼 이 형식을 갖추지 않은 질문은 해당하지 않는다"
                 .into(),
         ),
     );
@@ -998,4 +988,23 @@ fn main() {
     out.insert("usage".into(), usage);
 
     println!("{}", dumps(&Value::Object(out), Some(1)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{goal_lines, MATCH_TYPES};
+
+    #[test]
+    fn parses_current_goal_tags_only() {
+        let input = "1. [연결] API 연동 ▷ 200 OK\n- [기능] 새 기능 ▷ True\n2. [수정] 오류 수정 ▷ 정상";
+        let parsed = goal_lines(input, Some(&MATCH_TYPES));
+        assert_eq!(
+            parsed,
+            vec![
+                ("연결".to_string(), "API 연동 ▷ 200 OK".to_string()),
+                ("기능".to_string(), "새 기능 ▷ True".to_string()),
+                ("수정".to_string(), "오류 수정 ▷ 정상".to_string()),
+            ]
+        );
+    }
 }

@@ -5,7 +5,7 @@ use crate::util;
 use crate::records::{self, NEW_FEATURE};
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -15,6 +15,53 @@ pub const ERROR_STAGE: &str = "진단";
 pub const WORKING_STAGES: [&str; 3] = ["작업", "교정", "진단"];
 pub const ALWAYS_EDITABLE: [&str; 4] = [".ai", "Input.md", "AGENTS.md", "test/tmp"];
 pub const OUTPUT_TAIL: usize = 4000;
+
+fn confirmation_note(summary: &str) -> String {
+    util::head(summary, 300)
+}
+
+fn flow_summary_from_text(text: &str, raw_id: i64) -> Option<String> {
+    let submitted = format!("#### 검증 (#{raw_id})");
+    let confirmed = format!("#### 확인 (#{raw_id})");
+    let mut in_confirmed = false;
+    let mut summary = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line == submitted {
+            in_confirmed = false;
+            summary = None;
+        } else if line == confirmed {
+            in_confirmed = true;
+            summary = None;
+        } else if line.starts_with('#') {
+            in_confirmed = false;
+        } else if in_confirmed {
+            if let Some(value) = line.strip_prefix("- 요약 :") {
+                let value = value.trim();
+                if let Some(marked) = value.strip_prefix('[') {
+                    if let Some((marker, path)) = marked.split_once(']') {
+                        let path = path.trim();
+                        if !marker.trim().is_empty()
+                            && !path.is_empty()
+                            && (path.contains('⇒') || path.contains('→') || path.contains("->"))
+                        {
+                            summary = Some(value.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    summary
+}
+
+fn flow_summary(project_dir: &Path, raw_id: i64) -> Option<String> {
+    util::glob(&project_dir.join(".ai").join("changes"), "", ".md")
+        .into_iter()
+        .filter_map(|record| std::fs::read_to_string(record).ok())
+        .filter_map(|text| flow_summary_from_text(&text, raw_id))
+        .last()
+}
 
 #[derive(Clone, Debug)]
 pub struct Row {
@@ -385,10 +432,7 @@ pub fn evidence(lines: &[String], index: usize) -> Option<String> {
 fn goal_line_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(
-            r"^\s*-\s*(?:\[(값|상태|수치|불변|화면|사용자|연결|기능|수정)\]|<(값|상태|수치|불변|화면|사용자|연결|기능|수정)>)\s*(.+?)\s*$",
-        )
-        .unwrap()
+        Regex::new(r"^\s*(?:-\s*|\d+\.\s*)\[(연결|기능|수정)\]\s*(.+?)\s*$").unwrap()
     })
 }
 
@@ -398,8 +442,8 @@ pub fn goal_lines(goal: &str) -> Vec<(String, String)> {
         .into_iter()
         .filter_map(|l| {
             re.captures(&l).map(|c| {
-                let kind = c.get(1).or_else(|| c.get(2)).unwrap().as_str().to_string();
-                (kind, c[3].to_string())
+                let kind = c.get(1).unwrap().as_str().to_string();
+                (kind, c[2].to_string())
             })
         })
         .collect()
@@ -421,32 +465,7 @@ pub fn goal_of(project_dir: &Path, row: &Row) -> R<String> {
 
 pub fn latest_request(project_dir: &Path) -> String {
     let text = records::input_text(project_dir);
-    static REQ_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let req_re = REQ_RE.get_or_init(|| Regex::new(r"(?m)^#\s*요구 사항\s*$").unwrap());
-    if req_re.is_match(&text) {
-        return util::tail(util::strip(&text), 6000);
-    }
-    if util::strip(&text).is_empty() {
-        return String::new();
-    }
-    let mut sections = Vec::new();
-    let mut cur = Vec::new();
-    for line in util::splitlines(&text) {
-        if line.starts_with('#') && !cur.is_empty() {
-            sections.push(std::mem::take(&mut cur).join("\n"));
-        }
-        cur.push(line);
-    }
-    if !cur.is_empty() {
-        sections.push(cur.join("\n"));
-    }
-    for sec in sections.iter().rev() {
-        let s = util::strip(sec);
-        if !s.is_empty() && s.matches('\n').count() >= 1 {
-            return util::tail(s, 6000);
-        }
-    }
-    util::tail(&text, 6000)
+    util::tail(util::strip(&text), 6000)
 }
 
 // --- jev --------------------------------------------------------------------
@@ -563,7 +582,7 @@ pub fn jev_summary(result: &Value) -> String {
     format!("jev {mode} {verdict}{suffix}")
 }
 
-// --- git scope & literals ---------------------------------------------------
+// --- git scope --------------------------------------------------------------
 
 pub fn dirty(project_dir: &Path, base: &str) -> BTreeSet<String> {
     let tracked = git(project_dir, &["diff", "--name-only", "--relative", base]).unwrap_or_default();
@@ -819,27 +838,19 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
                     allowed.push(p.to_string());
                 }
             }
-            match detail.get("tests") {
-                Some(Value::Array(arr)) => {
-                    for k in arr.iter().filter_map(|v| v.as_str()) {
-                        test_files.push(k.to_string());
-                    }
+            if let Some(arr) = detail.get("tests").and_then(|v| v.as_array()) {
+                for k in arr.iter().filter_map(|v| v.as_str()) {
+                    test_files.push(k.to_string());
                 }
-                Some(Value::Object(t_obj)) => {
-                    for k in t_obj.keys() {
-                        test_files.push(k.clone());
-                    }
-                }
-                _ => {}
             }
         }
         let mut all_allowed = allowed.clone();
         all_allowed.extend(test_files);
-        let baseline: BTreeSet<String> = match red.get("dirty") {
-            Some(Value::Array(arr)) => arr.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-            Some(Value::Object(obj)) => obj.keys().cloned().collect(),
-            _ => BTreeSet::new(),
-        };
+        let baseline: BTreeSet<String> = red
+            .get("dirty")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
         let changed = changed_since(&project_dir, base, &baseline);
         let outside: Vec<String> = changed.iter().filter(|f| !inside(f, &all_allowed)).cloned().collect();
         if !outside.is_empty() {
@@ -970,7 +981,7 @@ pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str,
 fn flow_judged(project_dir: &Path, ids: &[i64]) -> Vec<(String, Option<String>)> {
     let id_pat = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("|");
     let submit_re = Regex::new(&format!(r"^#+\s*검증\s+\(#({id_pat})\)\s*$")).unwrap();
-    let flow_re = Regex::new(r"^#+\s*(?:흐름 판정|확인)(?:\s+\(#\d+\))?\s*$").unwrap();
+    let flow_re = Regex::new(&format!(r"^#+\s*확인\s+\(#({id_pat})\)\s*$")).unwrap();
     let mut blocks: Vec<Vec<String>> = Vec::new();
     for record in util::glob(&project_dir.join(".ai").join("changes"), "", ".md") {
         let Ok(text) = std::fs::read_to_string(&record) else {
@@ -1015,7 +1026,7 @@ fn flow_judged(project_dir: &Path, ids: &[i64]) -> Vec<(String, Option<String>)>
     judged
 }
 
-pub fn flow_wait(project_arg: &str, waiting: &str) -> R<Value> {
+pub fn flow_wait(project_arg: &str) -> R<Value> {
     require_main("flow-wait")?;
     let (project_dir, _, ids) = records::project(project_arg)?;
     let fetched = rows(&ids)?;
@@ -1106,52 +1117,23 @@ pub fn flow_wait(project_arg: &str, waiting: &str) -> R<Value> {
         }));
     }
 
-    let mut goals: BTreeMap<i64, String> = BTreeMap::new();
-    for row in &fetched {
-        goals.insert(row.id, goal_of(&project_dir, row)?);
-    }
-    let mut screen_lines = Vec::new();
-    for row in &fetched {
-        for (kind, text) in goal_lines(&goals[&row.id]) {
-            if kind == "화면" {
-                screen_lines.push(format!("- [화면] {text}"));
-            }
-        }
-    }
-    let screen_goal = screen_lines.join("\n");
-    if !screen_goal.is_empty() {
-        let out_str = flow
-            .iter()
-            .map(|(k, v)| format!("{k}\n{}", v.as_deref().unwrap_or("")))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let judgment = jev("match", None, &[("goal", &screen_goal), ("output", &out_str)]);
-        if jev_blocks(&judgment) {
-            return gate_err(json!({
-                "boundary": "flow",
-                "reason": "`#### 확인 (#id)` does not show the [화면] goals",
-                "jev": judgment.get("items").cloned().unwrap_or(Value::Null)
-            }));
-        }
+    let summaries: Vec<(i64, String)> = fetched
+        .iter()
+        .filter(|row| row.h_str() == SUBMITTED_STAGE)
+        .filter_map(|row| flow_summary(&project_dir, row.id).map(|summary| (row.id, summary)))
+        .collect();
+    if summaries.len() != fetched.iter().filter(|row| row.h_str() == SUBMITTED_STAGE).count() {
+        return gate_err(json!({
+            "boundary": "flow",
+            "reason": "each 검증 row needs `- 요약 : [표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>` in its latest `#### 확인 (#id)`"
+        }));
     }
 
     let mut result = Vec::new();
     for row in &fetched {
         if row.h_str() == SUBMITTED_STAGE {
-            let users: Vec<String> = goal_lines(&goals[&row.id])
-                .into_iter()
-                .filter(|(k, _)| k == "사용자")
-                .map(|(_, t)| t)
-                .collect();
-            let wait_str = if !users.is_empty() {
-                users.join("; ")
-            } else {
-                waiting.to_string()
-            };
-            let note = format!(
-                "{}. 흐름 검증 통과, 사용자 확인 대기: {wait_str}",
-                records::next_number(row.d_str())
-            );
+            let summary = summaries.iter().find(|(id, _)| *id == row.id).map(|(_, text)| text.as_str()).unwrap();
+            let note = confirmation_note(summary);
             let mut upd = Map::new();
             upd.insert("H".into(), Value::String(WAITING_STAGE.into()));
             upd.insert("D".into(), Value::String(util::head(&note, 300)));
@@ -1164,26 +1146,38 @@ pub fn flow_wait(project_arg: &str, waiting: &str) -> R<Value> {
     Ok(Value::Array(result))
 }
 
-fn final_completed_list(project_dir: &Path, raw_id: i64) -> Vec<String> {
-    let heading = Regex::new(&format!(r"^#+\s*(?:최종 완료|완료)\s+\(#{raw_id}\)\s*$")).unwrap();
-    let item_re = Regex::new(r"^\s*(?:-\s*|\d+\.\s*)(?:\[([^\]]+)\]|<([^>]+)>)\s*(.+?)\s*$").unwrap();
+fn completed_items_in_text(text: &str, raw_id: i64) -> Result<Vec<String>, String> {
+    let heading = Regex::new(&format!(r"^#+\s*완료\s+\(#{raw_id}\)\s*$")).unwrap();
+    let item_re = Regex::new(r"^\s*\d+\.\s*\[([^\]]+)\]\s*(.*?)\s*$").unwrap();
+    let list_re = Regex::new(r"^\s*(?:\d+\.|-\s*\[)").unwrap();
+    let mut items = Vec::new();
+    for lines in records::sections_in(text, &heading) {
+        for line in lines {
+            if let Some(caps) = item_re.captures(&line) {
+                let tag = caps.get(1).unwrap().as_str().trim();
+                let summary = caps.get(2).unwrap().as_str().trim();
+                if !tag.is_empty() && !summary.is_empty() {
+                    items.push(line);
+                } else {
+                    return Err(format!("empty completion marker or summary: {line}"));
+                }
+            } else if list_re.is_match(&line) {
+                return Err(format!("completion memo must be a numbered `[symbol] summary` line: {line}"));
+            }
+        }
+    }
+    Ok(items)
+}
+
+fn final_completed_list(project_dir: &Path, raw_id: i64) -> Result<Vec<String>, String> {
     let mut items = Vec::new();
     for record in util::glob(&project_dir.join(".ai").join("changes"), &format!("{}.", util::today()), ".md") {
         let Ok(text) = std::fs::read_to_string(&record) else {
             continue;
         };
-        for lines in records::sections_in(&text, &heading) {
-            for line in lines {
-                if let Some(caps) = item_re.captures(&line) {
-                    let tag = caps.get(1).or_else(|| caps.get(2)).unwrap().as_str().trim();
-                    if tag != " " && tag != "x" && tag != "X" {
-                        items.push(line);
-                    }
-                }
-            }
-        }
+        items.extend(completed_items_in_text(&text, raw_id)?);
     }
-    items
+    Ok(items)
 }
 
 pub fn task_complete(raw_id: i64, project_arg: &str) -> R<Value> {
@@ -1197,7 +1191,14 @@ pub fn task_complete(raw_id: i64, project_arg: &str) -> R<Value> {
             format!("Table26 #{raw_id} has no goal"),
         );
     }
-    let done_items = final_completed_list(&project_dir, raw_id);
+    let done_items = match final_completed_list(&project_dir, raw_id) {
+        Ok(items) => items,
+        Err(reason) => return gate_err(json!({
+            "boundary": "completion",
+            "raw_id": raw_id,
+            "reason": reason
+        })),
+    };
     if done_items.is_empty() {
         return gate_err(json!({
             "boundary": "completion",
@@ -1219,4 +1220,64 @@ pub fn task_complete(raw_id: i64, project_arg: &str) -> R<Value> {
     upd.insert("H".into(), Value::String(DONE_STAGE.into()));
     upd.insert("F".into(), Value::Number(util::today_epoch().into()));
     api::update(TASK_TABLE, raw_id, &upd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{completed_items_in_text, confirmation_note, flow_summary_from_text, goal_lines};
+
+    #[test]
+    fn completion_items_require_number_marker_and_summary() {
+        let text = "#### 완료 (#7)\n1. [🏗️] 구조 변경\n2. [✨] 새 기능\n3. [🌍] API 연결\n4. [⭕️] 누락 결과 수정\n5. [🚀] 흐름 개선\n#### 완료 (#8)\n1. [◇] 다른 행\n";
+        assert_eq!(
+            completed_items_in_text(text, 7).unwrap(),
+            vec![
+                "1. [🏗️] 구조 변경",
+                "2. [✨] 새 기능",
+                "3. [🌍] API 연결",
+                "4. [⭕️] 누락 결과 수정",
+                "5. [🚀] 흐름 개선",
+            ]
+        );
+        for invalid in ["1. [] 빈 표시", "- [✨] 번호 없는 항목", "1. [✨] "] {
+            let text = format!("#### 완료 (#7)\n{invalid}\n");
+            assert!(completed_items_in_text(&text, 7).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn completion_items_accept_a_nonempty_marker_after_valid_item() {
+        let text = "#### 완료 (#7)\n1. [✨] 새 기능\n2. [◆] 구현 요약\n";
+        assert_eq!(completed_items_in_text(text, 7).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn confirmation_note_describes_implemented_path_without_step_number() {
+        assert_eq!(
+            confirmation_note("[✨] 입력 ⇒ 저장 결과"),
+            "[✨] 입력 ⇒ 저장 결과"
+        );
+    }
+
+    #[test]
+    fn confirmation_summary_is_scoped_to_row_and_latest_verification() {
+        let text = "#### 검증 (#7)\n#### 확인 (#7)\n- 요약 : [✨] 이전 입력 ⇒ 오래된 결과\n#### 검증 (#7)\n#### 확인 (#8)\n- 요약 : [⭕️] 다른 입력 ⇒ 다른 결과\n#### 확인 (#7)\n- 요약 : [✨] 현재 입력 ⇒ 구현 결과\n";
+        assert_eq!(flow_summary_from_text(text, 7).as_deref(), Some("[✨] 현재 입력 ⇒ 구현 결과"));
+        assert_eq!(flow_summary_from_text(text, 8).as_deref(), Some("[⭕️] 다른 입력 ⇒ 다른 결과"));
+        assert_eq!(flow_summary_from_text("#### 확인 (#7)\n- 요약 : 입력 ⇒ 결과\n", 7), None);
+        assert_eq!(flow_summary_from_text("#### 확인 (#7)\n- 요약 : 사용자 확인 대기\n", 7), None);
+    }
+
+    #[test]
+    fn goal_lines_parses_only_current_tags() {
+        let input = "1. [연결] 서버 연동 ▷ OK\n- [기능] 버튼 추가 ▷ True\n2. [수정] 오류 해결 ▷ 정상";
+        assert_eq!(
+            goal_lines(input),
+            vec![
+                ("연결".to_string(), "서버 연동 ▷ OK".to_string()),
+                ("기능".to_string(), "버튼 추가 ▷ True".to_string()),
+                ("수정".to_string(), "오류 해결 ▷ 정상".to_string()),
+            ]
+        );
+    }
 }

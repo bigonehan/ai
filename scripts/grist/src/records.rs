@@ -56,22 +56,60 @@ pub fn vault_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/mnt/c/Users/tende/OneDrive/일기장"))
 }
 
-pub fn parse_ids(text: &str) -> Vec<i64> {
-    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"(?m)^\s*-\s*Table26 task Raw ID:\s*(\d+(?:\s*,\s*\d+)*)").unwrap());
-    let Some(caps) = re.captures(text) else {
-        return Vec::new();
-    };
-    caps[1]
-        .split(',')
-        .filter_map(|s| util::strip(s).parse::<i64>().ok())
-        .collect()
-}
-
 pub fn has_table7_id(text: &str) -> Option<i64> {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"(?m)^\s*-\s*Table7 Raw ID:\s*(\d+)").unwrap());
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?ms)^\s*#\s*상태\b.*?^\s*###\s*grist\s*\n\s*ID\s*:\s*(\d+)\s*$").unwrap()
+    });
     re.captures(text).and_then(|c| c[1].parse::<i64>().ok())
+}
+
+pub fn has_obsidian_doc(text: &str) -> Option<String> {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?ms)^\s*#\s*상태\b.*?^\s*###\s*obsidian\s*\n\s*문서\s*:\s*([^\n{}]+)\s*$").unwrap()
+    });
+    re.captures(text)
+        .map(|c| util::strip(&c[1]).to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn section_ids_in_record(record: &Path, section_name: &str) -> Vec<i64> {
+    let Ok(text) = std::fs::read_to_string(record) else {
+        return Vec::new();
+    };
+    let lines = util::splitlines(&text);
+    let Some(start) = find(&lines, 1, section_name, 0, None) else {
+        return Vec::new();
+    };
+    let end = span(&lines, start, 1);
+    let mut ids = Vec::new();
+    for i in numbered(&lines, start, end) {
+        if let Some((_, id_part)) = lines[i]
+            .trim_end()
+            .strip_suffix(')')
+            .and_then(|s| s.rsplit_once("(#"))
+        {
+            if let Ok(id) = id_part.parse::<i64>() {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    ids
+}
+
+pub fn changes_task_ids(project_dir: &Path) -> Vec<i64> {
+    let changes_dir = project_dir.join(".ai").join("changes");
+    let Some(latest) = util::glob(&changes_dir, "", ".md").into_iter().last() else {
+        return Vec::new();
+    };
+    let active = section_ids_in_record(&latest, "작업");
+    if !active.is_empty() {
+        return active;
+    }
+    section_ids_in_record(&latest, "완료")
 }
 
 pub fn find_task_agents(start: &Path) -> Option<(Vec<i64>, PathBuf)> {
@@ -88,9 +126,11 @@ pub fn find_task_agents(start: &Path) -> Option<(Vec<i64>, PathBuf)> {
         let agents = cur.join("AGENTS.md");
         if agents.is_file() {
             if let Ok(text) = std::fs::read_to_string(&agents) {
-                let ids = parse_ids(&text);
-                if !ids.is_empty() {
-                    return Some((ids, cur));
+                if has_table7_id(&text).is_some() {
+                    let ids = changes_task_ids(&cur);
+                    if !ids.is_empty() {
+                        return Some((ids, cur));
+                    }
                 }
             }
         }
@@ -108,26 +148,58 @@ pub fn project(project_arg: &str) -> R<(PathBuf, String, Vec<i64>)> {
         return api::fail("validation", format!("{} does not exist", util::path_str(&agents)));
     }
     let text = std::fs::read_to_string(&agents).map_err(api::other)?;
-    let ids = parse_ids(&text);
+    if has_table7_id(&text).is_none() {
+        return api::fail(
+            "validation",
+            format!("{} has no `# 상태` `### grist` `ID :` line", util::path_str(&agents)),
+        );
+    }
+    let ids = changes_task_ids(&project_dir);
     if ids.is_empty() {
         return api::fail(
             "validation",
-            format!("{} has no `- Table26 task Raw ID:` line", util::path_str(&agents)),
+            format!("{} has no active tasks in .ai/changes (`# 작업`)", util::path_str(&project_dir)),
         );
     }
     Ok((project_dir, text, ids))
 }
 
 pub fn owned(project_arg: &str, raw_id: i64) -> R<(PathBuf, String, Vec<i64>)> {
-    let (project_dir, text, ids) = project(project_arg)?;
-    if !ids.contains(&raw_id) {
+    let project_dir = util::resolve(Path::new(project_arg));
+    let agents = project_dir.join("AGENTS.md");
+    if !agents.is_file() {
+        return api::fail("validation", format!("{} does not exist", util::path_str(&agents)));
+    }
+    let text = std::fs::read_to_string(&agents).map_err(api::other)?;
+    let Some(t7_id) = has_table7_id(&text) else {
         return api::fail(
             "validation",
-            format!(
-                "{} does not name Table26 task Raw ID {raw_id}",
-                util::path_str(&project_dir.join("AGENTS.md"))
-            ),
+            format!("{} has no `# 상태` `### grist` `ID :` line", util::path_str(&agents)),
         );
+    };
+    let mut ids = changes_task_ids(&project_dir);
+    if !ids.contains(&raw_id) {
+        if item_file(&project_dir, raw_id).is_some() {
+            ids.push(raw_id);
+        } else {
+            let fetched = api::get(TASK_TABLE, Some(&[raw_id]), None, Some(&["A".into()]))?;
+            let row_t7 = fetched
+                .first()
+                .and_then(|r| r.get("fields"))
+                .and_then(|f| f.get("A"))
+                .and_then(|v| v.as_i64());
+            if row_t7 == Some(t7_id) {
+                ids.push(raw_id);
+            } else {
+                return api::fail(
+                    "validation",
+                    format!(
+                        "{} (Table7 #{t7_id}) does not own Table26 #{raw_id}",
+                        util::path_str(&agents)
+                    ),
+                );
+            }
+        }
     }
     Ok((project_dir, text, ids))
 }
@@ -325,13 +397,11 @@ fn item_heading_parts(line: &str) -> Option<(String, i64)> {
     let (head, tail) = rest.rsplit_once(char::is_whitespace)?;
     let id_str = tail
         .strip_prefix("(#")
-        .and_then(|s| s.strip_suffix(')'))
-        .or_else(|| tail.strip_prefix('#'))?;
+        .and_then(|s| s.strip_suffix(')'))?;
     let raw_id = id_str.parse::<i64>().ok()?;
     let title = head
         .trim()
         .trim_start_matches("[구현]")
-        .trim_start_matches("<구현>")
         .trim()
         .to_string();
     if title.is_empty() {
@@ -397,12 +467,11 @@ pub fn format_judge(title: &str, judge: &str) -> String {
         title
             .trim_start()
             .strip_prefix("[구현]")
-            .or_else(|| title.trim_start().strip_prefix("<구현>"))
             .unwrap_or(title),
     );
     let fallback_body = if cleaned_title.is_empty() { "동작 확인" } else { cleaned_title };
     let j = util::strip(judge);
-    if j.is_empty() || (j.starts_with("목표의 ") && j.ends_with(" 줄")) {
+    if j.is_empty() {
         return format!("[상태] {fallback_body}");
     }
     if let Some(caps) = re.captures(j) {
@@ -434,11 +503,7 @@ pub fn register_item(project_dir: &Path, raw_id: i64, title: &str, kind: &str, j
         let start = find(&lines, 1, "진행", 0, None).unwrap();
         let end = span(&lines, start, 1);
         let judge_str = format_judge(title, judge);
-        let heading_line = if title.starts_with('<') || title.starts_with('[') {
-            format!("## {title} (#{raw_id})")
-        } else {
-            format!("## [구현] {title} (#{raw_id})")
-        };
+        let heading_line = format!("## [구현] {title} (#{raw_id})");
         let mut block = vec![
             heading_line,
             format!("- 유형 : {kind}"),
@@ -574,6 +639,9 @@ pub fn write_changes_goal(project_dir: &Path, raw_id: i64, goal: &str) -> R<()> 
         .into_iter()
         .filter(|l| !util::strip(l).is_empty())
         .map(|l| {
+            if let Some((_, body)) = parse_numbered_line(&l) {
+                return body.to_string();
+            }
             let trimmed = l.trim_start();
             let stripped = trimmed.strip_prefix('-').map(|s| s.trim_start()).unwrap_or(trimmed);
             util::strip(stripped).to_string()
@@ -608,11 +676,11 @@ pub fn obsidian_file(project_dir: &Path) -> R<PathBuf> {
         }
     }
     let agents = project_dir.join("AGENTS.md");
-    let t7_id = std::fs::read_to_string(&agents).ok().and_then(|t| has_table7_id(&t));
-    let Some(t7_id) = t7_id else {
+    let agents_text = std::fs::read_to_string(&agents).unwrap_or_default();
+    let Some(t7_id) = has_table7_id(&agents_text) else {
         return api::fail(
             "obsidian",
-            format!("{} has no `- Table7 Raw ID:` line", util::path_str(&agents)),
+            format!("{} has no `# 상태` `### grist` `ID :` line", util::path_str(&agents)),
         );
     };
     let rows = api::get(PROJECT_TABLE, Some(&[t7_id]), None, Some(&["Obsidian_Id".into()]))?;
@@ -621,7 +689,9 @@ pub fn obsidian_file(project_dir: &Path) -> R<PathBuf> {
         .and_then(|r| r.get("fields"))
         .and_then(|f| f.get("Obsidian_Id"))
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| has_obsidian_doc(&agents_text));
     let Some(note) = note else {
         return api::fail("obsidian", format!("Table7 #{t7_id} has no Obsidian_Id"));
     };
@@ -826,7 +896,7 @@ pub fn hook_project(raw_id: i64) -> Option<PathBuf> {
         let agents = cur.join("AGENTS.md");
         if agents.is_file() {
             if let Ok(text) = std::fs::read_to_string(&agents) {
-                if parse_ids(&text).contains(&raw_id) {
+                if has_table7_id(&text).is_some() && item_file(&cur, raw_id).is_some() {
                     return Some(cur);
                 }
             }
@@ -847,16 +917,6 @@ pub fn hook_project(raw_id: i64) -> Option<PathBuf> {
                 .collect();
             subdirs.sort();
             candidates.extend(subdirs);
-        }
-    }
-    for dir in &candidates {
-        let agents = dir.join("AGENTS.md");
-        if agents.is_file() {
-            if let Ok(text) = std::fs::read_to_string(&agents) {
-                if parse_ids(&text).contains(&raw_id) {
-                    return Some(dir.clone());
-                }
-            }
         }
     }
     for dir in &candidates {
@@ -952,14 +1012,7 @@ pub fn on_task_write(raw_id: i64, fields: &Map<String, Value>) {
 pub fn sync(project_arg: Option<&str>, cwd: &str) -> R<Value> {
     let (ids, project_dir) = if let Some(p) = project_arg {
         let dir = util::resolve(Path::new(p));
-        let agents = dir.join("AGENTS.md");
-        let ids = if agents.is_file() {
-            std::fs::read_to_string(&agents)
-                .map(|t| parse_ids(&t))
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let ids = changes_task_ids(&dir);
         (ids, dir)
     } else {
         let Some((ids, dir)) = find_task_agents(&util::resolve(Path::new(cwd))) else {
@@ -1040,6 +1093,11 @@ pub fn request_record(project_arg: &str, input_file: &str, title: &str, summary:
     }))
 }
 
+fn task_add_fields(mut fields: Map<String, Value>) -> Map<String, Value> {
+    fields.entry("E".to_string()).or_insert_with(|| Value::from(util::today_epoch()));
+    fields
+}
+
 pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind: Option<&str>, judge: &str) -> R<Value> {
     if project_arg.is_some() && kind.is_none() {
         return api::fail("arguments", "task-add --project needs --type 기능 추가|개선|오류 해결");
@@ -1052,6 +1110,7 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
             fields.insert("G".to_string(), Value::String(code.to_string()));
         }
     }
+    let fields = task_add_fields(fields);
     let mut result = api::add(TASK_TABLE, &fields)?;
     if let Some(p) = project_arg {
         let project_dir = util::resolve(Path::new(p));
@@ -1075,20 +1134,27 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
 
 #[cfg(test)]
 mod tests {
-    use super::{format_judge, register_item};
+    use super::{format_judge, register_item, task_add_fields};
+    use serde_json::{Map, Value};
+
+    #[test]
+    fn task_add_sets_today_in_date_column() {
+        let fields = task_add_fields(Map::new());
+        println!("task-add E={:?}, expected={}", fields.get("E"), crate::util::today_epoch());
+        assert_eq!(fields.get("E"), Some(&Value::from(crate::util::today_epoch())));
+    }
+
+    #[test]
+    fn task_add_keeps_explicit_date_column() {
+        let mut fields = Map::new();
+        fields.insert("E".to_string(), Value::from(1_760_000_000));
+        let fields = task_add_fields(fields);
+        assert_eq!(fields.get("E"), Some(&Value::from(1_760_000_000)));
+    }
 
     #[test]
     fn format_judge_cases() {
         assert_eq!(format_judge("랜더링 성능 개선", ""), "[상태] 랜더링 성능 개선");
-        assert_eq!(
-            format_judge("랜더링 성능 개선", "목표의 [값]/[상태]/[수치] 줄"),
-            "[상태] 랜더링 성능 개선"
-        );
-        let legacy_judge = format!("목표의 [{}]/[{}]/[{}] 줄", "연결", "기능", "수정");
-        assert_eq!(
-            format_judge("랜더링 성능 개선", &legacy_judge),
-            "[상태] 랜더링 성능 개선"
-        );
         assert_eq!(
             format_judge("기타 작업", "[상태] 랜더링 성능 개선"),
             "[상태] 랜더링 성능 개선"
@@ -1096,10 +1162,6 @@ mod tests {
         assert_eq!(
             format_judge("기타 작업", "[값] 반환 개수 일치"),
             "[값] 반환 개수 일치"
-        );
-        assert_eq!(
-            format_judge("기타 작업", "[수치] 응답 지연 감소"),
-            "[상태] 응답 지연 감소"
         );
         assert_eq!(
             format_judge("기타 작업", "태그 없는 판정 요약"),
@@ -1116,6 +1178,10 @@ mod tests {
         let rec = register_item(&tmp, 42, "랜더링 성능 개선", "개선", "[상태] 랜더링 성능 개선").unwrap();
         let text = std::fs::read_to_string(&rec).unwrap();
         assert!(text.contains("## [구현] 랜더링 성능 개선 (#42)\n- 유형 : 개선\n- 판정 : [상태] 랜더링 성능 개선\n### 목표\n"));
+
+        let rec = register_item(&tmp, 43, "[✒️] 문서 형식 전환", "개선", "[상태] 형식 전환").unwrap();
+        let text = std::fs::read_to_string(&rec).unwrap();
+        assert!(text.contains("## [구현] [✒️] 문서 형식 전환 (#43)\n- 유형 : 개선\n- 판정 : [상태] 형식 전환\n### 목표\n"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1136,5 +1202,40 @@ mod tests {
         for rel in ["references/start.md", "references/work.md", "references/verify.md"] {
             assert!(skill_dir.join(rel).is_file(), "missing {rel}");
         }
+        let work_md = std::fs::read_to_string(skill_dir.join("references/work.md")).unwrap();
+        assert!(work_md.contains("실패 초안 및 Red 테스트 작성"));
+        assert!(work_md.contains("함수 초안을 만들거나 조정하고"));
+        assert!(agents.contains("red test용 실패 초안 구현"));
     }
+
+    #[test]
+    fn status_header_and_template_paths_use_current_format() {
+        let new_agents = "# 상태\n### grist\nID : 1198\n### obsidian\n문서 : 구현/업무/261008.작업관리기/일지/작업관리기-개발.md\n### 실행\nruntime : 로컬 CLI\n";
+        assert_eq!(super::has_table7_id(new_agents), Some(1198));
+        assert_eq!(
+            super::has_obsidian_doc(new_agents).as_deref(),
+            Some("구현/업무/261008.작업관리기/일지/작업관리기-개발.md")
+        );
+        let root_agents = std::fs::read_to_string("/home/tree/extensions/AGENTS.md").unwrap();
+        assert!(root_agents.contains("# 상태"));
+        assert!(root_agents.contains("### grist"));
+        assert!(root_agents.contains("ID : 1198"));
+        assert!(root_agents.contains("### obsidian"));
+        assert!(root_agents.contains("문서 : 구현/업무/261008.작업관리기/일지/작업관리기-개발.md"));
+        assert!(root_agents.contains("구현/업무/261008.작업관리기/형식/"));
+        let init_skill = std::fs::read_to_string(
+            crate::util::home().join("ai/skills/initialize-project/SKILL.md"),
+        )
+        .unwrap();
+        assert!(init_skill.contains("--project-type"));
+        assert!(init_skill.contains("업무"));
+        assert!(init_skill.contains("공방"));
+        assert!(init_skill.contains("게임"));
+        assert!(init_skill.contains("보조"));
+        assert!(init_skill.contains("일지/"));
+        assert!(init_skill.contains("노트/"));
+        assert!(init_skill.contains("구현/업무/261008.작업관리기/형식/작업관리기.형식-"));
+        println!("status_header_and_template_paths_use_current_format OK: # 상태 ID=1198, 문서=구현/업무/261008.작업관리기/일지/작업관리기-개발.md, 형식=구현/업무/261008.작업관리기/형식/");
+    }
+
 }

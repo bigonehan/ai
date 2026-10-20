@@ -5,7 +5,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-const MAIN_ALLOWED: &[&str] = &["완료", "확인", "대기"];
+const MAIN_ALLOWED: &[&str] = &["완료", "확인"];
 const AGENT_ALLOWED: &[&str] = &["검증", "완료"];
 const MAX_BLOCKS: i64 = 3;
 const J2_MAX_BLOCKS: i64 = 2;
@@ -16,7 +16,7 @@ const FAILURE_REASON: &str = "마지막 메시지가 실패를 결론으로 종�
 const QUESTION_REASON: &str = "사용자에게 넘길 수 있는 동작은 로그인·인증, 결제·비용, 비가역 외부 전송, 브라우저 밖 OS 앱 조작뿐이고, \
 물을 수 있는 결정은 경로·이유를 밝힌 `.py` 동의와, 수정 전 결과가 갈리는 구체적 해석 선택뿐이에요. \
 그 밖의 확인·클릭·재로드·테스트는 직접 실행하고 결과로 보고하세요.";
-const PROGRESS_REASON: &str = "마지막 메시지가 진행 보고로 끝나고 있어요. `대기`는 사용자 전용 동작을 기다리는 상태일 뿐 작업 중단 사유가 아니에요. \
+const PROGRESS_REASON: &str = "마지막 메시지가 진행 보고로 끝나고 있어요. `확인`은 사용자 확인을 기다리는 상태일 뿐 작업 중단 사유가 아니에요. \
 새 사용자 메시지나 에이전트 대기 중단 결과도 중지 지시가 아니에요. Table26과 남은 실행 단계를 다시 읽고 계속하세요. ";
 
 fn home_dir() -> PathBuf {
@@ -188,16 +188,16 @@ fn agent_reason(row: &Value, project_dir: Option<&str>) -> String {
     let proj = project_dir.filter(|s| !s.is_empty()).unwrap_or("<프로젝트>");
     format!(
         "Table26 #{id} $H={h}: 담당 작업이 아직 제출되지 않았어요. $D 최신 항목: {d}. \
-완료 조건을 확인하는 단위 테스트를 만들고 통과시킨 뒤 \
-`{CMD} task-submit {id} --project {proj} --test \"<테스트 명령>\"`로 제출하세요. \
-실패하면 `$H=교정`, `$I`·`$J`를 기록하고 원인을 고치세요. 사용자에게 질문하지 말고 막힌 경계는 결과 텍스트로 메인에 보고하세요."
+### 목표를 확인하는 단위 테스트를 만들고 통과시킨 뒤 \
+`{CMD} task-submit {id} --project {proj}`로 제출하세요. \
+실패하면 `$H=진단`, `$I`·`$J`를 기록하고 원인을 고치세요. 사용자에게 질문하지 말고 막힌 경계는 결과 텍스트로 메인에 보고하세요."
     )
 }
 
 fn init_reason(project_dir: &str) -> String {
     format!(
-        "종료 차단: {project_dir}는 `AGENTS.md`에 `Table7 Raw ID` 헤더가 없는 미초기화 프로젝트인데 변경 파일이 있어요. \
-`initialize-project` Skill로 Table7 행·Obsidian 문서·표준 헤더를 만들고, 현재 요청을 `request-record`·`task-add`·`task-goal`로 기록한 뒤 \
+        "종료 차단: {project_dir}는 `AGENTS.md`에 `# 상태`(`### grist` `ID :`) 헤더가 없는 미초기화 프로젝트인데 변경 파일이 있어요. \
+`initialize-project` Skill로 Table7 행·Obsidian 문서·`# 상태` 헤더를 만들고, 현재 요청을 `request-record`·`task-add`·`task-goal`로 기록한 뒤 \
 `work-project` 흐름을 이어가세요."
     )
 }
@@ -228,30 +228,14 @@ fn main_reason(rows: &[Value], pending: &[Value], project_dir: &str) -> String {
         "에이전트 결과를 기다리세요(wait). 끝난 에이전트의 행이 `검증`이 아니면 같은 행으로 다음 교정을 할당하세요.".to_string()
     } else {
         format!(
-            "모든 행이 `검증`이에요. 전체 흐름을 테스트하고 당일 `.ai/changes`에 `## 흐름 판정`(`- [x] <목적>` 아래 `결과 : 성공`·`상세 : <실제값 한 줄>`; 테스트 기록은 `목적 :`·`결과 :`·`상세 :` 세 줄, 명령·파일 목록 없이)을 쓴 뒤 \
-`{CMD} flow-wait --project {project_dir} --waiting \"<남은 사용자 테스트>\"`를 실행하세요."
+            "모든 행이 `검증`이에요. 전체 흐름을 테스트하고 당일 `.ai/changes`에 `#### 확인 (#<id>)`(`- 요약 : <입력 또는 이전 단계> ⇒ <구현 결과>` 및 `- [x] 목적: <목적>` 아래 `결과 : 성공`·`상세 : <실제값 한 줄>`)를 쓴 뒤 \
+`{CMD} flow-wait --project {project_dir}`를 실행하세요."
         )
     };
     format!(
         "종료 차단: Table26 {stages} (작업 폴더 {project_dir}). {step} \
-사용자 입력(로그인·결제·비가역 외부 전송·OS 앱 조작)만 남았으면 `$H=대기`와 `$D` 사유를 기록한 뒤 질문하세요."
+사용자 입력(로그인·결제·비가역 외부 전송·OS 앱 조작)만 남았으면 `$H=확인`과 `$D` 구현 결과를 기록한 뒤 질문하세요."
     )
-}
-
-fn spawn_nf(message: &str) {
-    if let Some(nf_bin) = std::env::var_os("NF_BIN").filter(|v| !v.is_empty()) {
-        let _ = Command::new(nf_bin)
-            .args(["-m", message])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    } else {
-        let _ = Command::new("fish")
-            .args(["-c", "nf -m $argv[1]", message])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-    }
 }
 
 fn parse_cli_cwd() -> Option<String> {
@@ -479,7 +463,6 @@ fn main() {
         } else {
             format!("미초기화 {uninitialized}")
         };
-        spawn_nf(&format!("Codex 종료 게이트 {label}{limit}회 초과: Table26 {summary}"));
         let mut obj = Vec::new();
         obj_set(
             &mut obj,
@@ -544,4 +527,18 @@ fn main() {
         s(format!("[{}/{limit}] {}", blocks + 1, reason.trim())),
     );
     emit(out_obj, &sync_note);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{main_reason, json::s, Value, MAIN_ALLOWED};
+
+    #[test]
+    fn main_allowed_and_reason_use_current_stages_and_headings() {
+        assert_eq!(MAIN_ALLOWED, ["완료", "확인"]);
+        let row = Value::Obj(vec![("id".to_string(), Value::Num("192".to_string())), ("H".to_string(), s("검증"))]);
+        let msg = main_reason(&[row.clone()], &[row], "/home/tree/extensions");
+        assert!(msg.contains("#### 확인 (#<id>)"));
+        assert!(msg.contains("$H=확인"));
+    }
 }

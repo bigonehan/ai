@@ -255,8 +255,7 @@ fn run(argv: &[String]) -> R<Value> {
         }
         "flow-wait" => {
             let project = args.flag_req("project")?;
-            let waiting = args.flag_opt("waiting").unwrap_or("사용자 확인");
-            gate::flow_wait(project, waiting)
+            gate::flow_wait(project)
         }
         "task-complete" => {
             let row_id = args.pos_i64(0, "row_id")?;

@@ -11,7 +11,7 @@ Use this skill whenever tests are written, changed, run, investigated, or used t
 
 ## Work stages
 
-Table26 `$H` is a Choice column that stores one Korean value: `초안` (SCOPE), `진단` (DIAGNOSE), `교정` (REPAIR), `검증` (VERIFY), `대기` (HANDOFF), or `완료` (DONE). English names are aliases only and are never written to `$H`. `검토`(REVIEW) and per-item `RUNTIME` are not stages. Use `focused/unit → production-boundary integration → built artifact` for each item. Run one project-level runtime whole flow only after all requested items are `완료` and Table26 `$C` is `완료`.
+Table26 `$H` is a Choice column that stores one Korean value: `초안`, `진단`, `작업`, `교정`, `검증`, `확인`, or `완료`. English names are aliases only and are never written to `$H`. `검토`(REVIEW) and per-item `RUNTIME` are not stages. Use `focused/unit → production-boundary integration → built artifact` for each item. Run one project-level runtime whole flow (`flow-wait` → `$H=확인`) after all requested items are `검증`.
 
 ## No legacy verification artifacts
 
@@ -42,7 +42,7 @@ Use the same scenario and meaningful input at every layer. A helper return, ACK,
 
 ## Runtime separation
 
-The default project test command runs unit and production-boundary checks only. An explicit project runtime command is reserved for the final whole-flow check after all Table26 items are complete. Do not substitute a mock browser, blank page, endpoint health, target discovery, build output, or log existence for the final consumer readback. If user-only action remains, set `$H=대기` and request one exact action only after all agent-executable checks are exhausted.
+The default project test command runs unit and production-boundary checks only. An explicit project runtime command is reserved for the final whole-flow check after all Table26 items are submitted (`검증`). Do not substitute a mock browser, blank page, endpoint health, target discovery, build output, or log existence for the final consumer readback. If user-only action remains, set `$H=확인` via `flow-wait` and request one exact action only after all agent-executable checks are exhausted.
 
 ## Verification bottleneck diagnosis and source repair
 

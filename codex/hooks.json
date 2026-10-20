@@ -1,5 +1,5 @@
 {
-  "description": "Completion gate: the main session ends only when its Table26 rows are 대기/완료; a t26_<RawID> subagent only when its row is 검증/완료.",
+  "description": "Completion gate: the main session ends only when its Table26 rows are 확인/완료; a t26_<RawID> subagent only when its row is 검증/완료.",
   "hooks": {
     "SessionStart": [
       {

@@ -1,0 +1,30 @@
+---
+name: remove-legacy
+description: Remove a user-specified legacy format, path, gate, or workflow completely across its active owners, then have a different agent independently audit for remnants. Use for Legacy·레거시·구형 제거 또는 새 형식 갱신 요청.
+metadata:
+  short-description: Remove obsolete behavior and independently audit active references
+---
+
+# Remove Legacy
+
+사용자가 Legacy·레거시·구형 방식의 제거 또는 새 형식으로 갱신을 요구하면 이 Skill을 `work-project`와 함께 반드시 실행한다. 사용자가 지정한 새 입력 형식과 최종 효과를 작업의 기준으로 삼는다. 단순히 옛 문자열을 금지하는 검사나 하위 호환 분기를 추가하는 것으로 완료하지 않는다.
+
+## 시작과 범위
+
+1. `work-project`의 시작 절차에 따라 사용자 요청을 `Input.md`의 `# 요구 사항`에 한 줄로 요약하고, `# 세부 사항`에 `[📐|✒️|⌨️|🚿|✏️|🌍] 한 줄 요약`으로 실제 작업 단위와 새 형식의 생성 지점을 쓴다. 이미 답한 사항을 다시 묻지 않는다.
+2. 새 형식의 `시작 동작 → producer → transport/handler → authoritative consumer → 최종 효과`를 한 줄로 정한다. 입력 형식을 지정했다면 producer의 실제 출력을 먼저 구현·확인한다.
+3. 변경 전 관련 영역을 목록화한다. 활성 제품 코드와 설정, 호출자·consumer, 테스트, Skill, 전역규칙, 프로젝트 `AGENTS.md`, Grist Table7 등록 프로젝트와 그 Obsidian 문서·참조, `.ai/gate`, 스냅샷·백업, 배포 산출물에서 구형 명칭과 동의어·경로를 `rg` 및 각 소유 도구로 찾는다. 전역규칙은 `agent-rules`로만, Grist는 `access-grist`로만 읽고 쓴다. 관련된 등록·초기화 프로젝트만 다루며, 사용자가 보류한 미등록 프로젝트를 초기화하지 않는다.
+4. 각 발견 항목을 **새 형식으로 이전**, **구형 전용이라 삭제**, **과거 사실로 보존** 중 하나로 판정한다. 현재 실행·판정에 쓰이는 구형 fallback, alias, 호환 검사, 옛 gate JSON·스냅샷·백업은 남기지 않는다. 과거 이력은 사실을 보존하되 활성 참조처럼 작동하지 않게 한다. 요구와 관계없는 형제 제품이나 workflow는 바꾸지 않는다.
+
+## 구현과 확인
+
+5. 소유 경계별로 새 형식을 구현하고 활성 참조를 한 번에 이전한다. 이전 이름을 다시 허용하는 호환 코드를 만들지 않는다. 변경된 producer 출력과 권위 있는 consumer 결과를 읽어 같은 입력이 새 형식으로 도착했는지 확인한다. 검증은 기존 테스트·CLI·실제 consumer readback을 사용하고, 옛 형식 금지 전용 validator·recorder·테스트 파일을 만들지 않는다.
+6. 수정에 참여하지 않은 **다른 에이전트**를 새 컨텍스트(`fork_turns="none"`)로 호출한다. 새 계약, 등록 범위와 보류 범위만 전달하고 결론은 주지 않는다. 에이전트는 읽기 전용으로 코드·Skill·전역규칙·Table7 등록 프로젝트·Obsidian 참조·gate·백업·배포 산출물을 독립 검색하며, 발견한 활성 잔존 항목마다 경로와 근거를 보고한다. 그 에이전트가 수정하지 않는다.
+7. 잔존 항목이 있으면 원 소유자가 고치고, **다시 다른 독립 검사**를 수행한다. 활성 잔존이 0이고 새 형식의 consumer readback이 일치할 때만 완료를 주장한다. 검색 제외 범위와 과거 이력 보존 항목은 최종 보고에 명시한다.
+
+## 이 절차가 필요한 이유
+
+- 과거에는 사용자가 지정한 입력 형식의 생성 함수를 고치기 전에 인접 프로젝트 초기화와 형식 검사를 진행해 핵심 요구가 늦게 구현됐다. 입력 producer를 첫 작업 단위로 고정한다.
+- 한 문자열이나 경로만 고친 뒤 다른 Skill·전역규칙·등록 프로젝트 참조, 옛 gate·스냅샷을 남겼다. 변경 전 목록과 각 항목의 이전·삭제·보존 판정을 끝까지 처리한다.
+- 자기 검색만으로 완료를 보고해 예상하지 못한 잔존 참조가 나중에 발견됐다. 구현에 참여하지 않은 별도 에이전트의 독립 재검사를 완료 조건으로 둔다.
+- `Input.md` 기록을 건너뛰고 이미 답한 프로젝트 유형을 다시 물었다. 먼저 요구를 한 줄로 요약해 기록하고 보류한 미등록 프로젝트는 건드리지 않는다.
