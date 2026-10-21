@@ -1,6 +1,5 @@
 use regex::Regex;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -741,11 +740,6 @@ fn utc_iso_seconds() -> String {
     format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}+00:00")
 }
 
-fn sha256_hex(text: &str) -> String {
-    let digest = Sha256::digest(text.as_bytes());
-    digest.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 fn write_log(command: &str, row: Option<i64>, state: &str, mode: &str, verdict: &str, items: &[Value]) {
     let path = log_file();
     let Some(parent) = path.parent() else { return };
@@ -759,7 +753,7 @@ fn write_log(command: &str, row: Option<i64>, state: &str, mode: &str, verdict: 
         "row".into(),
         row.map(|r| Value::Number(r.into())).unwrap_or(Value::Null),
     );
-    entry.insert("state_sha256".into(), Value::String(sha256_hex(state)));
+    entry.insert("state_bytes".into(), Value::Number((state.len() as u64).into()));
     entry.insert("mode".into(), Value::String(mode.into()));
     entry.insert("verdict".into(), Value::String(verdict.into()));
     entry.insert("items".into(), Value::Array(items.to_vec()));

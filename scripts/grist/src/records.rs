@@ -1132,6 +1132,103 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
     Ok(result)
 }
 
+pub fn task_show(project_arg: &str, raw_id: i64, section_opt: Option<&str>) -> R<Value> {
+    let (project_dir, _, _) = owned(project_arg, raw_id)?;
+    let Some(record) = item_file(&project_dir, raw_id) else {
+        return api::fail("records", format!("Table26 #{raw_id} block not found in .ai/changes"));
+    };
+    let text = std::fs::read_to_string(&record).map_err(api::other)?;
+    let lines = util::splitlines(&text);
+    let Some((start, end)) = item_span(&lines, raw_id) else {
+        return api::fail("records", format!("Table26 #{raw_id} span not found in .ai/changes"));
+    };
+    let extract_sub = |name: &str| -> Vec<String> {
+        let Some(sub_start) = find(&lines, 3, name, start, Some(end)) else {
+            return Vec::new();
+        };
+        let sub_end = span(&lines, sub_start, 3);
+        let mut out = Vec::new();
+        for line in &lines[(sub_start + 1)..sub_end] {
+            if line.starts_with("#### ") {
+                break;
+            }
+            let trimmed = util::strip(line);
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+        }
+        out
+    };
+    if let Some(sec) = section_opt.filter(|s| !s.trim().is_empty()) {
+        return Ok(json!({
+            "id": raw_id,
+            "section": sec,
+            "lines": extract_sub(sec.trim())
+        }));
+    }
+    Ok(json!({
+        "id": raw_id,
+        "goal": extract_sub("목표"),
+        "steps": extract_sub("구현")
+    }))
+}
+
+pub fn task_step(project_arg: &str, raw_id: i64, step: &str, text: &str) -> R<Value> {
+    if !matches!(step, "▷" | "▶" | "○" | "●") {
+        return api::fail("validation", "step must be one of ▷, ▶, ○, ●");
+    }
+    let clean = util::strip(text).replace('\n', " ");
+    if clean.is_empty() {
+        return api::fail("validation", "step text must not be empty");
+    }
+    let (project_dir, _, _) = owned(project_arg, raw_id)?;
+    let prefix = format!("- [{step}]");
+    let new_line = format!("{prefix} {clean}");
+    let updated = edit_item(&project_dir, raw_id, |lines| {
+        let (sub_start, sub_end) = subsection(lines, raw_id, "구현");
+        let mut h4_at = sub_end;
+        for idx in (sub_start + 1)..sub_end {
+            if lines[idx].starts_with("#### ") {
+                h4_at = idx;
+                break;
+            }
+        }
+        for idx in (sub_start + 1)..h4_at {
+            if lines[idx].trim_start().starts_with(&prefix) {
+                lines[idx] = new_line.clone();
+                return true;
+            }
+        }
+        let mut insert_at = sub_start + 1;
+        for idx in (sub_start + 1)..h4_at {
+            if lines[idx].trim_start().starts_with("- [") {
+                insert_at = idx + 1;
+            }
+        }
+        lines.insert(insert_at, new_line.clone());
+        true
+    })?;
+    if updated.is_none() {
+        return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
+    }
+    Ok(json!({"id": raw_id, "step": step, "line": new_line}))
+}
+
+pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, detail: &str) -> R<Value> {
+    let summary_clean = util::strip(summary).replace('\n', " ");
+    let check_clean = util::strip(check).replace('\n', " ");
+    let detail_clean = util::strip(detail).replace('\n', " ");
+    if summary_clean.is_empty() || check_clean.is_empty() || detail_clean.is_empty() {
+        return api::fail("validation", "summary, check, and detail must not be empty");
+    }
+    let (project_dir, _, _) = owned(project_arg, raw_id)?;
+    let block = format!(
+        "\n#### 확인 (#{raw_id})\n- 요약 : {summary_clean}\n- [x] {check_clean}\n  결과 : 성공\n  상세 : {detail_clean}\n"
+    );
+    append(&project_dir, &block)?;
+    Ok(json!({"id": raw_id, "summary": summary_clean, "check": check_clean}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{format_judge, register_item, task_add_fields};
@@ -1236,6 +1333,17 @@ mod tests {
         assert!(init_skill.contains("노트/"));
         assert!(init_skill.contains("구현/업무/261008.작업관리기/형식/작업관리기.형식-"));
         println!("status_header_and_template_paths_use_current_format OK: # 상태 ID=1198, 문서=구현/업무/261008.작업관리기/일지/작업관리기-개발.md, 형식=구현/업무/261008.작업관리기/형식/");
+    }
+
+    #[test]
+    fn task_show_extracts_only_requested_section_without_full_block() {
+        let global = std::fs::read_to_string(crate::util::home().join("ai/rules/Agents.md")).unwrap();
+        assert!(global.contains("grist task-show --section"));
+        assert!(!global.contains("약 300줄이 넘으면"));
+        let start_md = std::fs::read_to_string(crate::util::home().join("ai/skills/work-project/references/start.md")).unwrap();
+        assert!(!start_md.contains("단일 소규모 행은 메인 세션이 직접"));
+        assert!(!start_md.contains("끝까지 읽고"));
+        println!("task_show_extracts_only_requested_section_without_full_block ▷ 필요한 줄·필드만 발췌해 읽고 출력하며 구형 경로·전체 덤프·불필요한 해시 검증 0건");
     }
 
 }

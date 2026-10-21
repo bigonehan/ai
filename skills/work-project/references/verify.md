@@ -1,8 +1,8 @@
 # 3단계: 검증·전체 흐름·완료 (`work-project` — Verify & Complete)
 
-행이 `$H=검증`에 도달해 숨긴 사례(`task-hidden`), 빌드·배포, 실제 런타임 전체 흐름 검증(`flow-wait`), 사용자 확인 후 최종 완료(`task-complete`)를 수행할 때 이 문서를 끝까지 읽고 실행한다.
+행이 `$H=검증`에 도달해 숨긴 사례(`task-hidden`), 빌드·배포, 실제 런타임 전체 흐름 검증(`flow-wait`), 사용자 확인 후 최종 완료(`task-complete`)를 수행할 때 이 문서를 읽고 실행한다(필요한 섹션·줄·필드만 `rg -n` 또는 `grist task-show --section`으로 발췌해 읽고 출력한다).
 
-> **필독**: 검증 명령이나 테스트를 실행하기 전에 반드시 `~/ai/skills/verify-work/SKILL.md`와 `~/ai/skills/end-project/SKILL.md`를 끝까지 읽고 그 절차를 따른다.
+> **필독**: 검증 명령이나 테스트를 실행하기 전에 반드시 `~/ai/skills/verify-work/SKILL.md`와 `~/ai/skills/end-project/SKILL.md`를 읽고 그 절차를 따른다.
 
 ## 1. 숨긴 사례 검증 (`Flow 5: Hidden cases`, main)
 
@@ -32,15 +32,13 @@
 3. **5분 병목 감지 로깅 및 자동 깨우기 타이머 (`verify-work` 필수 절차)**
    - Stagehand/CDP 검증 실행 시 `STAGEHAND_STEP_LOG=1`을 켜서 `[stagehand-step]`(`cdp-attach`, `stagehand-create`, `page-resolve`, `session-ready`, `session-close`) 및 `[stagehand-bottleneck]` 중간 과정 로그가 남게 한다.
    - 검증·런타임 명령이 백그라운드 태스크(`task-*`)로 전환되면 **반드시 같은 턴에서 턴을 끝내기 전에 `schedule(DurationSeconds=300, TimerCondition="<task-id>")` 5분 깨우기 타이머를 설정**한다.
-   - 5분 타이머가 울리거나 검증·API 탐색이 5분 이상 걸리면 타임아웃으로 덮지 말고 즉시 중간 로그를 읽어 병목 경계(핸들 미해제, 파이프 대기, 무한 폴링 등)를 찾고 소스를 수정한 뒤 `.ai/docs/performance.md` 또는 `### 메모`에 기록한다.
-4. **흐름 결과 기록 및 `flow-wait`**
-   - 전체 흐름 확인 후 `### 구현` 아래에 `- [○] <전체 흐름 확인 내역>`, `- [●] <최종 완료 준비 내역>`을 추가하고, `#### 확인 (#<id>)` 아래에 체크리스트를 덧붙인다:
-     ```markdown
-     #### 확인 (#<id>)
-     - 요약 : [표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>
-     - [x] <목적: 원하는 결과 라벨>
-       결과 : 성공
-       상세 : <실행한 함수(message/body 내용) ⇒ 전달 대상 ▷ 반환값/message 한 줄 요약 (JSON 원문 제외)>
+   - 5분 타이머가 울리거나 검증·API 탐색·반복 재시도가 누적되어 지연되면 타임아웃으로 덮지 말고 즉시 중간 로그를 읽어 병목 경계(핸들 미해제, 파이프 대기, 무한 폴링, Stagehand attach/API 호출 오류 등)를 찾고 소스 또는 `stagehand.mjs`를 수정한 뒤 `.ai/docs/performance.md`, `### 메모`, 그리고 Stagehand 관련인 경우 `~/ai/skills/access-stagehand/references/attach-notes.md`에 반드시 기록한다.
+4. **흐름 결과 기록 및 `flow-wait` (`.ai/changes` 직접 `read_file`·`edit_file` 금지)**
+   - 전체 흐름 확인 후 `.ai/changes` 파일을 직접 읽거나 편집하지 말고 아래 `grist` CLI 명령으로만 `- [○]`, `- [●]`, `#### 확인 (#<id>)`를 기록한다:
+     ```bash
+     ~/ai/scripts/bin/grist task-step <id> --project <dir> --step "○" --text "<전체 흐름 확인 내역>"
+     ~/ai/scripts/bin/grist task-step <id> --project <dir> --step "●" --text "<최종 완료 준비 내역>"
+     ~/ai/scripts/bin/grist task-confirm <id> --project <dir> --summary "[표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>" --check "<목적: 원하는 결과 라벨>" --detail "<실행한 함수 ⇒ 전달 대상 ▷ 반환값 한 줄 요약>"
      ```
    - 이어서 다음 명령을 실행한다:
      ```bash

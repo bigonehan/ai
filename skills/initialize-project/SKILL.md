@@ -7,7 +7,7 @@ metadata:
 
 # Initial Project (`initial_project` alias)
 
-Use this skill only for a genuinely new project or one missing its `# 상태` (`### grist` `ID :` / `### obsidian` `문서 :`) header in `AGENTS.md`. Read the nearest rules and resolve the `/home/tree/extensions` Table7 management document before mutation. Existing initialized projects use `work-project`.
+Use this skill only for a genuinely new project or one missing its `# 상태` (`### grist` `ID :` / `### obsidian` `문서 :`) header in `AGENTS.md`. Check only the needed `# 상태` lines via `rg -n` (do not read full `AGENTS.md`, `Input.md`, `.ai/changes/`, or Obsidian documents) before mutation. Existing initialized projects use `work-project`.
 
 ## Initialization
 
@@ -43,7 +43,7 @@ Use this skill only for a genuinely new project or one missing its `# 상태` (`
      - `.ai/docs/architecture.md` from `구현/업무/261008.작업관리기/형식/작업관리기.형식-architecture.md`
      - `.ai/docs/performance.md` from `구현/업무/261008.작업관리기/형식/작업관리기.형식-performance.md`
      - `.ai/changes/` directory
-   Read back the Obsidian bytes and `~/ai/scripts/bin/grist project <Table7 ID>`. Never record credentials, authorization data, raw private payloads, or full private paths in output.
+   Verify only the needed headings/lines of the created Obsidian files with `rg -n` (do not dump full files) and check `~/ai/scripts/bin/grist project <Table7 ID>`. Never record credentials, authorization data, raw private payloads, or full private paths in output.
 3. Record the first request exactly as `work-project` steps 0–2 do: summarize `# 요구 사항` in one line, choose a `📐|✒️|⌨️|🚿|✏️|🌍` marker for each `# 세부 사항`, and carry each marked line to changes and Table26 `$B`:
    - `grist request-record` (writes `Input.md` following `구현/업무/261008.작업관리기/형식/작업관리기.형식-input.md` with `# 요구 사항`/`# 세부 사항`, today's `.ai/changes/YYMMDD.<제목>.md` following `구현/업무/261008.작업관리기/형식/작업관리기.형식-changes.md` with `# 작업`/`# 완료`/`# 진행`, and the development note's `# 📆`),
    - `grist task-add --project <dir> --type <유형> --judge "[값|상태] <한줄 판정 내용>"` per marked `# 세부 사항` line, with the same line in `$B` (`$H=초안`),

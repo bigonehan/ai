@@ -32,6 +32,6 @@ stdout: `{"ok": true, "mode", "verdict": "pass|uncertain|fail", "command", "item
 
 Errors go to stderr as JSON with a `boundary` (`config`, `connection`, `http_<code>`, `arguments`) and exit 2. Callers treat any failure as "judgment skipped" (fail-open) and continue.
 
-States are masked (`Bearer …`, `*_KEY=…`, home path → `~`) and cut to 12,000 characters before sending. Every judgment is appended to `~/.codex/tmp/jev/judgments.jsonl` with the state's sha256 (never the text) for threshold tuning during shadow mode.
+States are masked (`Bearer …`, `*_KEY=…`, home path → `~`) and cut to 12,000 characters before sending. Every judgment is appended to `~/.codex/tmp/jev/judgments.jsonl` with the state's byte length (never the text) for threshold tuning during shadow mode.
 
 `JEV_FAKE_RESPONSE=<json file>` replaces the API call with a canned response; use it only in tests.

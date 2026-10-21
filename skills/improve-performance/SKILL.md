@@ -5,13 +5,13 @@ description: Diagnose, improve, and verify product performance regressions throu
 
 # Performance Improvement
 
-The main session owns scope, evidence, and completion. It does not modify product code, configuration, tests, build artifacts, or deployment files for a performance task: delegate every product mutation to a bounded implementer agent. The main session may inspect evidence, coordinate agents, and reject or re-delegate incomplete work.
+The main session owns scope, evidence, and completion. It does not modify product code, configuration, tests, build artifacts, or deployment files for a performance task: delegate every product and test mutation to a `t26_<id>` subagent (the main session never modifies product code or tests directly). The main session may inspect evidence, coordinate agents, and reject or re-delegate incomplete work.
 
 Work records follow `work-project`: the nearest project `AGENTS.md`, `Input.md`, the dated `.ai/changes/YYMMDD.요약명.md` Markdown record, Table26 `$H` (Korean choice values `초안`/`진단`/`작업`/`교정`/`검증`/`확인`/`완료`), command output, product logs, and the authoritative consumer.
 
 ## Establish the diagnostic boundary before a patch
 
-1. Read the active project's `AGENTS.md` (including its runtime settings), requirement history, and existing performance instrumentation. Identify the exact user-visible action, the authoritative consumer, the target package/component, and adjacent workflows that must remain unchanged.
+1. Do not read `AGENTS.md`, `Input.md`, `.ai/changes/`, Obsidian notes, or `architecture.md` in full; extract and print only the needed sections, lines, or fields (such as `# 상태` / `runtime :`) with `read-architecture`, `rg -n`, or `grist task-show --section`. Identify the exact user-visible action, the authoritative consumer, the target package/component, and adjacent workflows that must remain unchanged.
 2. Delegate a bounded diagnostic task before any functional patch. It must trace the actual production loader and map `producer → transport → consumer`, including the real owner of each hot path.
 3. Inventory the full target package rather than only the reported node or component. Include registered modules and every relevant draw/render, pointer, keyboard/input, DOM-widget/rebuild, serialization, layout read/write, canvas-dirty, lifecycle, and cleanup path. Keep canvas pan, node drag, link drag, and text/input interaction as separate observation scenarios.
 4. If durable diagnostics are absent or insufficient, delegate instrumentation first. A product with settings must expose a persistently stored `개발 모드`/development-mode toggle. At the logger boundary, disabled mode must produce zero diagnostic event creation, transport, and file writes.
@@ -26,8 +26,8 @@ Work records follow `work-project`: the nearest project `AGENTS.md`, `Input.md`,
 ## Delegated repair loop
 
 - Once Host diagnostics identify the first failing owner/boundary, immediately delegate one bounded product-repair task for that owner. Measurement, diagnostics, or an explanation alone are never an outcome for an active performance task.
-- Each agent prompt contains only: the instruction to read the project `AGENTS.md` first, one owner boundary, the editable paths, and the completion condition (tests, replay, and consumer readback). The agent returns plain text: cause, changed files, test output, and measured counters/durations.
-- After each agent result, the main session reads the diff, tests, logs, and artifact identity directly. A green test, build, or agent claim is not completion evidence.
+- Each `t26_<id>` subagent prompt contains only: the instruction to run `read-architecture` and extract only needed sections/lines via `rg -n` or `grist task-show --section` (never reading full files), one owner boundary, the editable paths, and the completion condition (tests, replay, and consumer readback; tests print only target fields/lines). The agent returns plain text: cause, changed files, test output, and measured counters/durations.
+- After each agent result, the main session inspects only the needed lines/fields of the diff, tests, and logs via `rg -n` or `grist task-show --section`. A green test, build, or agent claim is not completion evidence.
 - If evidence is missing, the owner is wrong, the package inventory is incomplete, or runtime readback fails, dispatch the next bounded task at the first unresolved boundary. Escalate repeated failures to the loader, shared runtime, or owning configuration rather than retrying the same patch blindly.
 - Call a separate reviewer agent only when the repair changes a path that mutates external data, extends a shared Bridge contract, or the user asks for review. Never review a review.
 

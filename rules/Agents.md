@@ -7,9 +7,10 @@
 
 - 사용자 대면 응답(진행 안내·질문·최종 보고)은 한국어 `-요`체로 쓴다. 코드·명령·경로·식별자는 원문 그대로 둔다. 사용자의 욕설·반말을 따라 하지 않는다.
 - final 전에 `맞습니다`, `맞아요`, `인식했습니다`, `알겠습니다`, `그렇습니다`가 있으면 그 문장을 다시 쓴다.
-- 지적을 받으면 사과·수긍·자기평가 대신 `실행한 수정 → 검증 결과 → 남은 경계` 순서로 보고한다.
+- 지적을 받으면 사과·수긍 없이 `실행한 수정 → 검증 결과 → 남은 경계` 순서로 보고한다.
 - 사용자에게 넘기는 동작은 로그인·인증, 결제·비용, 비가역 외부 전송, 브라우저 밖 OS 앱 조작뿐이고, 브라우저 클릭·확장 재로드·Settings `Test`는 직접 한다.
 - nf는 메인만 final·질문·동작 요청 전에 1회 실행한다. 실행 중이면 같은 세션에서 exit code를 기다리고 재호출하지 않는다. 하위 에이전트·훅·완료 처리 제외.
+- "안 보인다"는 재로드 후의 말이다. 로드를 묻지 말고 원인을 고친다. "앞으로" 지적은 전역 규칙에도 반영한다.
 
 ## 2. 작업 절차
 
@@ -53,10 +54,10 @@
 
 - 전역 규칙 원본은 `~/ai/rules/Agents.md` 하나다. `~/.codex/AGENTS.md`·`~/.claude/CLAUDE.md`·`~/.gemini/GEMINI.md`·`~/.gemini/antigravity-cli/GEMINI.md`는 생성본이라 직접 고치지 않는다.
 - 사용자가 전역 규칙을 말하면 `~/.local/bin/agent-rules`로만 읽고(`read [--section <제목>]`·`sections`) 고친다(`add --section <제목> --text <줄>`·`replace --old <A> --new <B>`·`remove --text <A>`·`write --file <F>`). 수정 시 생성본이 자동 갱신되며 결과는 `agent-rules status`로 보고한다. `sync` exit 3이면 `~/ai/rules/.state/backup/` 내용을 원본에 병합하고 `sync --force`한다.
-- 지적을 받았다고 규칙을 늘리지 않는다. "전역규칙/전역설정"을 명시한 경우에만 원본을 바꾸고, 일반 "AGENTS.md 수정"은 가장 가까운 프로젝트 `AGENTS.md`만 바꾼다.
+- "전역규칙/전역설정"·"앞으로"가 있을 때만 원본을 바꾸고, 일반 "AGENTS.md 수정"은 가장 가까운 프로젝트 `AGENTS.md`만 바꾼다.
 - 스크립트는 `.py`·`.mjs`로 만들지 않고 기존 `.py`·`.mjs`는 지우며, 공용은 `~/ai/scripts/bin/`, Skill 전용은 `<Skill>/scripts/bin/`에 Rust(`.rs`)로만 둔다(`stagehand.mjs` 예외). hook `~/ai/codex/hooks*`·Skill `~/ai/skills/<name>`은 `~/.codex`·`~/.claude`에서 원본을 가리키는 심볼릭 링크로 묶어 원본만 고친다.
 - `jj` 전역설정은 workspace 초안·테스트·보고까지만 하고, 사용자 전역설정 병합은 사용자가 위임한 경우에만 한다.
-- 같은 오류가 2번 넘게 고쳐도 남거나 새 에이전트가 알아야 할 구조적 특성을 찾으면 프로젝트 `AGENTS.md` `# tip`(없으면 만든다)에 한 줄로 추가한다.
+- 2번 넘게 남은 오류나 구조적 특성은 프로젝트 `AGENTS.md` `# tip`에 한 줄로 추가한다.
 - 원본은 8KB 이하로 유지하고(`sync`가 경고), 프로젝트 전용 규칙은 그 프로젝트 `AGENTS.md`에 둔다.
 
 ## 9. 코드·로그 읽기
@@ -64,4 +65,4 @@
 - `/home/tree/extensions` 프로젝트에서는 파일 읽기·검색 전 첫 명령으로 `~/ai/scripts/bin/read-architecture --project <dir> --query "<요청 키워드>"`를 실행한다(다른 프로젝트로 옮기면 다시 실행). exit 2면 문서부터 작성한다.
 - 탐색 전에 `.ai/docs/architecture.md`(도메인·폴더 구조)로 대상 폴더를 고르고 `ls -R`·`find`·`grep -r`로 구조를 다시 찾지 않는다. 파일이 없으면 알리고 생성을 제안한다.
 - 검색은 `rg`만 쓴다(`grep -r`, `find | xargs grep` 금지). `rg -n "<패턴>" <dir>`(`-g`·`-t`·`-l`·`-m`)로 위치를 찾고 그 주변 범위만 읽는다.
-- 소스 전체나 여러 파일을 한 번에 `cat`하지 않고, 약 300줄이 넘으면 필요한 범위만 읽는다. 테스트·빌드·로그는 `rg -n "FAIL|Error|warn"`·`| tail -n 40`·`| head -c 4000`으로 걸러 보고, 읽은 범위는 다시 읽지 않는다.
+- 파일·문서·객체 전체 읽기나 `console.log`·CLI 전체 덤프를 금하고 필요한 줄·필드만 떼어 다루며(`rg -n`, `grist task-show --section`, 불필요한 SHA-256 검증·로그 금지), 로그는 `rg -n "FAIL|Error|warn"`·`| tail -n 40`·`| head -c 4000`으로 걸러 읽은 범위는 재읽기하지 않는다.

@@ -1,6 +1,6 @@
 # 1단계: 작업 시작 (`work-project` — Start)
 
-새 사용자 요청을 받았거나, 진행 중인 요청의 정정을 받았거나, 프로젝트를 처음 열었거나, 새 Table26 작업 행·목표를 만들고 에이전트를 배정할 때 이 문서를 끝까지 읽고 순서대로 실행한다.
+새 사용자 요청을 받았거나, 진행 중인 요청의 정정을 받았거나, 프로젝트를 처음 열었거나, 새 Table26 작업 행·목표를 만들고 에이전트를 배정할 때 이 문서를 읽고 순서대로 실행한다(프로젝트 문서·코드는 전체를 읽지 않고 필요한 섹션·줄·필드만 `rg -n` 또는 `grist task-show --section`으로 발췌해 읽고 출력한다).
 
 ## 1. 구조 파악 (`read-architecture`) 및 문서 확인
 
@@ -8,7 +8,7 @@
    - 출력에서 작업 대상 폴더와 후보 파일을 고른 뒤 `rg -n "<패턴>" <파일>`로 위치를 찾고 필요한 범위만 읽는다(`ls -R`, `find`, `grep -r`, 전체 `cat` 금지).
    - `missing` 또는 빈 템플릿(exit 2)이면 실제 프로젝트 기준으로 `.ai/docs/architecture.md`(`# 도메인`은 `항목 : 설명`, `# 구조`는 루트·2단계 폴더, 파일명 제외)부터 작성한 뒤 다시 실행한다.
    - 작업 중 폴더가 추가·삭제·이동되거나 구조 차이가 작업 범위 안이면 같은 작업에서 `.ai/docs/architecture.md`를 함께 갱신한다.
-2. 제품 파일을 바꾸기 전에 가장 가까운 `AGENTS.md`, `Input.md`, `.ai/docs/architecture.md`, `.ai/docs/performance.md`, 프로젝트 Obsidian 문서(Table7 `Obsidian_Id`), 오늘자 `.ai/changes/YYMMDD.<제목>.md`, 현재 Table26 행을 읽는다.
+2. 작업 경과와 현재 상태 확인은 `read-architecture` 출력과 `~/ai/scripts/bin/grist gate --cwd <dir>`(필요시 `grist task <id>`) JSON 출력만 사용한다. 컨텍스트 낭비와 자동 압축(`CHECKPOINT`)을 막기 위해 `AGENTS.md`(시스템 프롬프트에 이미 로드됨), `Input.md`, 프로젝트 Obsidian 개발 문서, `.ai/changes/YYMMDD.<제목>.md` 전체를 `read_file`로 읽지 않고, 필요한 섹션·줄·필드만 `rg -n` 또는 `~/ai/scripts/bin/grist task-show <id> --project <dir> --section <섹션>`으로 발췌해 읽고 출력한다.
 
 ## 2. 초기화 여부 확인 (`Initialization check`)
 
@@ -53,11 +53,12 @@
      GOAL
      ```
 
-3. **에이전트 배정 (`Assign`, main)**
-   - 행마다 `task_name`을 정확히 `t26_<id>`, `fork_turns="none"`으로 에이전트를 실행하거나, 단일 소규모 행은 메인 세션이 직접 `references/work.md`의 동일 명령 절차를 수행한다.
+3. **에이전트 배정 (`Assign`, main — 메인 직접 구현 금지)**
+   - 메인 세션이 직접 제품 소스·테스트(`src/`, `server/` 등)를 읽거나 `edit_file`·`task-red`·`task-submit`을 수행하면 메인 컨텍스트가 누적되어 자동 컨텍스트 압축(`CHECKPOINT`)이 발생하므로, **단일 소규모 행이라도 메인 세션이 직접 구현하지 않고 반드시 행마다 `t26_<id>`(`fork_turns="none"`) 서브에이전트를 호출해 위임**한다.
    - 에이전트 프롬프트에는 다음만 전달한다:
-     - 프로젝트 경로와 첫 명령 `~/ai/scripts/bin/read-architecture --project <dir> --query "<키워드>"` 실행 및 `AGENTS.md` 읽기 지시
-     - `Table26 #<id>` 및 `.ai/changes`의 `## [구현] … (#<id>)` → `### 목표` 읽기 지시
+     - 프로젝트 경로와 첫 명령 `~/ai/scripts/bin/read-architecture --project <dir> --query "<키워드>"` 실행 지시
+     - `Table26 #<id>` 및 `~/ai/scripts/bin/grist task-show <id> --project <dir> --section 목표`(또는 `rg -n`)로 필요한 섹션·줄·필드만 발췌해 읽고 출력하라는 지시
      - 수정 허용 경로 목록(형제 프로젝트, 전역 설정, Skill, 다른 행의 파일 수정 금지)
-     - `~/ai/skills/work-project/references/work.md`를 읽고 TDD 절차를 수행하라는 지시
+     - `~/ai/skills/work-project/references/work.md`를 읽고 TDD 절차(`task-red` → 구현 → `task-submit`)를 수행하라는 지시
    - 수정 경로가 겹치지 않는 행만 병렬로 실행한다.
+   - 서브에이전트는 동시에 최대 2개까지만 실행한다. 3개 이상이면 2개씩 묶어 호출하고, 둘 다 완료 메시지를 받은 뒤 다음 묶음을 호출한다.

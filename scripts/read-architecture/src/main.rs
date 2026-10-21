@@ -130,6 +130,43 @@ fn folder_labels(structure: &str) -> Vec<String> {
     result
 }
 
+fn agents_obsidian_doc(agents_text: &str) -> Option<String> {
+    for line in agents_text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("문서 :") {
+            let value = rest.trim();
+            if !value.is_empty() {
+                return Some(value.to_owned());
+            }
+        }
+    }
+    None
+}
+
+fn search_targets(project: &Path, named_folders: &[String]) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut seen = HashSet::new();
+    for folder in named_folders {
+        let top = folder.split('/').next().unwrap_or(folder.as_str());
+        if !top.is_empty()
+            && !top.starts_with('.')
+            && project.join(top).exists()
+            && seen.insert(top.to_owned())
+        {
+            targets.push(top.to_owned());
+        }
+    }
+    for doc in ["AGENTS.md", "README.md"] {
+        if project.join(doc).exists() && seen.insert(doc.to_owned()) {
+            targets.push(doc.to_owned());
+        }
+    }
+    if targets.is_empty() {
+        targets.push(".".to_owned());
+    }
+    targets
+}
+
 struct Score {
     hits: u64,
     words: HashSet<String>,
@@ -159,8 +196,56 @@ fn run() -> Result<(), String> {
         fail("architecture.md is still the empty template", &project);
     }
 
+    let words: Vec<String> = {
+        let mut list = Vec::new();
+        let mut seen = HashSet::new();
+        for word in query
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|word| word.chars().count() > 1)
+        {
+            if seen.insert(word.to_owned()) {
+                list.push(word.to_owned());
+            }
+        }
+        list
+    };
+
     println!("# {}/.ai/docs/architecture.md", project.display());
-    println!("{}", doc.trim_end());
+    let matched: Vec<&str> = doc
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            line.starts_with('#')
+                || (words.is_empty() && trimmed.starts_with("- "))
+                || words
+                    .iter()
+                    .any(|w| line.to_lowercase().contains(&w.to_lowercase()))
+        })
+        .take(limit * 2)
+        .collect();
+    println!("{}", matched.join("\n"));
+
+    let perf_file = project.join(".ai/docs/performance.md");
+    if !words.is_empty() {
+        if let Ok(perf) = fs::read_to_string(&perf_file) {
+            let matched_perf: Vec<&str> = perf
+                .lines()
+                .filter(|line| {
+                    !line.trim().is_empty()
+                        && !line.contains("해당 사항 없음")
+                        && (line.starts_with('#')
+                            || words
+                                .iter()
+                                .any(|w| line.to_lowercase().contains(&w.to_lowercase())))
+                })
+                .take(limit)
+                .collect();
+            if matched_perf.iter().any(|l| !l.starts_with('#')) {
+                println!("\n# {}/.ai/docs/performance.md", project.display());
+                println!("{}", matched_perf.join("\n"));
+            }
+        }
+    }
 
     let named = folder_labels(structure_part(&doc));
     let missing: Vec<&str> = named
@@ -200,42 +285,50 @@ fn run() -> Result<(), String> {
         }
     }
 
-    if !query.trim().is_empty() {
-        let mut words = Vec::new();
-        let mut seen = HashSet::new();
-        for word in query
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .filter(|word| word.chars().count() > 1)
-        {
-            if seen.insert(word.to_owned()) {
-                words.push(word.to_owned());
+    let agents_file = project.join("AGENTS.md");
+    if let Ok(agents_text) = fs::read_to_string(&agents_file) {
+        if let Some(obsidian_rel) = agents_obsidian_doc(&agents_text) {
+            let vault_root = Path::new("/mnt/c/Users/tende/OneDrive/일기장");
+            if vault_root.exists() && !vault_root.join(&obsidian_rel).exists() {
+                println!(
+                    "\n# Obsidian 문서 경로 경고\n- AGENTS.md 문서 경로가 Vault에 없음: {obsidian_rel}"
+                );
             }
         }
+    }
+
+    if !words.is_empty() {
+        let targets = search_targets(&project, &named);
         let mut score: HashMap<String, Score> = HashMap::new();
         let mut order = Vec::new();
         for word in &words {
-            let output = Command::new("rg")
-                .args([
-                    "-c",
-                    "-i",
-                    "-F",
-                    word,
-                    "-g",
-                    "!node_modules",
-                    "-g",
-                    "!dist",
-                    "-g",
-                    "!build",
-                    "-g",
-                    "!.ai",
-                    "-g",
-                    "!*.lock",
-                    "-g",
-                    "!*-lock.*",
-                    "-g",
-                    "!test/tmp",
-                    ".",
-                ])
+            let mut cmd = Command::new("rg");
+            cmd.args([
+                "-c",
+                "-i",
+                "-F",
+                word,
+                "-g",
+                "!node_modules",
+                "-g",
+                "!dist",
+                "-g",
+                "!build",
+                "-g",
+                "!target",
+                "-g",
+                "!.ai",
+                "-g",
+                "!*.lock",
+                "-g",
+                "!*-lock.*",
+                "-g",
+                "!test/tmp",
+            ]);
+            for target in &targets {
+                cmd.arg(target);
+            }
+            let output = cmd
                 .current_dir(&project)
                 .output()
                 .unwrap_or_else(|e| {
@@ -289,5 +382,22 @@ fn main() {
     if let Err(err) = run() {
         eprintln!("[architecture] {err}");
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_structure_folders_and_obsidian_doc() {
+        let doc = "# 도메인\n- web : 웹\n# 구조\n- src/ : 프런트\n  - src/components/ : 컴포넌트\n- server/ : 서버\n";
+        let labels = folder_labels(structure_part(doc));
+        assert_eq!(labels, vec!["src", "src/components", "server"]);
+        let agents = "# 상태\n### grist\nID : 1201\n### obsidian\n문서 : 구현/공방/260926.콘티 장면 생성기/일지/콘티 장면 생성기-개발.md\n";
+        assert_eq!(
+            agents_obsidian_doc(agents).as_deref(),
+            Some("구현/공방/260926.콘티 장면 생성기/일지/콘티 장면 생성기-개발.md")
+        );
     }
 }

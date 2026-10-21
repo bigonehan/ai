@@ -1,10 +1,9 @@
 [package]
 name = "jev"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 
 [dependencies]
 regex = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }

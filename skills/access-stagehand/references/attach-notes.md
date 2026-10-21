@@ -6,8 +6,9 @@
 1. `openStagehand()`는 이제 attach 직전에 자동으로 방치된 이전 Stagehand 클라이언트 프로세스를 정리(`killStaleStagehandClients`)하고 `runDoctor(..., { restartRuntime: true, closeHung: true })`로 무응답 탭 복구 및 Stagehand Runtime service worker 재시작을 수행하며, 유휴 세션 자동 해제 타이머(`leaseTimeoutMs`, 기본 90초)와 0.3초대의 빠른 `session.close()`를 내장한다.
 2. 수동 점검이 필요할 때만 `node ~/.codex/skills/access-stagehand/scripts/stagehand.mjs doctor --restart-runtime --close-hung` 또는 `node ~/.codex/skills/access-stagehand/scripts/stagehand.mjs open --url about:blank`를 실행한다(정상 ~1초).
 3. 스크립트는 `try { … } finally { await session.close(); }`로 끝내고, 셸 `timeout`은 스크립트 예상 시간보다 길게 잡는다.
-4. Grist 위젯처럼 iframe 안의 요소는 `page.locator("iframe >> <selector>")`로 다룬다. Stagehand 4의 page에는 `frames()`가 없다.
-5. Grist 레코드 이동은 화면 좌표 클릭(`page.click(x, y)`) 대신 URL 앵커 `#a1.s<section id>.r<row id>`로 연다. section id는 `~/ai/scripts/bin/grist get _grist_Views_section`의 `parentId`(=page의 viewRef)로 찾는다.
+4. Grist 위젯처럼 iframe 안의 요소는 `page.locator("iframe >> <selector>")`로 다룬다. Stagehand의 `page`에는 `frames()`가 없고 `stagehand.context`도 없다(`session.page`와 `session.pages`를 바로 사용한다).
+5. Node 25 인라인 스크립트에서 프로젝트 `.ts` 파일(`server/obsidian.ts` 등)과 `openStagehand()`를 함께 임포트할 때는 반드시 `node --experimental-transform-types --input-type=module -e '...'`를 사용한다(`npx tsx -e`는 CJS top-level `await` 오류, 기본 `node` strip-only 모드는 `readonly` 생성자 파라미터 구문 오류 발생).
+6. Grist 레코드 이동은 화면 좌표 클릭(`page.click(x, y)`) 대신 URL 앵커 `#a1.s<section id>.r<row id>`로 연다. section id는 `~/ai/scripts/bin/grist get _grist_Views_section`의 `parentId`(=page의 viewRef)로 찾는다.
 
 ## 기록
 형식: `### YYMMDD 증상 한 줄` 아래에 `- 프로젝트 :`·`- 증상 :`(오류 원문)·`- 원인 :`·`- 복구 :`·`- 소모 :`(낭비한 시간·시도 수)·`- 재발 방지 :`·`- 재발 :`.
@@ -23,7 +24,7 @@
   - `Extensions.loadUnpacked` 재로드와 SW `Target.closeTarget`은 효과가 없었다.
 - 소모 : 원인 파악 전 재시도·우회(raw CDP 클릭) 약 20분, Stagehand 열기 시도 8회.
 - 재발 방지 : `먼저 할 일` 2·3번. `openStagehand()`는 이 오류를 `runtime-stuck: … doctor --restart-runtime` 안내로 바꿔 던진다.
-- 재발 : 261015 grist_video_maker 예상시간 화면 확인 전 `open --url about:blank`가 60초 timeout. `doctor --restart-runtime`에서 hung 0·runtimeRestarted true, 재시도 attach 0.57초 성공. Grist URL 직접 open에서도 60초 timeout 재발, doctor에서 hung 0·runtimeRestarted true, 재시도 attach 0.83초 성공. List 씬 렌더 UI 측정 전 `open --url about:blank`도 60초 timeout. 원인 target 무응답은 관측되지 않아 미확정. 같은 날 #60 흐름 측정 전에도 about:blank 60초 timeout → doctor(checked 22, hung 0, runtimeRestarted true) 뒤 1.4초 attach. 이후 실행마다 doctor를 먼저 돌려 3회 모두 성공. 261018 grist_video_maker #167 초기문서 생성 검증에서 `doctor` 없이 `openStagehand()`를 바로 호출해 백그라운드 태스크로 넘어가며 약 20분 대기 발생 → `timeout 30s` 래핑 및 `doctor --restart-runtime` 선행 규칙을 `verify-work`에 반영. 261020 grist_mindmap #217 흐름 검증 첫 시도에서 60초 timeout → `doctor --restart-runtime --close-hung`(checked 6, hung 0, runtimeRestarted true) 뒤 재시도 1.67초 attach 성공.
+- 재발 : 261015 grist_video_maker 예상시간 화면 확인 전 `open --url about:blank`가 60초 timeout. `doctor --restart-runtime`에서 hung 0·runtimeRestarted true, 재시도 attach 0.57초 성공. Grist URL 직접 open에서도 60초 timeout 재발, doctor에서 hung 0·runtimeRestarted true, 재시도 attach 0.83초 성공. List 씬 렌더 UI 측정 전 `open --url about:blank`도 60초 timeout. 원인 target 무응답은 관측되지 않아 미확정. 같은 날 #60 흐름 측정 전에도 about:blank 60초 timeout → doctor(checked 22, hung 0, runtimeRestarted true) 뒤 1.4초 attach. 이후 실행마다 doctor를 먼저 돌려 3회 모두 성공. 261018 grist_video_maker #167 초기문서 생성 검증에서 `doctor` 없이 `openStagehand()`를 바로 호출해 백그라운드 태스크로 넘어가며 약 20분 대기 발생 → `timeout 30s` 래핑 및 `doctor --restart-runtime` 선행 규칙을 `verify-work`에 반영. 261020 grist_mindmap #217 흐름 검증 첫 시도에서 60초 timeout → `doctor --restart-runtime --close-hung`(checked 6, hung 0, runtimeRestarted true) 뒤 재시도 1.67초 attach 성공. 261020 grist_video_maker #224 흐름 검증 첫 시도에서 `page.locator("iframe >> ...")` 호출이 40초 timeout → `doctor --restart-runtime --close-hung`(checked 8, hung 0, runtimeRestarted true) 후 재시도 3.0초 attach 및 `page.evaluate` 검증 성공.
 
 ### 261015 세션 종료 직후 다음 init 시간 초과 반복 (무거운 ComfyUI 탭)
 - 프로젝트 : comfyui_dh_nodes
@@ -41,7 +42,7 @@
 - 복구 : `doctor --restart-runtime` 한 번 더(checked 32, hung 0) 실행 후 같은 스크립트 재실행 → 성공.
 - 소모 : 실패 1회, 약 1분.
 - 재발 방지 : `open --url about:blank` 확인 직후 바로 스크립트를 열 때도 직전에 doctor를 한 번 더 돌린다.
-- 재발 :
+- 재발 : 261020 grist_video_maker #224 `connectOrLaunch()`가 재시도 루프(`createAttempt`) 안에서 매번 `runDoctor({ restartRuntime: true })`를 재호출해 Stagehand Runtime service worker 재시작 중에 다시 SW를 죽이면서 `No target with given id found`가 연쇄 발생함. 또한 `openStagehand()`에 `url` 미전달 시 `session.page`가 `undefined`였고, `page.frames()`·`stagehand.context.pages()`·`npx tsx -e`·`node`(strip-only) 시행착오로 6회(약 5분) 소모. `stagehand.mjs`에서 `runDoctor`는 최초 1회(또는 `already initialized` 시에만) 실행하도록 분리하고 `url` 생략 시에도 `session.page`·`session.pages`를 자동 바인딩하도록 수정.
 
 ### 261016 다른 세션이 공용 브라우저를 함께 쓸 때 attach·page 세션 유실 반복
 - 프로젝트 : jw_downloader

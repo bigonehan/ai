@@ -262,6 +262,27 @@ fn run(argv: &[String]) -> R<Value> {
             let project = args.flag_req("project")?;
             gate::task_complete(row_id, project)
         }
+        "task-show" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            let section = args.flag_opt("section");
+            records::task_show(project, row_id, section)
+        }
+        "task-step" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            let step = args.flag_req("step")?;
+            let text = args.flag_req("text")?;
+            records::task_step(project, row_id, step, text)
+        }
+        "task-confirm" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            let summary = args.flag_req("summary")?;
+            let check = args.flag_req("check")?;
+            let detail = args.flag_req("detail")?;
+            records::task_confirm(project, row_id, summary, check, detail)
+        }
         "request-record" => {
             let project = args.flag_req("project")?;
             let input_file = args.flag_req("input-file")?;

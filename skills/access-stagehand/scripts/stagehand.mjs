@@ -279,30 +279,34 @@ export async function openStagehand({
   const { localBrowser, Stagehand } = await import(pathToFileURL(entry.path).href);
   let browser;
   let mode;
-  const connectOrLaunch = async () => {
+  let doctorRan = false;
+  const runDoctorOnce = async (force = false) => {
+    if (doctorRan && !force) return;
+    doctorRan = true;
+    try {
+      const cdp = await browserCdp(port);
+      try {
+        await runDoctor(cdp, { restartRuntime: true, closeHung: true, settleMs: 800 });
+      } finally {
+        cdp.close();
+      }
+    } catch {}
+  };
+  const connectOrLaunch = async (forceDoctor = false) => {
     if (await endpointVersion(port)) {
       const extension = attachExtension(port, extensions);
-      // Reset the Stagehand Runtime service worker and recover any hung tabs before connecting,
-      // so an unclosed previous session or heavy tab never causes a 60s initialization timeout.
-      try {
-        const cdp = await browserCdp(port);
-        try {
-          await runDoctor(cdp, { restartRuntime: true, closeHung: true, settleMs: 600 });
-        } finally {
-          cdp.close();
-        }
-      } catch {}
+      // Reset the Stagehand Runtime service worker once before connecting;
+      // do not restart it again on "No target with given id" retries or it will race itself.
+      await runDoctorOnce(forceDoctor);
       logStep("cdp-attach-start", `port=${port}`);
-      // Stagehand loads its helper extension on connect; the first attempts can
-      // race its service worker ("No target with given id").
       for (let attempt = 1; ; attempt += 1) {
         try {
           browser = await localBrowser.connect({ cdpUrl: `http://127.0.0.1:${port}`, ...extension });
           break;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          if (!message.includes("No target with given id") || attempt === 4) throw error;
-          await new Promise((accept) => setTimeout(accept, 500));
+          if (!message.includes("No target with given id") || attempt === 6) throw error;
+          await new Promise((accept) => setTimeout(accept, 600));
         }
       }
       mode = "attach";
@@ -329,17 +333,21 @@ export async function openStagehand({
     ? { model: { modelName: env.STAGEHAND_MODEL, apiKey: env.STAGEHAND_API_KEY } }
     : {};
   let stagehand;
+  let forceDoctorOnRetry = false;
   for (let createAttempt = 1; ; createAttempt += 1) {
     try {
-      await connectOrLaunch();
+      await connectOrLaunch(forceDoctorOnRetry);
+      forceDoctorOnRetry = false;
       logStep("stagehand-create-start");
       stagehand = await Stagehand.create({ browser, ...model, logging: { level: "off" } });
       logStep("stagehand-create-done");
       break;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (createAttempt < 3 && /No target with given id|already initialized|initialization is already in progress/u.test(message)) {
-        await new Promise((accept) => setTimeout(accept, 400));
+      const isAlreadyInit = /already initialized|initialization is already in progress/u.test(message);
+      if (createAttempt < 4 && (message.includes("No target with given id") || isAlreadyInit)) {
+        forceDoctorOnRetry = isAlreadyInit;
+        await new Promise((accept) => setTimeout(accept, 600));
         continue;
       }
       clearInterval(watchdog);
@@ -349,11 +357,12 @@ export async function openStagehand({
       throw error;
     }
   }
+  const pages = await stagehand.browser.context.pages();
   let page;
   if (url) {
     logStep("page-resolve-start", url);
     // Reuse a blank tab or one already on this URL; page URLs may be async.
-    for (const candidate of await stagehand.browser.context.pages()) {
+    for (const candidate of pages) {
       const current = await candidate.url();
       if (current === "about:blank" || current === url || (url.endsWith("/") && current.startsWith(url))) {
         page = candidate;
@@ -366,6 +375,15 @@ export async function openStagehand({
       await page.goto(url);
     }
     logStep("page-resolve-done", await page.url());
+  } else {
+    for (const candidate of pages) {
+      const current = await candidate.url();
+      if (current && !current.startsWith("chrome-extension://") && !current.startsWith("devtools://")) {
+        page = candidate;
+        break;
+      }
+    }
+    page = page || pages[0] || (await stagehand.browser.context.newPage());
   }
   const version = await endpointVersion(port);
   logStep("session-ready");
@@ -407,6 +425,7 @@ export async function openStagehand({
   const session = {
     stagehand,
     page,
+    pages,
     mode,
     aiEnabled: Boolean(model.model),
     endpoint: `http://127.0.0.1:${port}`,

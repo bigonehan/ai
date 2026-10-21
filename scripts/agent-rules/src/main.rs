@@ -6,15 +6,15 @@ use std::process::ExitCode;
 
 const USAGE: &str = "사용법: agent-rules <명령>
   path                                원본 경로
-  read [--section <제목>]             원본 전체 또는 한 구역 출력
+  read [--section <제목>]             지정 구역(생략 시 원본) 출력
   sections                            제목 목록(줄 번호·수준)
   add --section <제목> --text <줄>    구역 끝에 한 줄 추가
   replace --old <A> --new <B>         원본에 한 번만 있는 A를 B로 교체
   remove --text <A>                   A를 포함한 유일한 줄 삭제
-  write --file <F|->                  원본 전체를 F(또는 표준입력) 내용으로 교체
+  write --file <F|->                  원본을 F(또는 표준입력) 내용으로 교체
   sync [--target <이름>] [--force] [--quiet]
                                       원본을 활성본으로 생성(drift면 백업 후 exit 3)
-  status                              활성본 상태와 SHA-256
+  status                              활성본 동기화 상태와 크기
 수정 명령(add·replace·remove·write)은 끝나면 모든 대상을 sync한다.
 대상: codex(~/.codex/AGENTS.md), claude(~/.claude/CLAUDE.md),
       antigravity(~/.gemini/GEMINI.md), antigravity-cli(~/.gemini/antigravity-cli/GEMINI.md)";
@@ -123,11 +123,11 @@ fn run(cmd: &str, mut a: Args) -> rules::Result<()> {
         "status" => {
             a.done()?;
             let text = rules::read_source(&p)?;
-            println!("{:<16} {:<12} {}  {}", "원본", "", rules::sha256_hex(text.as_bytes()), p.source.display());
+            println!("{:<16} {:<12} {:>6}B  {}", "원본", "", text.len(), p.source.display());
             for t in &TARGETS {
                 let (state, _) = rules::inspect(&p, &text, t);
-                let sha = std::fs::read(p.target(t)).map(|b| rules::sha256_hex(&b)).unwrap_or_else(|_| "-".into());
-                println!("{:<16} {:<12} {sha}  {}", t.name, state.label(), p.target(t).display());
+                let size = std::fs::metadata(p.target(t)).map(|m| format!("{}B", m.len())).unwrap_or_else(|_| "-".into());
+                println!("{:<16} {:<12} {:>7}  {}", t.name, state.label(), size, p.target(t).display());
             }
         }
         _ => return Err(usage(&format!("알 수 없는 명령 `{cmd}`"))),
@@ -156,7 +156,7 @@ fn report(reports: &[rules::Report], quiet: bool) -> rules::Result<()> {
             (_, _) => "생성",
         };
         if !quiet || r.state == State::Drift {
-            println!("{:<16} {what}  {}  {}", r.name, r.sha, r.path.display());
+            println!("{:<16} {what}  {}B  {}", r.name, r.bytes, r.path.display());
         }
         if let Some(b) = &r.backup {
             println!("{:<16} 백업  {}", "", b.display());

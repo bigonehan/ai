@@ -20,12 +20,12 @@ allowed-tools: Bash(~/ai/scripts/bin/read-architecture:*)
 
 ## 2. 상황별 필독 문서 안내 (반드시 해당 단계 문서를 먼저 읽고 실행)
 
-현재 수행하려는 단계에 따라 아래 문서를 먼저 끝까지 읽고 그 순서대로 실행한다. 절차를 건너뛰거나 추측으로 대체하지 않는다.
+현재 수행하려는 단계에 따라 아래 문서를 먼저 읽고 그 순서대로 실행한다(프로젝트 문서·코드는 전체를 읽지 않고 필요한 섹션·줄·필드만 `rg -n` 또는 `grist task-show --section`으로 발췌해 읽고 출력한다). 절차를 건너뛰거나 추측으로 대체하지 않는다.
 
 | 현재 상황 / 단계 | 반드시 읽어야 할 문서 | 핵심 수행 내용 |
 |---|---|---|
-| **1단계: 작업 시작** (새 요청 접수, 프로젝트 첫 진입, 행 분리·목표 작성·에이전트 배정) | `~/ai/skills/work-project/references/start.md`<br>(미초기화면 `~/ai/skills/initialize-project/SKILL.md` 먼저 실행) | `read-architecture` 실행 → 초기화(`# 상태` 헤더) 확인 → `grist request-record` → `grist task-add` → `grist task-goal` → `t26_<id>` 배정 |
-| **2단계: 작업 및 구현** (`t26_<id>` 또는 메인의 TDD 구현, 단위 테스트, 오류·회귀 수정, 이름 변경) | `~/ai/skills/work-project/references/work.md`<br>(UI 작업은 `~/ai/skills/implement-ui/SKILL.md` 병행) | `### 목표` 확인 → `- [▷]` 및 `grist task-red`(`$H=작업`) → 구현·단위 테스트(`$H=교정`, `- [▶]`) → 오류 시 Failure loop(`$H=진단`, `$I`·`$J`) → `grist task-submit`(`$H=검증`) |
+| **1단계: 작업 시작** (새 요청 접수, 프로젝트 첫 진입, 행 분리·목표 작성·에이전트 배정) | `~/ai/skills/work-project/references/start.md`<br>(미초기화면 `~/ai/skills/initialize-project/SKILL.md` 먼저 실행) | `read-architecture` 실행 → `grist gate`로 상태 확인(`AGENTS.md`·`Input.md`·`changes`·Obsidian 문서 전체 읽기 금지, 필요한 섹션·줄·필드만 `rg -n` 또는 `grist task-show --section`으로 발췌) → `grist request-record` → `grist task-add` → `grist task-goal` → `t26_<id>` 서브에이전트 배정(메인 직접 구현 금지) |
+| **2단계: 작업 및 구현** (`t26_<id>` 서브에이전트의 TDD 구현, 단위 테스트, 오류·회귀 수정, 이름 변경) | `~/ai/skills/work-project/references/work.md`<br>(UI 작업은 `~/ai/skills/implement-ui/SKILL.md` 병행) | `grist task-show <id> --project <dir> --section 목표`로 필요한 섹션만 발췌 확인 → `- [▷]` 및 `grist task-red`(`$H=작업`) → 구현·단위 테스트(`$H=교정`, `- [▶]`) → 오류 시 Failure loop(`$H=진단`, `$I`·`$J`) → `grist task-submit`(`$H=검증`) |
 | **3단계: 검증 및 마감** (`$H=검증` 이후 숨긴 사례, 빌드·배포, CDP 전체 흐름 검증, 사용자 확인·완료) | `~/ai/skills/work-project/references/verify.md`<br>**필수 병행**: `~/ai/skills/verify-work/SKILL.md`, `~/ai/skills/end-project/SKILL.md` | `grist task-hidden` → 버전·빌드·배포 → `STAGEHAND_STEP_LOG=1` 전체 흐름 검증(백그라운드 시 `schedule(DurationSeconds=300)` 5분 병목 검사) → `grist flow-wait`(`$H=확인`) → 사용자 확인 후 `grist task-complete`(`$H=완료`) |
 
 ## 3. 작업 전반에 지켜야 하는 공통 규칙

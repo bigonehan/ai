@@ -31,8 +31,8 @@ Quick check from a shell: `node ~/.codex/skills/access-stagehand/scripts/stageha
 
 ## Whole flow
 
-1. Read the project's runtime settings from `AGENTS.md`; read Table26 through the `access-grist` skill when the stage matters.
-2. Open the session (with the deployed extension directory when the product is an extension) and confirm the loaded extension version/digest matches the build.
+1. Extract the project's `runtime :` line from `AGENTS.md` with `rg -n` (do not read full files); read Table26 through the `access-grist` skill (`grist gate` / `grist task-show --section`) when the stage matters.
+2. Open the session (with the deployed extension directory when the product is an extension) and confirm the loaded extension version matches the build.
 3. Read the authoritative consumer's state before acting.
 4. Perform the real start action, then follow producer → transport/handler → page or site → authoritative consumer, and read the consumer back. A blank page, target list, build, log, or ACK alone is not a runtime result.
 5. Report the browser version, `headless: false`, target URL/title, artifact version, and the consumer readback in the command output and the project's `.ai/changes` record. Never record credentials, cookies, authorization headers, or private query values.
@@ -45,7 +45,7 @@ Allow one retry for a newly evidenced failure and about five minutes of browser 
 - After an extension reload/update, service-worker restart, page reload or SPA navigation, read back the loaded extension version and one product-owned readiness marker before continuing; a reload command alone does not prove the page uses the new build. Watch for stale listeners, ports and target IDs.
 - Start from the real visible control (button, editor, upload, playback, download) rather than a popup, helper endpoint, synthetic event or internal function.
 - Name the first failing step instead of "CDP failed": endpoint absent/unreachable, Stagehand Runtime not running (the `stagehand.mjs` error boundary; `Stagehand initialization timed out` alone is not a cause — read the browser's extension flags), wrong page or profile, stale or missing extension build, user action not received, message dropped or duplicated, handler rejected the payload, browser effect missing, consumer missing/stale/empty/unreadable.
-- For a download or file consumer, list the destination before the flow and require a new file afterwards with the expected name, positive size, settled modification time and readable bytes (record its SHA-256). Resolve the real download folder from the running profile; an existing file with a matching name is not a result.
+- For a download or file consumer, list the destination before the flow and require a new file afterwards with the expected name, positive size, settled modification time and readable bytes. Resolve the real download folder from the running profile; an existing file with a matching name is not a result.
 
 ## Login and user-only actions
 

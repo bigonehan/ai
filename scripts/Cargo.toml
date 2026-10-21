@@ -8,6 +8,7 @@ members = [
     "architecture-context",
     "completion-gate",
     "initialization-gate",
+    "agy-hook",
 ]
 
 [profile.release]
