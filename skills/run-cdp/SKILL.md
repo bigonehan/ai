@@ -12,6 +12,7 @@ Use this skill when a project needs a real browser check (web page, extension, G
 - The browser is always visible: `headless: false`. Use headless only when the project's `AGENTS.md` explicitly requires a headless-only runtime.
 - One shared endpoint `http://127.0.0.1:9222` and one dedicated profile `/home/tree/.config/codex-run-cdp`. The profile keeps logins (for example the local Grist at `http://localhost:8484`) across sessions; never create a second profile or copy cookies.
 - A healthy endpoint is attached to, never replaced implicitly. Restart it only to load a new extension build, or when `stagehand.mjs` reports `extension-not-loaded`, `stagehand-extension-blocked` or `stagehand-extension-unloadable`: `run_cdp --replace -e <extension dir>`. It keeps the Stagehand Runtime in the extension allow-list; never start the shared browser with a hand-written `--disable-extensions-except` that leaves it out.
+- Do not use Playwright, per-project profiles, or a Windows Chrome debugging profile. Sites already logged in on the shared profile are never asked about again. Check Windows host processes and ports with PowerShell/CIM.
 
 ## Run with Stagehand
 

@@ -238,7 +238,8 @@ fn run(argv: &[String]) -> R<Value> {
             let paths = split_csv(args.flag_opt("paths").unwrap_or(""));
             let purpose = args.flag_req("purpose")?;
             let detail = args.flag_opt("detail").unwrap_or("");
-            gate::task_red(row_id, project, test, &paths, &tests, purpose, detail)
+            let agent_id = args.flag_opt("agent-id");
+            gate::task_red(row_id, project, test, &paths, &tests, purpose, detail, agent_id)
         }
         "task-hidden" => {
             let row_id = args.pos_i64(0, "row_id")?;

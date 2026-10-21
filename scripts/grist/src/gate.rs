@@ -701,6 +701,104 @@ pub fn task_goal(raw_id: i64, project_arg: &str, goal_file: &str, summary: &str)
     api::update(TASK_TABLE, raw_id, &upd)
 }
 
+/// What task-red does about the agent origin line in 메모.
+#[derive(Debug, PartialEq)]
+pub enum OriginAction {
+    /// The 메모 already has `에이전트 <char> :` for the given agent ID.
+    Skip,
+    /// The agent ID is valid but its line is missing; warn and record nothing.
+    Warn(char),
+    /// No agent ID was given; record one new line.
+    Record,
+}
+
+/// Agent character of an 11-character ID (6 project digits, 4 row digits, 1 agent char).
+pub fn parse_agent_id(id: &str) -> Result<char, String> {
+    let chars: Vec<char> = id.chars().collect();
+    if chars.len() != 11 || !chars[..10].iter().all(char::is_ascii_digit) {
+        return Err(format!("invalid agent ID {id}: need 6 project digits, 4 row digits and 1 agent character"));
+    }
+    let c = chars[10];
+    if !(c.is_ascii_digit() || c.is_ascii_uppercase()) || c == 'I' || c == 'O' {
+        return Err(format!("invalid agent ID {id}: agent character must be 0-9A-HJ-NP-Z"));
+    }
+    Ok(c)
+}
+
+/// Whether the row's 메모 already has an `에이전트 <agent> : ...` line.
+pub fn memo_has_agent_char(memo: &[String], agent: char) -> bool {
+    let head = format!("에이전트 {agent} : ");
+    memo.iter().any(|line| {
+        line.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c.is_whitespace())
+            .starts_with(&head)
+    })
+}
+
+/// Decides skip / warn / record from the optional agent ID and the row's 메모.
+pub fn origin_action(memo: &[String], agent_id: Option<&str>) -> Result<OriginAction, String> {
+    match agent_id {
+        None => Ok(OriginAction::Record),
+        Some(id) => {
+            let c = parse_agent_id(id)?;
+            Ok(if memo_has_agent_char(memo, c) { OriginAction::Skip } else { OriginAction::Warn(c) })
+        }
+    }
+}
+
+/// Arguments for the record-log `start` call.
+pub fn agent_start_args(project_dir: &str, raw_id: i64) -> Vec<String> {
+    vec!["start".into(), project_dir.into(), raw_id.to_string(), "--role".into(), format!("t26_{raw_id}")]
+}
+
+/// Cargo manifest and release binary of record-log under the given HOME.
+pub fn record_log_paths(home: &str) -> (String, String) {
+    let base = format!("{home}/ai/skills/record-log/scripts/record-log");
+    (format!("{base}/Cargo.toml"), format!("{base}/target/release/record-log"))
+}
+
+/// Applies the origin decision through the record-log CLI; failures only warn on stderr.
+fn record_agent_origin(project_arg: &str, project_dir: &Path, raw_id: i64, agent_id: Option<&str>) {
+    let memo: Vec<String> = records::task_show(project_arg, raw_id, Some("메모"))
+        .ok()
+        .and_then(|v| v.get("lines").and_then(|l| l.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect())
+        .unwrap_or_default();
+    match origin_action(&memo, agent_id) {
+        Err(e) => return eprintln!("warning: {e}; agent origin not recorded for #{raw_id}"),
+        Ok(OriginAction::Skip) => return,
+        Ok(OriginAction::Warn(c)) => {
+            return eprintln!(
+                "warning: 메모 of #{raw_id} has no `에이전트 {c} :` line; the caller must run record-log start; nothing recorded"
+            )
+        }
+        Ok(OriginAction::Record) => {}
+    }
+    let args = agent_start_args(&util::path_str(project_dir), raw_id);
+    let home = std::env::var("HOME").unwrap_or_default();
+    let (manifest, built) = record_log_paths(&home);
+    // A stale built binary can lack `start`; always refresh it first (no-op when current).
+    match Command::new("cargo").args(["build", "--release", "--quiet", "--manifest-path", &manifest]).output() {
+        Ok(b) if b.status.success() => {}
+        Ok(b) => return eprintln!(
+            "warning: record-log build failed for #{raw_id}; agent origin not recorded: {}",
+            String::from_utf8_lossy(&b.stderr).trim()
+        ),
+        Err(e) => return eprintln!("warning: cargo not run for #{raw_id}; agent origin not recorded: {e}"),
+    }
+    match Command::new(&built).args(&args).output() {
+        Ok(out) if out.status.success() && !out.stdout.is_empty() => {
+            let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            eprintln!("agent-id: {id}");
+        }
+        Ok(out) if out.status.success() => eprintln!("warning: record-log start printed no agent ID for #{raw_id}"),
+        Ok(out) => eprintln!(
+            "warning: record-log start failed for #{raw_id}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => eprintln!("warning: record-log start not run for #{raw_id}: {e}"),
+    }
+}
+
 pub fn task_red(
     raw_id: i64,
     project_arg: &str,
@@ -709,6 +807,7 @@ pub fn task_red(
     tests: &[String],
     purpose: &str,
     detail: &str,
+    agent_id: Option<&str>,
 ) -> R<Value> {
     require_row("task-red", raw_id)?;
     let purpose = check_purpose(purpose)?;
@@ -731,6 +830,7 @@ pub fn task_red(
             format!("Table26 #{raw_id} has no goal; the main session writes it with task-goal first"),
         );
     }
+    record_agent_origin(project_arg, &project_dir, raw_id, agent_id);
     for name in tests {
         if !project_dir.join(name).is_file() {
             return api::fail(
@@ -1224,7 +1324,43 @@ pub fn task_complete(raw_id: i64, project_arg: &str) -> R<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{completed_items_in_text, confirmation_note, flow_summary_from_text, goal_lines};
+    use super::{record_log_paths, agent_start_args, origin_action, parse_agent_id, OriginAction, completed_items_in_text, confirmation_note, flow_summary_from_text, goal_lines};
+
+    #[test]
+    fn origin_skips_when_agent_char_line_exists() {
+        let memo = vec!["1. 에이전트 1 : t26_7 · codex://x".to_string()];
+        assert_eq!(origin_action(&memo, Some("00120000071")), Ok(OriginAction::Skip));
+    }
+
+    #[test]
+    fn origin_warns_when_agent_char_line_missing() {
+        let memo = vec!["에이전트 2 : reviewer · c".to_string()];
+        assert_eq!(origin_action(&memo, Some("0012000007A")), Ok(OriginAction::Warn('A')));
+        assert_eq!(origin_action(&[], Some("00120000071")), Ok(OriginAction::Warn('1')));
+    }
+
+    #[test]
+    fn origin_records_without_agent_id() {
+        let memo = vec!["에이전트 1 : t26_7 · c".to_string()];
+        assert_eq!(origin_action(&memo, None), Ok(OriginAction::Record));
+        assert_eq!(agent_start_args("/p", 7), vec!["start", "/p", "7", "--role", "t26_7"]);
+    }
+
+    #[test]
+    fn record_log_paths_under_home() {
+        let (m, b) = record_log_paths("/h");
+        assert!(m.ends_with("/record-log/Cargo.toml") && m.starts_with("/h/ai/skills"));
+        assert!(b.ends_with("target/release/record-log"));
+    }
+
+    #[test]
+    fn agent_id_parsing_and_invalid() {
+        assert_eq!(parse_agent_id("0012000007Z"), Ok('Z'));
+        for bad in ["", "0012000007", "001200000711", "00120000071a", "0012000007I", "0012000007O", "00120a0007Z", "0012000007-"] {
+            assert!(parse_agent_id(bad).is_err(), "{bad}");
+        }
+        assert!(origin_action(&[], Some("bad")).is_err());
+    }
 
     #[test]
     fn completion_items_require_number_marker_and_summary() {
