@@ -165,14 +165,17 @@ pub fn validate_task_fields(fields: &Map<String, Value>) -> R<()> {
             return fail("validation", format!("Table26 $H must be one of {}", TASK_STAGES.join(", ")));
         }
         if stage.as_str() == Some(DONE_STAGE) {
-            return fail("validation", "Table26 $H=완료 is written only by `task-complete RAW_ID --project DIR`");
+            return fail("validation", "Table26 $H=완료 is reserved for the user in Grist");
+        }
+        if stage.as_str() == Some("확인") {
+            return fail("validation", "Table26 $H=확인 is written only by the task check chain (task-complete)");
         }
         if stage.as_str() == Some(SUBMITTED_STAGE) {
             return fail("validation", "Table26 $H=검증 is written only by `task-submit RAW_ID --project DIR`");
         }
     }
     if fields.contains_key(GOAL_FIELD) {
-        return fail("validation", "Table26 $K (목표) is written only by `task-goal RAW_ID --project DIR --goal-file F`");
+        return fail("validation", "Table26 $K (목표) is written only by `task-add --goal-file F --summary S` or `task-goal RAW_ID --project DIR --goal-file F`");
     }
     Ok(())
 }

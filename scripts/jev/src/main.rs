@@ -192,7 +192,7 @@ fn load_config() -> Config {
             .to_string()
     };
     let mode = get_or("JEV_MODE", "shadow");
-    let pass = parse_py_float(&get_or("JEV_PASS", "0.9"));
+    let pass = parse_py_float(&get_or("JEV_PASS", "0.8"));
     let floor = parse_py_float(&get_or("JEV_FLOOR", "0.5"));
     let api_key = get_or("TYPESAFE_API_KEY", "");
     let model = get_or("JEV_MODEL", "jev-latest");

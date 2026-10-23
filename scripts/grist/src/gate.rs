@@ -1,8 +1,10 @@
-//! Stage gates (`gate`, `task-goal`, `task-red`, `task-submit`, `task-hidden`, `flow-wait`, `task-complete`).
+//! Stage gates (`gate`, `task-goal`, `task-red`, `task-ready`, `task-submit`, `task-hidden`, `flow-wait`).
 
 use crate::api::{self, R, DONE_STAGE, GOAL_FIELD, SUBMITTED_STAGE, TASK_TABLE};
 use crate::util;
 use crate::records::{self, NEW_FEATURE};
+use crate::task::{Step, TaskChain, TaskCtx};
+use crate::testrun;
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeSet, HashMap};
@@ -13,11 +15,17 @@ pub const WAITING_STAGE: &str = "확인";
 pub const DRAFT_STAGE: &str = "초안";
 pub const ERROR_STAGE: &str = "진단";
 pub const WORKING_STAGES: [&str; 3] = ["작업", "교정", "진단"];
-pub const ALWAYS_EDITABLE: [&str; 4] = [".ai", "Input.md", "AGENTS.md", "test/tmp"];
+pub const ALWAYS_EDITABLE: [&str; 3] = [".ai", "AGENTS.md", "test/tmp"];
 pub const OUTPUT_TAIL: usize = 4000;
 
 fn confirmation_note(summary: &str) -> String {
     util::head(summary, 300)
+}
+
+fn flow_wait_fields(summary: &str) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert("D".into(), Value::String(confirmation_note(summary)));
+    fields
 }
 
 fn flow_summary_from_text(text: &str, raw_id: i64) -> Option<String> {
@@ -101,7 +109,20 @@ impl Row {
     }
 }
 
+/// Row of a `dispatch-agent` worker (`T26_ROLE=worker`, `T26_ROW=<id>`).
+pub fn worker_row() -> Option<i64> {
+    worker_row_from(std::env::var("T26_ROLE").ok().as_deref(), std::env::var("T26_ROW").ok().as_deref())
+}
+
+fn worker_row_from(role: Option<&str>, row: Option<&str>) -> Option<i64> {
+    (role == Some("worker")).then_some(())?;
+    row?.trim().parse().ok()
+}
+
 pub fn actor() -> (String, Option<i64>) {
+    if let Some(row) = worker_row() {
+        return ("agent".into(), Some(row));
+    }
     let Ok(thread) = std::env::var("CODEX_THREAD_ID") else {
         return ("main".into(), None);
     };
@@ -390,12 +411,17 @@ pub fn test_record(title: &str, raw_id: i64, purpose: &str, ok: bool, detail: &s
     format!("\n#### {title} (#{raw_id})\n- 목적 : {purpose}\n- 결과 : {res}\n- 상세 : {det}\n")
 }
 
-pub fn red_data(project_dir: &Path, raw_id: i64) -> Map<String, Value> {
-    gate_load(project_dir, raw_id)
-        .get("red")
-        .and_then(|v| v.as_object())
-        .cloned()
-        .unwrap_or_default()
+pub fn preparation_of(state: &Map<String, Value>) -> Option<(&'static str, Map<String, Value>)> {
+    for key in ["ready", "red"] {
+        if let Some(data) = state.get(key).and_then(Value::as_object).filter(|v| !v.is_empty()) {
+            return Some((key, data.clone()));
+        }
+    }
+    None
+}
+
+fn preparation_data(project_dir: &Path, raw_id: i64) -> Option<(&'static str, Map<String, Value>)> {
+    preparation_of(&gate_load(project_dir, raw_id))
 }
 
 fn check_item_re() -> &'static Regex {
@@ -453,7 +479,14 @@ pub fn goal_errors(goal: &str) -> Vec<String> {
     if util::strip(goal).is_empty() {
         return vec!["empty goal".to_string()];
     }
-    Vec::new()
+    static LINE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let line_re = LINE.get_or_init(|| Regex::new(r"^(\d+\.\s*)?\[(연결|기능|수정)\]\s+\S").unwrap());
+    util::splitlines(goal)
+        .iter()
+        .map(|l| util::strip(l))
+        .filter(|l| !l.is_empty() && !line_re.is_match(l))
+        .map(|l| format!("goal line needs `N. [연결|기능|수정] <내용>`: {l}"))
+        .collect()
 }
 
 pub fn goal_of(project_dir: &Path, row: &Row) -> R<String> {
@@ -464,7 +497,7 @@ pub fn goal_of(project_dir: &Path, row: &Row) -> R<String> {
 }
 
 pub fn latest_request(project_dir: &Path) -> String {
-    let text = records::input_text(project_dir);
+    let text = records::latest_request_block(project_dir);
     util::tail(util::strip(&text), 6000)
 }
 
@@ -551,21 +584,6 @@ pub fn jev_failed(result: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn jev_brief(result: &Value) -> String {
-    if !util::truthy(result.get("ok")) {
-        return "Jev 판정 생략".to_string();
-    }
-    let failed = jev_failed(result).len();
-    let mode = result.get("mode").and_then(|v| v.as_str()).unwrap_or("");
-    let verdict = result.get("verdict").and_then(|v| v.as_str()).unwrap_or("");
-    let suffix = if failed > 0 {
-        format!(", 목표 {failed}줄 불일치")
-    } else {
-        String::new()
-    };
-    format!("Jev {mode} {verdict}{suffix}")
-}
-
 pub fn jev_summary(result: &Value) -> String {
     if !util::truthy(result.get("ok")) {
         let b = result.get("boundary").map(util::val_str).unwrap_or_else(|| "None".to_string());
@@ -584,21 +602,37 @@ pub fn jev_summary(result: &Value) -> String {
 
 // --- git scope --------------------------------------------------------------
 
-pub fn dirty(project_dir: &Path, base: &str) -> BTreeSet<String> {
-    let tracked = git(project_dir, &["diff", "--name-only", "--relative", base]).unwrap_or_default();
-    let untracked = git(project_dir, &["ls-files", "--others", "--exclude-standard"]).unwrap_or_default();
-    let gen_re = Regex::new(r"(^|/)(__pycache__|\.pytest_cache|node_modules|\.mypy_cache)(/|$)|\.pyc$").unwrap();
-    util::splitlines(&format!("{tracked}{untracked}"))
-        .into_iter()
-        .filter(|l| !l.is_empty() && !gen_re.is_match(l))
-        .collect()
+fn generated(path: &str) -> bool {
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(^|/)(__pycache__|\.pytest_cache|node_modules|\.mypy_cache)(/|$)|\.pyc$").unwrap())
+        .is_match(path)
 }
 
-pub fn changed_since(project_dir: &Path, base: &str, baseline: &BTreeSet<String>) -> BTreeSet<String> {
-    dirty(project_dir, base)
-        .into_iter()
-        .filter(|f| !baseline.contains(f))
-        .collect()
+/// The working tree (tracked and untracked, ignore rules applied) as one git tree hash. A copy of
+/// the real index keeps `git add -A` stat-based, and the real index is never touched.
+pub fn snapshot(project_dir: &Path) -> Option<String> {
+    let index = git(project_dir, &["rev-parse", "--git-path", "index"])?;
+    let index = project_dir.join(util::strip(&index));
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("grist-snapshot-{}-{nanos}.idx", std::process::id()));
+    if index.is_file() && std::fs::copy(&index, &tmp).is_err() {
+        return None;
+    }
+    let run = |args: &[&str]| {
+        Command::new("git").arg("-C").arg(project_dir).args(args).env("GIT_INDEX_FILE", &tmp)
+            .stdin(std::process::Stdio::null()).output().ok().filter(|o| o.status.success())
+    };
+    let tree = run(&["add", "-A", "."]).and_then(|_| run(&["write-tree"]))
+        .map(|o| util::strip(&String::from_utf8_lossy(&o.stdout)).to_string());
+    let _ = std::fs::remove_file(&tmp);
+    tree.filter(|t| !t.is_empty())
+}
+
+/// Files (relative to the project) that differ between the preparation snapshot and now.
+pub fn changed_since(project_dir: &Path, prepared: &str) -> BTreeSet<String> {
+    let Some(now) = snapshot(project_dir) else { return BTreeSet::new() };
+    let names = git(project_dir, &["diff", "--name-only", "--relative", prepared, &now]).unwrap_or_default();
+    util::splitlines(&names).into_iter().filter(|l| !l.is_empty() && !generated(l)).collect()
 }
 
 pub fn inside(path: &str, prefixes: &[String]) -> bool {
@@ -606,27 +640,6 @@ pub fn inside(path: &str, prefixes: &[String]) -> bool {
         let p = p.trim_end_matches('/');
         path == p || path.starts_with(&format!("{p}/"))
     })
-}
-
-pub fn run_test(command: &str, project_dir: &Path) -> (i32, String) {
-    match Command::new("/bin/sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(project_dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-    {
-        Ok(out) => {
-            let code = out.status.code().unwrap_or(1);
-            let combined = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            (code, util::tail(&combined, OUTPUT_TAIL))
-        }
-        Err(e) => (1, e.to_string()),
-    }
 }
 
 fn gate_err<T>(payload: Value) -> R<T> {
@@ -652,29 +665,52 @@ pub fn task_goal(raw_id: i64, project_arg: &str, goal_file: &str, summary: &str)
             format!("Table26 #{raw_id} $H={}; $K is written only while $H=초안", util::val_str(&row.h)),
         );
     }
+    let (goal, summary) = check_goal(&project_dir, Some(raw_id), goal_file, summary)?;
+    let mut out = store_goal(&project_dir, raw_id, &goal, &summary)?;
+    records::attach_warnings(&mut out, records::goal_conjunction_warnings(&goal));
+    Ok(out)
+}
+
+/// Pure one-line `$K` summary validation shared by `task-goal` and `task-add`.
+pub fn goal_summary(summary: &str) -> Result<String, String> {
     let summary = util::strip(summary);
     if summary.is_empty() || summary.contains('\n') {
-        return api::fail(
-            "goal",
-            "--summary is the one-line $K goal; the detailed lines go in --goal-file",
-        );
+        return Err("--summary is the one-line $K goal; the detailed lines go in --goal-file".into());
     }
+    Ok(summary.to_string())
+}
+
+/// Validates the goal before any Grist write: summary shape, goal format, J3 scope judgment.
+/// Returns the canonical goal and the one-line summary.
+pub fn check_goal(project_dir: &Path, raw_id: Option<i64>, goal_file: &str, summary: &str) -> R<(String, String)> {
+    let summary = match goal_summary(summary) {
+        Ok(s) => s,
+        Err(e) => return api::fail("goal", e),
+    };
     let raw_goal = std::fs::read_to_string(goal_file).map_err(api::other)?;
     let goal = records::canonical_goal(&raw_goal);
     let errors = goal_errors(&goal);
     if !errors.is_empty() {
         return gate_err(json!({"boundary": "goal", "raw_id": raw_id, "errors": errors}));
     }
-    let req = latest_request(&project_dir);
-    let judgment = jev("scope", Some(raw_id), &[("request", &req), ("goal", &goal)]);
+    let req = latest_request(project_dir);
+    let judgment = jev("scope", raw_id, &[("request", &req), ("goal", &goal)]);
     if jev_blocks(&judgment) {
         return gate_err(json!({
             "boundary": "goal",
             "raw_id": raw_id,
-            "reason": "goal not grounded in Input.md or incomplete",
+            "reason": "goal not grounded in the latest # 요청 or incomplete",
             "jev": judgment.get("items").cloned().unwrap_or(Value::Null)
         }));
     }
+    Ok((goal, summary))
+}
+
+/// Writes the checked goal to the changes item and `$K`.
+pub fn store_goal(project_dir: &Path, raw_id: i64, goal: &str, summary: &str) -> R<Value> {
+    let project_dir = project_dir.to_path_buf();
+    let goal = goal.to_string();
+    let summary = summary.to_string();
     if records::item_file(&project_dir, raw_id).is_none() {
         let fetched = api::get(TASK_TABLE, Some(&[raw_id]), None, Some(&["B".into(), "G".into()]))?;
         let fields = fetched
@@ -839,8 +875,9 @@ pub fn task_red(
             );
         }
     }
-    let (code, output) = run_test(command, &project_dir);
-    if code == 0 {
+    let run = testrun::run(command, &project_dir);
+    let output = run.output.clone();
+    if run.code == 0 {
         return gate_err(json!({
             "boundary": "red",
             "raw_id": raw_id,
@@ -857,41 +894,89 @@ pub fn task_red(
             "boundary": "red",
             "raw_id": raw_id,
             "reason": "the test fails before any assertion; write the function skeleton first",
-            "output_tail": output
+            "output": output
         }));
     }
-    let base = git(&project_dir, &["rev-parse", "HEAD"])
-        .map(|s| util::strip(&s).to_string())
-        .filter(|s| !s.is_empty());
-    let dirty_list: Vec<String> = base
-        .as_deref()
-        .map(|b| dirty(&project_dir, b).into_iter().collect())
-        .unwrap_or_default();
     let red = json!({
         "purpose": purpose,
         "test": command,
         "tests": tests,
         "paths": paths,
-        "base": base,
-        "dirty": dirty_list
+        "snapshot": snapshot(&project_dir)
     });
-    let mut state = Map::new();
-    state.insert("red".into(), red);
-    gate_save(&project_dir, raw_id, &state)?;
     let det_one = one_line(detail, &project_dir);
     let rec_detail = if !det_one.is_empty() {
-        det_one
+        format!("{det_one} {}", run.suffix())
     } else {
-        failure_detail(&output, &project_dir)
+        format!("{} {}", failure_detail(&output, &project_dir), run.suffix())
     };
-    records::append(&project_dir, &test_record("초안", raw_id, &purpose, false, &rec_detail))?;
-    if row.h_str() == DRAFT_STAGE || row.h_str() == "진단" {
-        let mut upd = Map::new();
-        upd.insert("H".into(), Value::String("작업".into()));
-        api::update(TASK_TABLE, raw_id, &upd)
-    } else {
-        Ok(row.to_json())
+    let mut ctx = TaskCtx {
+        project_dir: Some(project_dir),
+        raw_id,
+        stage: row.h_str().to_string(),
+        prep_kind: "red",
+        prepared: red.as_object().cloned().unwrap_or_default(),
+        purpose,
+        detail: rec_detail,
+        result: json!({"id": raw_id, "H": row.h}),
+        ..Default::default()
+    };
+    TaskChain::standard(Step::Ready).run(Step::Ready, &mut ctx)?;
+    Ok(ctx.result)
+}
+
+pub fn task_ready(
+    raw_id: i64,
+    project_arg: &str,
+    command: &str,
+    paths: &[String],
+    tests: &[String],
+    purpose: &str,
+    agent_id: Option<&str>,
+) -> R<Value> {
+    require_row("task-ready", raw_id)?;
+    let purpose = check_purpose(purpose)?;
+    let (project_dir, _, _) = records::owned(project_arg, raw_id)?;
+    let row = rows(&[raw_id])?.into_iter().next().unwrap();
+    if row.h_str() != DRAFT_STAGE && !WORKING_STAGES.contains(&row.h_str()) {
+        return api::fail(
+            "ready",
+            format!("Table26 #{raw_id} $H={}; task-ready needs 초안 or one of {}", util::val_str(&row.h), WORKING_STAGES.join(", ")),
+        );
     }
+    let goal = goal_of(&project_dir, &row)?;
+    if util::strip(&goal).is_empty() {
+        return api::fail("ready", format!("Table26 #{raw_id} has no goal; the main session writes it with task-goal first"));
+    }
+    if command.trim().is_empty() || paths.is_empty() || tests.is_empty() || paths.iter().any(|p| p.trim().is_empty() || p == ".") {
+        return api::fail("ready", "task-ready needs a focused --test command, --tests files, and explicit top-level --paths");
+    }
+    for name in tests {
+        if !project_dir.join(name).is_file() {
+            return api::fail("ready", format!("test file {name} does not exist under {}", util::path_str(&project_dir)));
+        }
+    }
+    record_agent_origin(project_arg, &project_dir, raw_id, agent_id);
+    let ready = json!({
+        "purpose": purpose,
+        "test": command,
+        "tests": tests,
+        "paths": paths,
+        "snapshot": snapshot(&project_dir)
+    });
+    let mut ctx = TaskCtx {
+        project_dir: Some(project_dir),
+        raw_id,
+        stage: row.h_str().to_string(),
+        prep_kind: "ready",
+        prepared: ready.as_object().cloned().unwrap_or_default(),
+        purpose,
+        detail: "원인 확정: 집중 테스트 등록(제출 시 실행)".into(),
+        result: json!({"id": raw_id, "H": row.h}),
+        ..Default::default()
+    };
+    TaskChain::standard(Step::Ready).run(Step::Ready, &mut ctx)?;
+    Ok(ctx.result)
 }
 
 pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
@@ -908,31 +993,40 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
             ),
         );
     }
-    let red = red_data(&project_dir, raw_id);
-    if red.is_empty() {
+    let Some((preparation_kind, prepared)) = preparation_data(&project_dir, raw_id) else {
         return gate_err(json!({
             "boundary": "submit",
             "raw_id": raw_id,
-            "reason": "no red record; run task-red with a failing test first"
+            "reason": "no preparation record; run task-ready for a confirmed cause or task-red when the cause needs reproduction"
         }));
-    }
-    let goal = goal_of(&project_dir, &row)?;
-    let test_cmd = red.get("test").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let (code, output) = run_test(&test_cmd, &project_dir);
-    if code != 0 {
+    };
+    records::check_goal_steps(&project_dir, raw_id)?;
+    let test_cmd = prepared.get("test").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let purpose = prepared
+        .get("purpose")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("제출 테스트")
+        .to_string();
+    let run = testrun::run(&test_cmd, &project_dir);
+    if run.code != 0 {
+        let detail = format!("{} {}", failure_detail(&run.output, &project_dir), run.suffix());
+        records::append_item(&project_dir, raw_id, &test_record("검증", raw_id, &purpose, false, &detail))?;
         return gate_err(json!({
             "boundary": "submit",
             "raw_id": raw_id,
-            "test": test_cmd,
-            "exit": code,
-            "output_tail": output
+            "exit": run.code,
+            "ms": run.ms,
+            "output": run.output
         }));
     }
-    if let Some(base) = red.get("base").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+    let changed = prepared.get("snapshot").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .map(|prepared_tree| changed_since(&project_dir, prepared_tree)).unwrap_or_default();
+    if prepared.get("snapshot").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
         let mut allowed: Vec<String> = ALWAYS_EDITABLE.iter().map(|s| s.to_string()).collect();
         let mut test_files: Vec<String> = Vec::new();
         for &other_id in &ids {
-            let detail = red_data(&project_dir, other_id);
+            let detail = preparation_data(&project_dir, other_id).map(|(_, data)| data).unwrap_or_default();
             if let Some(p_arr) = detail.get("paths").and_then(|v| v.as_array()) {
                 for p in p_arr.iter().filter_map(|v| v.as_str()) {
                     allowed.push(p.to_string());
@@ -946,12 +1040,6 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
         }
         let mut all_allowed = allowed.clone();
         all_allowed.extend(test_files);
-        let baseline: BTreeSet<String> = red
-            .get("dirty")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        let changed = changed_since(&project_dir, base, &baseline);
         let outside: Vec<String> = changed.iter().filter(|f| !inside(f, &all_allowed)).cloned().collect();
         if !outside.is_empty() {
             return gate_err(json!({
@@ -963,39 +1051,29 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
         }
     }
 
-    let judgment = jev("match", Some(raw_id), &[("goal", &goal), ("output", &output)]);
-    if jev_blocks(&judgment) {
-        let failed_joined = jev_failed(&judgment).join("; ");
-        let note = format!("{}. Jev 불일치: {}", records::next_number(row.i_str()), util::head(&failed_joined, 200));
-        let mut upd = Map::new();
-        upd.insert("H".into(), Value::String(ERROR_STAGE.into()));
-        upd.insert("I".into(), Value::String(note));
-        api::update(TASK_TABLE, raw_id, &upd)?;
-        return gate_err(json!({
-            "boundary": "submit",
-            "raw_id": raw_id,
-            "reason": format!("actual output does not meet the goal; row set to {ERROR_STAGE}"),
-            "jev": judgment.get("items").cloned().unwrap_or(Value::Null)
-        }));
+    let mut ctx = TaskCtx {
+        project_dir: Some(project_dir),
+        raw_id,
+        stage: row.h_str().to_string(),
+        prep_kind: preparation_kind,
+        prepared,
+        purpose,
+        detail: format!("집중 테스트 통과 {}", run.suffix()),
+        test: test_cmd,
+        output: run.output,
+        changed: changed.len(),
+        ..Default::default()
+    };
+    let goal_dir = ctx.project_dir.clone();
+    TaskChain::standard(Step::Submit).run(Step::Submit, &mut ctx)?;
+    if let Some(dir) = goal_dir {
+        if let Some(record) = records::write_goal_stage(&dir, raw_id, SUBMITTED_STAGE)? {
+            if let (Some(obj), Some(k)) = (ctx.result.as_object_mut(), record.get("fields").and_then(|f| f.get(GOAL_FIELD))) {
+                obj.insert("K".into(), k.clone());
+            }
+        }
     }
-    let purpose = red
-        .get("purpose")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("제출 테스트")
-        .to_string();
-    let mut state = gate_load(&project_dir, raw_id);
-    state.insert("red".into(), Value::Object(red));
-    state.insert("submit".into(), json!({"purpose": purpose, "test": test_cmd}));
-    state.insert("hidden".into(), json!([]));
-    gate_save(&project_dir, raw_id, &state)?;
-    records::append(
-        &project_dir,
-        &test_record("검증", raw_id, &purpose, true, &jev_brief(&judgment)),
-    )?;
-    let mut upd = Map::new();
-    upd.insert("H".into(), Value::String(SUBMITTED_STAGE.into()));
-    api::update(TASK_TABLE, raw_id, &upd)
+    Ok(ctx.result)
 }
 
 pub fn submitted_and_hidden(project_dir: &Path, raw_id: i64) -> (Option<Map<String, Value>>, Vec<Map<String, Value>>) {
@@ -1044,13 +1122,15 @@ pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str,
             "reason": "the hidden case must differ from the submitted test"
         }));
     }
-    let (code, output) = run_test(command, &project_dir);
+    let run = testrun::run(command, &project_dir);
+    let (code, output) = (run.code, run.output.clone());
     let mut state = gate_load(&project_dir, raw_id);
     let mut new_h = Map::new();
     new_h.insert("purpose".into(), Value::String(purpose.clone()));
     new_h.insert("test".into(), Value::String(command.to_string()));
     hidden.push(new_h);
     state.insert("submit".into(), Value::Object(submit));
+    state.remove("flow_wait");
     state.insert(
         "hidden".into(),
         Value::Array(hidden.into_iter().map(Value::Object).collect()),
@@ -1058,21 +1138,22 @@ pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str,
     gate_save(&project_dir, raw_id, &state)?;
     let ok = code == 0;
     let det_one = one_line(detail, &project_dir);
-    let rec_detail = if ok && detail.is_empty() {
-        "-".to_string()
-    } else if !det_one.is_empty() {
-        det_one
+    let rec_detail = if !det_one.is_empty() {
+        format!("{det_one} {}", run.suffix())
+    } else if ok {
+        format!("통과 {}", run.suffix())
     } else {
-        failure_detail(&output, &project_dir)
+        format!("{} {}", failure_detail(&output, &project_dir), run.suffix())
     };
-    records::append(&project_dir, &test_record("확인", raw_id, &purpose, ok, &rec_detail))?;
+    records::append_item(&project_dir, raw_id, &test_record("확인", raw_id, &purpose, ok, &rec_detail))?;
     if !ok {
         return gate_err(json!({
             "boundary": "hidden",
             "raw_id": raw_id,
             "purpose": purpose,
             "exit": code,
-            "output_tail": output
+            "ms": run.ms,
+            "output": output
         }));
     }
     Ok(json!({"id": raw_id, "hidden": purpose, "result": "성공"}))
@@ -1126,10 +1207,15 @@ fn flow_judged(project_dir: &Path, ids: &[i64]) -> Vec<(String, Option<String>)>
     judged
 }
 
+fn flow_submitted_ids(rows: &[Row]) -> Vec<i64> {
+    rows.iter().filter(|row| row.h_str() == SUBMITTED_STAGE).map(|row| row.id).collect()
+}
+
 pub fn flow_wait(project_arg: &str) -> R<Value> {
     require_main("flow-wait")?;
     let (project_dir, _, ids) = records::project(project_arg)?;
     let fetched = rows(&ids)?;
+    let submitted_ids = flow_submitted_ids(&fetched);
     let allowed_flow = [SUBMITTED_STAGE, WAITING_STAGE, DONE_STAGE];
     let open_rows: Vec<Value> = fetched
         .iter()
@@ -1159,17 +1245,18 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
         };
         for case in [submitted.as_ref().unwrap_or(&fallback_sub), last_hidden] {
             let cmd_opt = case.get("test").and_then(|v| v.as_str());
-            let (code_opt, output) = match cmd_opt {
+            let (code_opt, output, took) = match cmd_opt {
                 Some(c) => {
-                    let (code, out) = run_test(c, &project_dir);
-                    (Some(code), out)
+                    let run = testrun::run(c, &project_dir);
+                    let took = run.suffix();
+                    (Some(run.code), run.output, took)
                 }
-                None => (None, "no submit record".to_string()),
+                None => (None, "no submit record".to_string(), String::new()),
             };
             if code_opt != Some(0) {
                 let purpose_str = case.get("purpose").map(util::val_str).unwrap_or_default();
                 let note = format!(
-                    "{}. 메인 재실행 실패: {} / {}",
+                    "{}. 메인 재실행 실패: {} / {} {took}",
                     records::next_number(row.i_str()),
                     purpose_str,
                     failure_detail(&output, &project_dir)
@@ -1182,7 +1269,7 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
                     "id": row.id,
                     "test": cmd_opt,
                     "exit": code_opt,
-                    "output_tail": output
+                    "output": output
                 }));
                 break;
             }
@@ -1203,7 +1290,10 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
         }));
     }
 
-    let flow = flow_judged(&project_dir, &ids);
+    if submitted_ids.is_empty() {
+        return Ok(Value::Array(Vec::new()));
+    }
+    let flow = flow_judged(&project_dir, &submitted_ids);
     if flow.is_empty() || flow.iter().any(|(_, v)| v.is_none()) {
         let missing_ev: Vec<String> = flow
             .iter()
@@ -1212,7 +1302,7 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
             .collect();
         return gate_err(json!({
             "boundary": "flow",
-            "reason": "a `#### 확인 (#id)` written after the latest `#### 검증 (#id)` needs `- [x] <목적>` items each followed by `결과 : 성공` and `상세 : <actual value>`",
+            "reason": "a `#### 확인 (#id)` written after the latest `#### 검증 (#id)` needs `- [x] <목적>` items each followed by `결과 : 성공` and `상세 : <actual value>`; record it with `grist task-confirm` (do not edit .ai/changes) and check it with `grist task-show <id> --section 확인`",
             "missing_evidence": missing_ev
         }));
     }
@@ -1225,7 +1315,7 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
     if summaries.len() != fetched.iter().filter(|row| row.h_str() == SUBMITTED_STAGE).count() {
         return gate_err(json!({
             "boundary": "flow",
-            "reason": "each 검증 row needs `- 요약 : [표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>` in its latest `#### 확인 (#id)`"
+            "reason": "each 검증 row needs `- 요약 : [표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>` in its latest `#### 확인 (#id)`; record it with `grist task-confirm --summary` (do not edit .ai/changes)"
         }));
     }
 
@@ -1233,11 +1323,11 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
     for row in &fetched {
         if row.h_str() == SUBMITTED_STAGE {
             let summary = summaries.iter().find(|(id, _)| *id == row.id).map(|(_, text)| text.as_str()).unwrap();
-            let note = confirmation_note(summary);
-            let mut upd = Map::new();
-            upd.insert("H".into(), Value::String(WAITING_STAGE.into()));
-            upd.insert("D".into(), Value::String(util::head(&note, 300)));
+            let upd = flow_wait_fields(summary);
             result.push(api::update(TASK_TABLE, row.id, &upd)?);
+            let mut state = gate_load(&project_dir, row.id);
+            state.insert("flow_wait".into(), Value::Bool(true));
+            gate_save(&project_dir, row.id, &state)?;
         }
     }
     if !result.is_empty() {
@@ -1246,85 +1336,75 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
     Ok(Value::Array(result))
 }
 
-fn completed_items_in_text(text: &str, raw_id: i64) -> Result<Vec<String>, String> {
-    let heading = Regex::new(&format!(r"^#+\s*완료\s+\(#{raw_id}\)\s*$")).unwrap();
-    let item_re = Regex::new(r"^\s*\d+\.\s*\[([^\]]+)\]\s*(.*?)\s*$").unwrap();
-    let list_re = Regex::new(r"^\s*(?:\d+\.|-\s*\[)").unwrap();
-    let mut items = Vec::new();
-    for lines in records::sections_in(text, &heading) {
-        for line in lines {
-            if let Some(caps) = item_re.captures(&line) {
-                let tag = caps.get(1).unwrap().as_str().trim();
-                let summary = caps.get(2).unwrap().as_str().trim();
-                if !tag.is_empty() && !summary.is_empty() {
-                    items.push(line);
-                } else {
-                    return Err(format!("empty completion marker or summary: {line}"));
-                }
-            } else if list_re.is_match(&line) {
-                return Err(format!("completion memo must be a numbered `[symbol] summary` line: {line}"));
-            }
-        }
-    }
-    Ok(items)
-}
-
-fn final_completed_list(project_dir: &Path, raw_id: i64) -> Result<Vec<String>, String> {
-    let mut items = Vec::new();
-    for record in util::glob(&project_dir.join(".ai").join("changes"), &format!("{}.", util::today()), ".md") {
-        let Ok(text) = std::fs::read_to_string(&record) else {
-            continue;
-        };
-        items.extend(completed_items_in_text(&text, raw_id)?);
-    }
-    Ok(items)
-}
-
-pub fn task_complete(raw_id: i64, project_arg: &str) -> R<Value> {
-    require_main("task-complete")?;
-    let (project_dir, _, _) = records::owned(project_arg, raw_id)?;
-    let row = rows(&[raw_id])?.into_iter().next().unwrap();
-    let goal = goal_of(&project_dir, &row)?;
-    if util::strip(&goal).is_empty() {
-        return api::fail(
-            "validation",
-            format!("Table26 #{raw_id} has no goal"),
-        );
-    }
-    let done_items = match final_completed_list(&project_dir, raw_id) {
-        Ok(items) => items,
-        Err(reason) => return gate_err(json!({
-            "boundary": "completion",
-            "raw_id": raw_id,
-            "reason": reason
-        })),
-    };
-    if done_items.is_empty() {
-        return gate_err(json!({
-            "boundary": "completion",
-            "raw_id": raw_id,
-            "record": format!(".ai/changes/{}.*.md #### 완료 (#{raw_id})", util::today())
-        }));
-    }
-    let done_out = done_items.join("\n");
-    let judgment = jev("match", Some(raw_id), &[("goal", &goal), ("output", &done_out)]);
-    if jev_blocks(&judgment) {
-        return gate_err(json!({
-            "boundary": "completion",
-            "raw_id": raw_id,
-            "reason": "jev judged remaining work before completion",
-            "jev": judgment.get("items").cloned().unwrap_or(Value::Null)
-        }));
-    }
-    let mut upd = Map::new();
-    upd.insert("H".into(), Value::String(DONE_STAGE.into()));
-    upd.insert("F".into(), Value::Number(util::today_epoch().into()));
-    api::update(TASK_TABLE, raw_id, &upd)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{record_log_paths, agent_start_args, origin_action, parse_agent_id, OriginAction, completed_items_in_text, confirmation_note, flow_summary_from_text, goal_lines};
+    #[test]
+    fn worker_row_needs_worker_role_and_numeric_row() {
+        assert_eq!(super::worker_row_from(Some("worker"), Some("307")), Some(307));
+        assert_eq!(super::worker_row_from(Some("main"), Some("307")), None);
+        assert_eq!(super::worker_row_from(Some("worker"), None), None);
+        assert_eq!(super::worker_row_from(Some("worker"), Some("x")), None);
+    }
+
+    use super::{record_log_paths, agent_start_args, origin_action, parse_agent_id, OriginAction, Row, flow_submitted_ids, flow_wait_fields, confirmation_note, flow_summary_from_text, goal_lines, preparation_of};
+    use serde_json::{json, Map, Value};
+    use std::path::Path;
+
+    #[test]
+    fn flow_wait_selects_only_submitted_row_from_completed_list() {
+        let row = |id, stage| Row { id, h: json!(stage), d: Value::Null, i: Value::Null, k: String::new() };
+        let rows = vec![row(234, "완료"), row(269, "확인"), row(276, "검증")];
+        assert_eq!(flow_submitted_ids(&rows), vec![276]);
+    }
+
+    #[test]
+    fn flow_wait_writes_summary_without_advancing_stage() {
+        let fields = flow_wait_fields("[🏗️] 입력 ⇒ 확인 증거");
+        assert_eq!(fields.get("D"), Some(&json!("[🏗️] 입력 ⇒ 확인 증거")));
+        assert!(!fields.contains_key("H"));
+    }
+
+    #[test]
+    fn preparation_accepts_ready_or_red_and_prefers_latest_ready_record() {
+        let mut state = Map::new();
+        assert!(preparation_of(&state).is_none());
+        state.insert("red".into(), json!({"test": "exit 1", "paths": ["src"]}));
+        assert_eq!(preparation_of(&state).unwrap().0, "red");
+        state.insert("ready".into(), json!({"test": "printf ready", "paths": ["src"]}));
+        let (kind, data) = preparation_of(&state).unwrap();
+        assert_eq!(kind, "ready");
+        assert_eq!(data.get("test"), Some(&Value::String("printf ready".into())));
+        let run = crate::testrun::run(data.get("test").unwrap().as_str().unwrap(), Path::new("."));
+        assert_eq!((run.code, run.output.as_str()), (0, "ready"));
+    }
+
+    #[test]
+    fn snapshot_reports_only_files_changed_after_preparation() {
+        let dir = std::env::temp_dir().join(format!("grist-snapshot-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("sub/a.txt"), "a").unwrap();
+        std::fs::write(dir.join("sub/keep.txt"), "k").unwrap();
+        git(&["add", "-A"]);
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+        std::fs::write(dir.join("sub/keep.txt"), "dirty before").unwrap();
+        let project = dir.join("sub");
+        let prepared = super::snapshot(&project).unwrap();
+        assert_eq!(prepared.len(), 40);
+        assert!(super::changed_since(&project, &prepared).is_empty());
+        std::fs::write(project.join("a.txt"), "changed").unwrap();
+        std::fs::write(project.join("new.txt"), "n").unwrap();
+        std::fs::create_dir_all(project.join("__pycache__")).unwrap();
+        std::fs::write(project.join("__pycache__/x.pyc"), "c").unwrap();
+        let changed: Vec<String> = super::changed_since(&project, &prepared).into_iter().collect();
+        assert_eq!(changed, vec!["a.txt", "new.txt"]);
+        let index = std::fs::read(dir.join(".git/index")).unwrap();
+        let _ = super::snapshot(&project);
+        assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), index, "the real index stays untouched");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn origin_skips_when_agent_char_line_exists() {
@@ -1363,31 +1443,6 @@ mod tests {
     }
 
     #[test]
-    fn completion_items_require_number_marker_and_summary() {
-        let text = "#### 완료 (#7)\n1. [🏗️] 구조 변경\n2. [✨] 새 기능\n3. [🌍] API 연결\n4. [⭕️] 누락 결과 수정\n5. [🚀] 흐름 개선\n#### 완료 (#8)\n1. [◇] 다른 행\n";
-        assert_eq!(
-            completed_items_in_text(text, 7).unwrap(),
-            vec![
-                "1. [🏗️] 구조 변경",
-                "2. [✨] 새 기능",
-                "3. [🌍] API 연결",
-                "4. [⭕️] 누락 결과 수정",
-                "5. [🚀] 흐름 개선",
-            ]
-        );
-        for invalid in ["1. [] 빈 표시", "- [✨] 번호 없는 항목", "1. [✨] "] {
-            let text = format!("#### 완료 (#7)\n{invalid}\n");
-            assert!(completed_items_in_text(&text, 7).is_err(), "{invalid}");
-        }
-    }
-
-    #[test]
-    fn completion_items_accept_a_nonempty_marker_after_valid_item() {
-        let text = "#### 완료 (#7)\n1. [✨] 새 기능\n2. [◆] 구현 요약\n";
-        assert_eq!(completed_items_in_text(text, 7).unwrap().len(), 2);
-    }
-
-    #[test]
     fn confirmation_note_describes_implemented_path_without_step_number() {
         assert_eq!(
             confirmation_note("[✨] 입력 ⇒ 저장 결과"),
@@ -1415,5 +1470,25 @@ mod tests {
                 ("수정".to_string(), "오류 해결 ▷ 정상".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn malformed_goal_is_rejected_before_any_api_call() {
+        assert!(super::goal_summary("  ").is_err());
+        assert!(super::goal_summary("a\nb").is_err());
+        assert_eq!(super::goal_summary(" 한 줄 ").unwrap(), "한 줄");
+        let dir = std::env::temp_dir().join(format!("grist-check-goal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("goal.md");
+        std::fs::write(&empty, "\n").unwrap();
+        assert!(super::check_goal(&dir, None, empty.to_str().unwrap(), "요약").is_err());
+        assert!(super::check_goal(&dir, None, empty.to_str().unwrap(), "").is_err());
+        let untagged = dir.join("untagged.md");
+        std::fs::write(&untagged, "목표 아님\n").unwrap();
+        assert!(super::check_goal(&dir, None, untagged.to_str().unwrap(), "요약").is_err());
+        let errors = super::goal_errors("1. [기능] a ▷ b\n목표 아님\n[수정] c");
+        println!("goal_errors ▷ {errors:?}");
+        assert_eq!(errors.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

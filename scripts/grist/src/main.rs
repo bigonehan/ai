@@ -1,9 +1,5 @@
-pub mod api;
-pub mod gate;
-pub mod records;
-pub mod util;
-
-use api::{Exit, R, PROJECT_TABLE, TASK_TABLE};
+use grist::api::{self, Exit, R, PROJECT_TABLE, TASK_TABLE};
+use grist::{gate, records, util};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
@@ -202,7 +198,17 @@ fn run(argv: &[String]) -> R<Value> {
             let row_id = args.pos_i64(0, "row_id")?;
             let fields = parse_fields_obj(args.flag_req("fields")?, "--fields")?;
             api::validate_task_fields(&fields)?;
-            api::update(TASK_TABLE, row_id, &fields)
+            records::check_symbol_fields(&fields)?;
+            records::check_diagnosis_fields(&fields)?;
+            let mut record = api::update(TASK_TABLE, row_id, &fields)?;
+            if fields.get("H").and_then(|v| v.as_str()) == Some(gate::ERROR_STAGE) {
+                if let Some(project_dir) = records::hook_project(row_id) {
+                    if let Some(rewritten) = records::write_goal_stage(&project_dir, row_id, gate::ERROR_STAGE)? {
+                        record = rewritten;
+                    }
+                }
+            }
+            Ok(with_row_state(record))
         }
         "task-add" => {
             let fields = parse_fields_obj(args.flag_req("fields")?, "--fields")?;
@@ -215,7 +221,31 @@ fn run(argv: &[String]) -> R<Value> {
                 }
             }
             let judge = args.flag_opt("judge").unwrap_or("");
-            records::task_add(fields, project, kind, judge)
+            let goal_args = match task_add_goal_args(project, args.flag_opt("goal-file"), args.flag_opt("summary")) {
+                Ok(g) => g,
+                Err(msg) => return usage_error(&msg),
+            };
+            let checked = match (project, goal_args) {
+                (Some(p), Some((file, summary))) => {
+                    Some(gate::check_goal(&util::resolve(std::path::Path::new(p)), None, file, summary)?)
+                }
+                _ => None,
+            };
+            let warnings = checked.as_ref().map(|(goal, _)| records::goal_conjunction_warnings(goal)).unwrap_or_default();
+            let mut added = records::task_add(fields, project, kind, judge)?;
+            if let (Some(p), Some((goal, summary)), Some(id)) = (project, checked, added.get("id").and_then(|v| v.as_i64())) {
+                gate::store_goal(&util::resolve(std::path::Path::new(p)), id, &goal, &summary)?;
+            }
+            if let Some(id) = added.get("id").and_then(|v| v.as_i64()) {
+                let keys: Vec<String> = ROW_STATE_KEYS.iter().map(|k| k.to_string()).collect();
+                if let Some(rec) = api::get(TASK_TABLE, Some(&[id]), None, Some(&keys))?.into_iter().next() {
+                    if let (Some(obj), Some(f)) = (added.as_object_mut(), rec.get("fields")) {
+                        obj.insert("row".into(), Value::String(row_state(f)));
+                    }
+                }
+            }
+            records::attach_warnings(&mut added, warnings);
+            Ok(added)
         }
         "gate" => {
             let default_cwd = cwd_str();
@@ -223,12 +253,36 @@ fn run(argv: &[String]) -> R<Value> {
             let row = args.flag_i64_opt("row")?;
             gate::gate(cwd, row)
         }
+        "lists" => {
+            let project = args.flag_req("project")?;
+            let lists = grist::task::lists_text(&util::resolve(std::path::Path::new(project)));
+            if lists.is_empty() {
+                return api::fail("records", "no `# 작업`/`# 완료` list in .ai/changes");
+            }
+            println!("{lists}");
+            std::process::exit(0);
+        }
+        "request" => {
+            let project = args.flag_req("project")?;
+            let block = records::latest_request_block(&util::resolve(std::path::Path::new(project)));
+            if block.is_empty() {
+                return api::fail("records", "no `# 요청` block in .ai/changes; record the request with request-record");
+            }
+            println!("{block}");
+            std::process::exit(0);
+        }
+        "goal" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            println!("{}", records::goal_text(project, row_id)?);
+            std::process::exit(0);
+        }
         "task-goal" => {
             let row_id = args.pos_i64(0, "row_id")?;
             let project = args.flag_req("project")?;
             let goal_file = args.flag_req("goal-file")?;
             let summary = args.flag_req("summary")?;
-            gate::task_goal(row_id, project, goal_file, summary)
+            Ok(with_row_state(gate::task_goal(row_id, project, goal_file, summary)?))
         }
         "task-red" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -240,6 +294,16 @@ fn run(argv: &[String]) -> R<Value> {
             let detail = args.flag_opt("detail").unwrap_or("");
             let agent_id = args.flag_opt("agent-id");
             gate::task_red(row_id, project, test, &paths, &tests, purpose, detail, agent_id)
+        }
+        "task-ready" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            let test = args.flag_req("test")?;
+            let tests = split_csv(args.flag_req("tests")?);
+            let paths = split_csv(args.flag_req("paths")?);
+            let purpose = args.flag_req("purpose")?;
+            let agent_id = args.flag_opt("agent-id");
+            gate::task_ready(row_id, project, test, &paths, &tests, purpose, agent_id)
         }
         "task-hidden" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -258,11 +322,6 @@ fn run(argv: &[String]) -> R<Value> {
             let project = args.flag_req("project")?;
             gate::flow_wait(project)
         }
-        "task-complete" => {
-            let row_id = args.pos_i64(0, "row_id")?;
-            let project = args.flag_req("project")?;
-            gate::task_complete(row_id, project)
-        }
         "task-show" => {
             let row_id = args.pos_i64(0, "row_id")?;
             let project = args.flag_req("project")?;
@@ -274,7 +333,11 @@ fn run(argv: &[String]) -> R<Value> {
             let project = args.flag_req("project")?;
             let step = args.flag_req("step")?;
             let text = args.flag_req("text")?;
-            records::task_step(project, row_id, step, text)
+            let goal_arg = args.flag_req("goal")?;
+            let Ok(goal) = goal_arg.parse::<usize>() else {
+                return api::fail("validation", format!("--goal must be a goal line number, got `{goal_arg}`"));
+            };
+            records::task_step(project, row_id, step, text, goal)
         }
         "task-confirm" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -282,7 +345,12 @@ fn run(argv: &[String]) -> R<Value> {
             let summary = args.flag_req("summary")?;
             let check = args.flag_req("check")?;
             let detail = args.flag_req("detail")?;
-            records::task_confirm(project, row_id, summary, check, detail)
+            let evidence_file = args.flag_req("evidence")?;
+            let evidence = match std::fs::read_to_string(evidence_file) {
+                Ok(text) => text,
+                Err(e) => return api::fail("validation", format!("--evidence {evidence_file}: {e}")),
+            };
+            records::task_confirm(project, row_id, summary, check, detail, &evidence)
         }
         "request-record" => {
             let project = args.flag_req("project")?;
@@ -299,6 +367,41 @@ fn run(argv: &[String]) -> R<Value> {
         }
         other => usage_error(&format!("invalid choice: '{other}'")),
     }
+}
+
+/// `task-add --project` needs both `--goal-file` and `--summary`; without `--project` neither is used.
+fn task_add_goal_args<'a>(project: Option<&str>, goal_file: Option<&'a str>, summary: Option<&'a str>) -> Result<Option<(&'a str, &'a str)>, String> {
+    if project.is_none() {
+        return Ok(None);
+    }
+    match (goal_file, summary) {
+        (Some(f), Some(s)) => Ok(Some((f, s))),
+        _ => Err("task-add --project needs --goal-file F and --summary S (goal is recorded with the row)".into()),
+    }
+}
+
+/// Columns a caller must know before the next step; the write commands print them so no `grist task` re-read is needed.
+const ROW_STATE_KEYS: [&str; 4] = ["H", "I", "J", "K"];
+
+/// `$H`·`$I`·`$J`·`$K` of a Table26 row's fields as one line.
+fn row_state(fields: &Value) -> String {
+    ROW_STATE_KEYS
+        .iter()
+        .map(|k| {
+            let v = fields.get(*k).filter(|v| !v.is_null()).map(util::val_str).unwrap_or_default();
+            format!("{k}={}", v.replace('\n', " / "))
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+/// Adds the `row` state line to a returned Table26 record.
+fn with_row_state(mut record: Value) -> Value {
+    let line = record.get("fields").map(row_state);
+    if let (Some(line), Some(obj)) = (line, record.as_object_mut()) {
+        obj.insert("row".into(), Value::String(line));
+    }
+    record
 }
 
 fn main() {
@@ -319,5 +422,36 @@ fn main() {
             eprintln!("{err}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn row_state_prints_stage_error_cause_goal_line() {
+        let rec = serde_json::json!({"id": 1, "fields": {"H": "진단", "I": "1. 오류", "J": "1. [⭕️] a\n2. [🛣] b", "K": "목표", "B": "x"}});
+        let line = super::with_row_state(rec)["row"].as_str().unwrap().to_string();
+        println!("{line}");
+        assert_eq!(line, "H=진단 | I=1. 오류 | J=1. [⭕️] a / 2. [🛣] b | K=목표");
+    }
+
+    #[test]
+    fn public_update_commands_cannot_write_confirmation_stage() {
+        let fields = "{\"H\":\"확인\"}";
+        for args in [
+            vec!["task-update", "276", "--fields", fields],
+            vec!["update", "Table26", "--id", "276", "--fields", fields],
+        ] {
+            let result = super::run(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+            assert!(matches!(result, Err(super::Exit::Fail(_, message)) if message.contains("task check chain")));
+        }
+    }
+
+    #[test]
+    fn task_add_requires_goal_args_with_project() {
+        assert!(super::task_add_goal_args(Some("p"), None, Some("s")).is_err());
+        assert!(super::task_add_goal_args(Some("p"), Some("f"), None).is_err());
+        assert_eq!(super::task_add_goal_args(Some("p"), Some("f"), Some("s")), Ok(Some(("f", "s"))));
+        assert_eq!(super::task_add_goal_args(None, None, None), Ok(None));
     }
 }

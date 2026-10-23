@@ -57,10 +57,9 @@ fn is_ignored_word(word: &str) -> bool {
             | "tree"
             | "extensions"
             | "project"
-            | "work_project"
-            | "work-project"
+            | "manage_project"
+            | "manage-project"
             | "AGENTS.md"
-            | "Input.md"
     )
 }
 

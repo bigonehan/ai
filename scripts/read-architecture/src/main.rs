@@ -1,4 +1,4 @@
-// Start-of-work structure check for work-project (crate read-architecture).
+// Start-of-work structure check for manage-project (crate read-architecture).
 // Build: cargo build --release -p read-architecture --manifest-path ~/ai/scripts/Cargo.toml
 use std::collections::{HashMap, HashSet};
 use std::env;
@@ -151,6 +151,7 @@ fn search_targets(project: &Path, named_folders: &[String]) -> Vec<String> {
         if !top.is_empty()
             && !top.starts_with('.')
             && project.join(top).exists()
+            && !project.join(top).join(".ai/docs/architecture.md").exists()
             && seen.insert(top.to_owned())
         {
             targets.push(top.to_owned());
@@ -165,6 +166,23 @@ fn search_targets(project: &Path, named_folders: &[String]) -> Vec<String> {
         targets.push(".".to_owned());
     }
     targets
+}
+
+/// `~/` paths named in backticks under `# 도메인`: sources outside the project that its work edits.
+fn ai_sources(doc: &str, home: &Path) -> Vec<PathBuf> {
+    let domain = doc.split("\n# 구조").next().unwrap_or("");
+    let mut out = Vec::new();
+    for (i, part) in domain.split('`').enumerate() {
+        if i % 2 == 1 {
+            if let Some(rel) = part.strip_prefix("~/") {
+                let path = home.join(rel.trim_end_matches('/'));
+                if !rel.is_empty() && path.is_dir() && !out.contains(&path) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out
 }
 
 struct Score {
@@ -298,7 +316,10 @@ fn run() -> Result<(), String> {
     }
 
     if !words.is_empty() {
-        let targets = search_targets(&project, &named);
+        let mut targets = search_targets(&project, &named);
+        let home = PathBuf::from(env::var("HOME").unwrap_or_default());
+        let home_prefix = format!("{}/", home.display());
+        targets.extend(ai_sources(&doc, &home).iter().map(|p| p.display().to_string()));
         let mut score: HashMap<String, Score> = HashMap::new();
         let mut order = Vec::new();
         for word in &words {
@@ -337,7 +358,11 @@ fn run() -> Result<(), String> {
                 });
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 if let Some((file, count)) = line.rsplit_once(':') {
-                    let file = file.strip_prefix("./").unwrap_or(file).to_owned();
+                    let file = file.strip_prefix("./").unwrap_or(file);
+                    let file = match file.strip_prefix(home_prefix.as_str()) {
+                        Some(rel) if !home_prefix.is_empty() && home_prefix != "/" => format!("~/{rel}"),
+                        _ => file.to_owned(),
+                    };
                     if !score.contains_key(&file) {
                         order.push(file.clone());
                     }
@@ -388,6 +413,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_sources_reads_home_paths_from_domain() {
+        let home = env::temp_dir().join(format!("ra-home-{}", process::id()));
+        fs::create_dir_all(home.join("ai/skills")).unwrap();
+        fs::create_dir_all(home.join("ai/scripts")).unwrap();
+        let doc = "# 도메인\n- 외부 원본 : 규칙 `~/ai/rules`, Skill `~/ai/skills`·`~/ai/scripts/`\n# 구조\n- `~/ai/other` : x\n";
+        let got: Vec<String> = ai_sources(doc, &home).iter().map(|p| p.strip_prefix(&home).unwrap().display().to_string()).collect();
+        println!("ai_sources ▷ {}", got.join(","));
+        assert_eq!(got, vec!["ai/skills", "ai/scripts"]);
+        fs::create_dir_all(home.join("sub/.ai/docs")).unwrap();
+        fs::write(home.join("sub/.ai/docs/architecture.md"), "# 도메인\n").unwrap();
+        fs::create_dir_all(home.join("test")).unwrap();
+        let targets = search_targets(&home, &["sub".to_owned(), "test".to_owned()]);
+        println!("search_targets ▷ {}", targets.join(","));
+        assert_eq!(targets, vec!["test"]);
+        let _ = fs::remove_dir_all(&home);
+    }
 
     #[test]
     fn parses_structure_folders_and_obsidian_doc() {

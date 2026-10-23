@@ -6,9 +6,10 @@ members = [
     "jev",
     "read-architecture",
     "architecture-context",
-    "completion-gate",
+    "task-complete",
     "initialization-gate",
     "agy-hook",
+    "dispatch-agent",
 ]
 
 [profile.release]

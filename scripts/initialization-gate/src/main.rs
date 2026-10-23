@@ -181,8 +181,8 @@ fn main() {
 
     let reason = format!(
         "[{}/{MAX_BLOCKS}] 종료 차단: {project_dir}는 `AGENTS.md`에 `# 상태`(`### grist` `ID :`) 헤더가 없는 미초기화 프로젝트인데 변경 파일이 있어요. \
-`initialize-project` Skill로 Table7 행·Obsidian 문서·`# 상태` 헤더를 만들고, 현재 요청을 `request-record`·`task-add`·`task-goal`로 기록한 뒤 \
-`work-project` 흐름을 이어가세요.",
+`manage-project` 초기화 절차(`references/initialize.md`)로 Table7 행·Obsidian 문서·`# 상태` 헤더를 만들고, 현재 요청을 `request-record`·`task-add`·`task-goal`로 기록한 뒤 \
+`manage-project` 흐름을 이어가세요.",
         blocks + 1
     );
     let mut out_obj = Vec::new();

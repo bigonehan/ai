@@ -1,6 +1,6 @@
 [package]
 name = "initialization-gate"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 
 [dependencies]

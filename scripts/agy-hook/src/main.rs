@@ -73,7 +73,7 @@ pub fn pre_edit_output(gate_stdout: &str) -> String {
     if let Some(dir) = v.get("uninitialized").filter(|x| x.truthy()).and_then(Value::as_str) {
         return pre_tool(
             "deny",
-            &format!("미초기화 프로젝트({dir})예요. 수정 전에 initialize-project 절차로 Table7·Obsidian·# 상태 헤더를 만들고 request-record·task-add·task-goal로 요청을 기록하세요."),
+            &format!("미초기화 프로젝트({dir})예요. 수정 전에 manage-project 초기화 절차로 Table7·Obsidian·# 상태 헤더를 만들고 request-record·task-add·task-goal로 요청을 기록하세요."),
         );
     }
     let open = match v.get("rows") {
@@ -85,7 +85,7 @@ pub fn pre_edit_output(gate_stdout: &str) -> String {
     } else {
         pre_tool(
             "deny",
-            "열린 Table26 작업 행이 없어요. 수정 전에 work-project 절차로 request-record·task-add·task-goal을 실행해 작업 행을 만드세요.",
+            "열린 Table26 작업 행이 없어요. 수정 전에 manage-project 절차로 request-record·task-add·task-goal을 실행해 작업 행을 만드세요.",
         )
     }
 }
@@ -141,9 +141,7 @@ fn main() {
                 Ok("{}".into())
             } else {
                 let snake = to_snake(&event, "Stop");
-                let first = run("completion-gate", &[], &snake).ok().and_then(|o| stop_output(&o));
-                let second = || run("initialization-gate", &[], &snake).ok().and_then(|o| stop_output(&o));
-                Ok(first.or_else(second).unwrap_or_else(|| "{}".into()))
+                Ok(run("task-complete", &[], &snake).ok().and_then(|o| stop_output(&o)).unwrap_or_else(|| "{}".into()))
             }
         }
         other => Err(format!("unknown subcommand {other}")),
@@ -192,7 +190,7 @@ mod tests {
     #[test]
     fn pre_edit_decisions() {
         assert!(pre_edit_output(r#"{"uninitialized":"/p","rows":[]}"#).contains(r#""decision": "deny""#));
-        assert!(pre_edit_output(r#"{"rows":[]}"#).contains("work-project"));
+        assert!(pre_edit_output(r#"{"rows":[]}"#).contains("manage-project"));
         assert_eq!(pre_edit_output(r#"{"rows":[{"id":1,"H":"작업"}]}"#), r#"{"decision": "allow"}"#);
         assert_eq!(pre_edit_output("garbage"), r#"{"decision": "allow"}"#);
     }

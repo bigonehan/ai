@@ -10,9 +10,170 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-pub const RECORD_SECTIONS: [&str; 3] = ["작업", "완료", "진행"];
+pub const RECORD_SECTIONS: [&str; 4] = ["요청", "작업", "완료", "진행"];
 pub const NEW_FEATURE: &str = "기능 추가";
 pub const CELL_SECTIONS: [(&str, &str); 3] = [("D", "메모"), ("I", "오류"), ("J", "원인")];
+
+/// The single error-symbol set for `$J` cause lines and `$D` check notes written through `task-update`.
+pub const ERROR_SYMBOLS: [&str; 10] = ["🅰️", "🗝", "❌", "⭕️", "🔢", "🛣", "👥", "🏷", "🚥", "🔳"];
+
+/// `[<symbol>] <text>`, optionally prefixed by `N. `; the symbol may come with or without U+FE0F.
+pub fn valid_symbol_line(line: &str) -> bool {
+    let mut rest = line.trim();
+    if let Some((num, body)) = rest.split_once(". ") {
+        if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+            rest = body.trim_start();
+        }
+    }
+    let Some(inner) = rest.strip_prefix('[') else { return false };
+    let Some((symbol, text)) = inner.split_once(']') else { return false };
+    let bare = |s: &str| s.replace('\u{FE0F}', "");
+    let known = ERROR_SYMBOLS.iter().any(|s| bare(s) == bare(symbol));
+    known && text.starts_with(' ') && !text.trim().is_empty()
+}
+
+/// `task-update` CLI check: every `$J` line and the single `$D` line must start with an error symbol.
+pub fn check_symbol_fields(fields: &Map<String, Value>) -> R<()> {
+    let symbols = ERROR_SYMBOLS.join("|");
+    let lines = |key: &str| -> Option<Vec<String>> {
+        fields.get(key).filter(|v| !v.is_null()).map(|v| {
+            util::val_str(v).lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+        })
+    };
+    if let Some(j) = lines("J") {
+        if let Some(bad) = j.iter().find(|l| !valid_symbol_line(l)) {
+            return api::fail("validation", format!("$J lines must start with [{symbols}] then text: `{bad}`"));
+        }
+    }
+    if let Some(d) = lines("D") {
+        if d.len() != 1 || !valid_symbol_line(&d[0]) {
+            return api::fail("validation", format!("$D must be one check line starting with [{symbols}] then text"));
+        }
+    }
+    Ok(())
+}
+
+/// `[N/M <stage>] <goal line N body>` for Table26 `$K`.
+pub fn goal_k_line(n: usize, m: usize, stage: &str, body: &str) -> String {
+    format!("[{n}/{m} {stage}] {body}")
+}
+
+pub fn check_goal_number(n: usize, m: usize) -> Result<(), String> {
+    if m == 0 {
+        return Err("goal missing; --goal needs `### 목표` lines".into());
+    }
+    if n == 0 || n > m {
+        return Err(format!("--goal {n} out of range 1..={m}"));
+    }
+    Ok(())
+}
+
+/// Rewrites `$K` with the stored `goal_n` and the given stage; no-op without `goal_n` or for 확인·완료.
+pub fn write_goal_stage(project_dir: &Path, raw_id: i64, stage: &str) -> R<Option<Value>> {
+    if matches!(stage, "확인" | "완료") {
+        return Ok(None);
+    }
+    let Some(n) = crate::gate::gate_load(project_dir, raw_id).get("goal_n").and_then(|v| v.as_u64()) else {
+        return Ok(None);
+    };
+    let bodies = goal_bodies(project_dir, raw_id).unwrap_or_default();
+    let Some(body) = bodies.get((n as usize).wrapping_sub(1)) else { return Ok(None) };
+    let mut k = Map::new();
+    k.insert(api::GOAL_FIELD.into(), Value::String(goal_k_line(n as usize, bodies.len(), stage, body)));
+    api::update(TASK_TABLE, raw_id, &k).map(Some)
+}
+
+/// Goal numbers in 1..=m not yet recorded by `task-step --goal` (gate state `goals_stepped`, else `goal_n`).
+pub fn missing_goal_steps(state: &Map<String, Value>, m: usize) -> Vec<usize> {
+    let mut stepped: BTreeSet<usize> = state
+        .get("goals_stepped")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_u64()).map(|n| n as usize).collect())
+        .unwrap_or_default();
+    if let Some(n) = state.get("goal_n").and_then(|v| v.as_u64()) {
+        stepped.insert(n as usize);
+    }
+    (1..=m).filter(|n| !stepped.contains(n)).collect()
+}
+
+/// `task-submit` check: every goal number needs a `task-step --goal` record.
+pub fn check_goal_steps(project_dir: &Path, raw_id: i64) -> R<()> {
+    let m = goal_bodies(project_dir, raw_id).map(|b| b.len()).unwrap_or(0);
+    let missing = missing_goal_steps(&crate::gate::gate_load(project_dir, raw_id), m);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    api::fail(
+        "validation",
+        format!("#{raw_id} goals without task-step --goal: {missing:?}; record each measurement unit before task-submit"),
+    )
+}
+
+/// `task-update H=진단` rule: the same `--fields` must carry a non-empty `I` and a `D`.
+pub fn diagnosis_fields_ok(fields: &Map<String, Value>) -> bool {
+    if fields.get("H").and_then(|v| v.as_str()) != Some(crate::gate::ERROR_STAGE) {
+        return true;
+    }
+    let filled = |key: &str| fields.get(key).filter(|v| !v.is_null()).is_some_and(|v| !util::val_str(v).trim().is_empty());
+    filled("I") && filled("D")
+}
+
+pub fn check_diagnosis_fields(fields: &Map<String, Value>) -> R<()> {
+    if diagnosis_fields_ok(fields) {
+        return Ok(());
+    }
+    api::fail("validation", "H=진단 needs I (오류) and D ([오류 기호] 점검 한 줄) in the same task-update")
+}
+
+const NON_CONNECTIVE_GO: [&str; 7] = ["최고", "참고", "재고", "광고", "경고", "보고", "사고"];
+
+fn is_hangul(c: char) -> bool {
+    ('\u{AC00}'..='\u{D7A3}').contains(&c)
+}
+
+/// True when the line joins two actions with `~고 `/`~고,` or ` 및 `.
+fn joins_two_actions(line: &str) -> bool {
+    if line.contains(" 및 ") {
+        return true;
+    }
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    tokens.iter().enumerate().any(|(i, token)| {
+        let comma = token.ends_with(',');
+        if !comma && i + 1 == tokens.len() {
+            return false;
+        }
+        let word: String = token.trim_end_matches(',').chars().skip_while(|c| !is_hangul(*c)).collect();
+        let chars: Vec<char> = word.chars().collect();
+        chars.len() >= 2
+            && chars.last() == Some(&'고')
+            && chars.iter().all(|c| is_hangul(*c))
+            && !NON_CONNECTIVE_GO.contains(&word.as_str())
+    })
+}
+
+/// Goal lines that may bundle two results; `task-add`·`task-goal` print these without blocking.
+pub fn goal_conjunction_warnings(goal_text: &str) -> Vec<String> {
+    goal_text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let (n, body) = parse_numbered_line(line).unwrap_or((i + 1, line));
+            joins_two_actions(body).then(|| format!("goal {n}: {body} — 두 결과를 한 줄에 묶었는지 확인(inquire-task)"))
+        })
+        .collect()
+}
+
+/// Adds `"warnings"` to a JSON object output only when there are any.
+pub fn attach_warnings(out: &mut Value, warnings: Vec<String>) {
+    if warnings.is_empty() {
+        return;
+    }
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("warnings".into(), json!(warnings));
+    }
+}
 pub const VERSION_FILES: [&str; 8] = [
     "package.json",
     "manifest.json",
@@ -102,14 +263,18 @@ fn section_ids_in_record(record: &Path, section_name: &str) -> Vec<i64> {
 
 pub fn changes_task_ids(project_dir: &Path) -> Vec<i64> {
     let changes_dir = project_dir.join(".ai").join("changes");
-    let Some(latest) = util::glob(&changes_dir, "", ".md").into_iter().last() else {
-        return Vec::new();
-    };
-    let active = section_ids_in_record(&latest, "작업");
-    if !active.is_empty() {
-        return active;
+    for record in util::glob(&changes_dir, "", ".md").into_iter().rev() {
+        let mut ids = section_ids_in_record(&record, "작업");
+        for id in section_ids_in_record(&record, "완료") {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        if !ids.is_empty() {
+            return ids;
+        }
     }
-    section_ids_in_record(&latest, "완료")
+    Vec::new()
 }
 
 pub fn find_task_agents(start: &Path) -> Option<(Vec<i64>, PathBuf)> {
@@ -260,13 +425,20 @@ pub fn with_lock<T, F: FnOnce() -> R<T>>(target: &Path, f: F) -> R<T> {
     res
 }
 
-pub fn append(project_dir: &Path, text: &str) -> R<()> {
-    with_lock(&project_dir.join(".ai").join("changes"), || {
-        let record = changes_record(project_dir, None)?;
-        let mut f = OpenOptions::new().create(true).append(true).open(&record).map_err(api::other)?;
-        std::io::Write::write_all(&mut f, text.as_bytes()).map_err(api::other)?;
-        Ok(())
-    })
+/// Append a record block to the end of the row's own `### 구현` section, never the file end.
+pub fn append_item(project_dir: &Path, raw_id: i64, text: &str) -> R<()> {
+    let block: Vec<String> = util::splitlines(text).into_iter().skip_while(|l| util::strip(l).is_empty()).collect();
+    let placed = edit_item(project_dir, raw_id, |lines| {
+        let (start, end) = subsection(lines, raw_id, "구현");
+        let at = content_end(lines, start, end);
+        let mut insert = vec![String::new()];
+        insert.extend(block.iter().cloned());
+        lines.splice(at..at, insert);
+    })?;
+    match placed {
+        Some(()) => Ok(()),
+        None => api::fail("records", format!("Table26 #{raw_id} block not found in .ai/changes")),
+    }
 }
 
 pub fn sections_in(text: &str, heading: &Regex) -> Vec<Vec<String>> {
@@ -380,16 +552,34 @@ pub fn add_numbered(lines: &mut Vec<String>, start: usize, end: usize, text: &st
     true
 }
 
+/// Adds missing record sections in `RECORD_SECTIONS` order: before the next existing section, else at the end.
 pub fn ensure_sections(lines: &mut Vec<String>) {
-    for name in RECORD_SECTIONS {
-        if find(lines, 1, name, 0, None).is_none() {
-            if lines.last().map(|l| !util::strip(l).is_empty()).unwrap_or(false) {
+    for (pos, name) in RECORD_SECTIONS.iter().enumerate() {
+        if find(lines, 1, name, 0, None).is_some() {
+            continue;
+        }
+        let next = RECORD_SECTIONS[pos + 1..].iter().find_map(|later| find(lines, 1, later, 0, None));
+        match next {
+            Some(at) => {
+                lines.insert(at, String::new());
+                lines.insert(at, format!("# {name}"));
+            }
+            None => {
+                if lines.last().map(|l| !util::strip(l).is_empty()).unwrap_or(false) {
+                    lines.push(String::new());
+                }
+                lines.push(format!("# {name}"));
                 lines.push(String::new());
             }
-            lines.push(format!("# {name}"));
-            lines.push(String::new());
         }
     }
+}
+
+/// End of the level-1 section that starts at `start`.
+fn level1_end(lines: &[String], start: usize) -> usize {
+    ((start + 1)..lines.len())
+        .find(|&i| matches!(heading(&lines[i]), Some((1, _))))
+        .unwrap_or(lines.len())
 }
 
 fn item_heading_parts(line: &str) -> Option<(String, i64)> {
@@ -617,7 +807,69 @@ pub fn complete_item(project_dir: &Path, raw_id: i64) -> R<bool> {
     Ok(res.unwrap_or(false))
 }
 
-pub fn changes_goal(project_dir: &Path, raw_id: i64) -> Option<String> {
+fn confirmed_completion_line(lines: &[String], raw_id: i64) -> Option<String> {
+    let heading = format!("#### 확인 (#{raw_id})");
+    let start = lines.iter().rposition(|line| line.trim() == heading)?;
+    let evidence: Vec<&str> = lines[start + 1..].iter()
+        .map(|line| line.trim())
+        .take_while(|line| !line.starts_with('#'))
+        .collect();
+    let summary = evidence.iter().find_map(|line| line.strip_prefix("- 요약 :").map(str::trim))?;
+    let marked = summary.strip_prefix('[')?;
+    let (symbol, body) = marked.split_once(']')?;
+    let body = body.trim();
+    if symbol.trim().is_empty() || body.is_empty() || !body.contains('⇒') {
+        return None;
+    }
+    let checked = evidence.iter().any(|line| line.starts_with("- [x] "));
+    let success = evidence.iter().any(|line| *line == "결과 : 성공");
+    let detail = evidence.iter().any(|line| line.strip_prefix("상세 :").map(str::trim).is_some_and(|v| !v.is_empty() && v != "-"));
+    if checked && success && detail {
+        Some(format!("1. [{}] {body}", symbol.trim()))
+    } else {
+        None
+    }
+}
+
+pub fn ensure_completion_note(project_dir: &Path, raw_id: i64) -> R<bool> {
+    Ok(edit_item(project_dir, raw_id, |lines| {
+        let Some((item_start, item_end)) = item_span(lines, raw_id) else { return false; };
+        let Some(impl_start) = find(lines, 3, "구현", item_start, Some(item_end)) else { return false; };
+        let impl_end = span(lines, impl_start, 3).min(item_end);
+        let heading = format!("#### 완료 (#{raw_id})");
+        if lines[impl_start + 1..impl_end].iter().any(|line| line.trim() == heading) { return false; }
+        let actions: Vec<String> = lines[impl_start + 1..impl_end].iter()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                let text = trimmed.strip_prefix("- [▶]").or_else(|| trimmed.strip_prefix("- [○]"))?;
+                let text = text.trim();
+                if text.is_empty() { None } else { Some(text.to_string()) }
+            }).collect();
+        let mut note = vec![heading];
+        if actions.is_empty() {
+            let Some(line) = confirmed_completion_line(&lines[impl_start + 1..impl_end], raw_id) else { return false; };
+            note.push(line);
+        } else {
+            for (index, action) in actions.iter().rev().take(5).rev().enumerate() {
+                note.push(format!("{}. [🏗️] {}", index + 1, action));
+            }
+        }
+        lines.splice(impl_end..impl_end, note);
+        true
+    })?.unwrap_or(false))
+}
+
+pub fn has_completion_note(project_dir: &Path, raw_id: i64) -> bool {
+    let Some(record) = item_file(project_dir, raw_id) else { return false; };
+    let Ok(text) = std::fs::read_to_string(record) else { return false; };
+    let lines = util::splitlines(&text);
+    let Some((start, end)) = item_span(&lines, raw_id) else { return false; };
+    let heading = format!("#### 완료 (#{raw_id})");
+    lines[start..end].iter().any(|line| line.trim() == heading)
+}
+
+/// The one `### 목표` parser: goal bodies (without numbering) of an item, in order.
+fn goal_bodies(project_dir: &Path, raw_id: i64) -> Option<Vec<String>> {
     let record = item_file(project_dir, raw_id)?;
     let text = std::fs::read_to_string(&record).ok()?;
     let lines = util::splitlines(&text);
@@ -625,12 +877,22 @@ pub fn changes_goal(project_dir: &Path, raw_id: i64) -> Option<String> {
     let index = find(&lines, 3, "목표", start, Some(end))?;
     let sub_end = span(&lines, index, 3);
     let out: Vec<String> = ((index + 1)..sub_end)
-        .filter_map(|i| parse_numbered_line(&lines[i]).map(|(_, body)| format!("- {body}")))
+        .filter_map(|i| parse_numbered_line(&lines[i]).map(|(_, body)| body.to_string()))
         .collect();
-    if out.is_empty() {
-        None
-    } else {
-        Some(out.join("\n"))
+    if out.is_empty() { None } else { Some(out) }
+}
+
+pub fn changes_goal(project_dir: &Path, raw_id: i64) -> Option<String> {
+    let bodies = goal_bodies(project_dir, raw_id)?;
+    Some(bodies.iter().map(|b| format!("- {b}")).collect::<Vec<_>>().join("\n"))
+}
+
+/// `1. [기능] ...` lines of the item's goal, joined by newline (what `grist goal` prints).
+pub fn goal_text(project_arg: &str, raw_id: i64) -> R<String> {
+    let (project_dir, _, _) = owned(project_arg, raw_id)?;
+    match goal_bodies(&project_dir, raw_id) {
+        Some(b) => Ok(b.iter().enumerate().map(|(n, t)| format!("{}. {t}", n + 1)).collect::<Vec<_>>().join("\n")),
+        None => api::fail("goal", format!("goal missing (#{raw_id})")),
     }
 }
 
@@ -964,10 +1226,11 @@ pub fn apply_row(project_dir: &Path, raw_id: i64, fields: &Map<String, Value>) -
         }
     }
     if fields.get("H").and_then(|v| v.as_str()) == Some(DONE_STAGE) {
-        let info = item_info(project_dir, raw_id);
-        if info.is_some() && complete_item(project_dir, raw_id)? {
-            done.push("완료 이동".to_string());
+        // The user's Grist `완료` outranks the changes list: move a still-open item to `# 완료`.
+        if complete_item(project_dir, raw_id)? {
+            done.push("# 완료 이동".to_string());
         }
+        let info = item_info(project_dir, raw_id);
         if let Some(info) = info {
             if info.kind == NEW_FEATURE && add_feature(project_dir, &info.title)? {
                 done.push("📍 추가".to_string());
@@ -1055,8 +1318,63 @@ pub fn sync(project_arg: Option<&str>, cwd: &str) -> R<Value> {
     Ok(json!({"project_dir": util::path_str(&project_dir), "synced": synced}))
 }
 
-pub fn input_text(project_dir: &Path) -> String {
-    std::fs::read_to_string(project_dir.join("Input.md")).unwrap_or_default()
+/// `# 요구 사항`·`# 세부 사항` input ⇒ `## <요구 사항>` heading and `- <세부 사항>` lines for the `# 요청` section.
+pub fn request_block(text: &str) -> Option<Vec<String>> {
+    let mut part = "";
+    let (mut asks, mut details) = (Vec::new(), Vec::new());
+    for line in text.lines() {
+        let trimmed = util::strip(line);
+        match trimmed.strip_prefix('#').map(util::strip) {
+            Some("요구 사항") => { part = "ask"; continue; }
+            Some("세부 사항") => { part = "detail"; continue; }
+            Some(_) => { part = ""; continue; }
+            None => {}
+        }
+        let Some(item) = trimmed.strip_prefix("- ").map(util::strip).filter(|t| !t.is_empty()) else { continue };
+        match part {
+            "ask" => asks.push(item.to_string()),
+            "detail" => details.push(format!("- {item}")),
+            _ => {}
+        }
+    }
+    if asks.is_empty() || details.is_empty() {
+        return None;
+    }
+    let mut block = vec![format!("## {}", asks.join(" · "))];
+    block.extend(details);
+    Some(block)
+}
+
+fn append_request(lines: &mut Vec<String>, block: &[String]) {
+    let start = find(lines, 1, "요청", 0, None).expect("ensure_sections adds # 요청");
+    let at = content_end(lines, start, level1_end(lines, start));
+    let mut insert = Vec::new();
+    if at > start + 1 {
+        insert.push(String::new());
+    }
+    insert.extend(block.iter().cloned());
+    for (offset, line) in insert.into_iter().enumerate() {
+        lines.insert(at + offset, line);
+    }
+}
+
+/// The last `## ` block of the `# 요청` section in `text`.
+pub fn last_request_in(text: &str) -> Option<String> {
+    let lines = util::splitlines(text);
+    let start = find(&lines, 1, "요청", 0, None)?;
+    let end = level1_end(&lines, start);
+    let block_start = ((start + 1)..end).rev().find(|&i| matches!(heading(&lines[i]), Some((2, _))))?;
+    let block_end = content_end(&lines, block_start, end);
+    Some(lines[block_start..block_end].join("\n"))
+}
+
+/// The newest request across the project's changes records (J3 input).
+pub fn latest_request_block(project_dir: &Path) -> String {
+    util::glob(&project_dir.join(".ai").join("changes"), "", ".md")
+        .into_iter()
+        .rev()
+        .find_map(|record| std::fs::read_to_string(record).ok().and_then(|text| last_request_in(&text)))
+        .unwrap_or_default()
 }
 
 pub fn request_record(project_arg: &str, input_file: &str, title: &str, summary: &str) -> R<Value> {
@@ -1065,29 +1383,27 @@ pub fn request_record(project_arg: &str, input_file: &str, title: &str, summary:
     let text = std::fs::read_to_string(input_file).map_err(api::other)?;
     let req_re = Regex::new(r"(?m)^#\s*요구 사항\s*$").unwrap();
     let det_re = Regex::new(r"(?m)^#\s*세부 사항\s*$").unwrap();
-    if !req_re.is_match(&text) || !det_re.is_match(&text) {
-        return api::fail(
-            "validation",
-            "the new Input.md needs `# 요구 사항` and `# 세부 사항` headings",
-        );
-    }
-    let input_path = project_dir.join("Input.md");
-    let _ = std::fs::remove_file(&input_path);
-    std::fs::write(&input_path, format!("{}\n", text.trim_end_matches('\n'))).map_err(api::other)?;
+    let block = match request_block(&text) {
+        Some(block) if req_re.is_match(&text) && det_re.is_match(&text) => block,
+        _ => {
+            return api::fail(
+                "validation",
+                "the request needs `# 요구 사항` and `# 세부 사항` headings, each with `- ` lines",
+            )
+        }
+    };
     let record_name = with_lock(&project_dir.join(".ai").join("changes"), || {
         let record = changes_record(&project_dir, Some(title))?;
         let before = std::fs::read_to_string(&record).map_err(api::other)?;
         let mut lines = util::splitlines(&before);
-        let orig = lines.clone();
         ensure_sections(&mut lines);
-        if lines != orig {
-            write_atomic(&record, &format!("{}\n", lines.join("\n")))?;
-        }
+        append_request(&mut lines, &block);
+        write_atomic(&record, &format!("{}\n", lines.join("\n")))?;
         Ok(record.file_name().unwrap().to_string_lossy().into_owned())
     })?;
     let obsidian = add_request(&project_dir, util::strip(title), util::strip(summary))?;
     Ok(json!({
-        "input": util::path_str(&input_path),
+        "request": block[0].trim_start_matches("## "),
         "record": record_name,
         "obsidian": obsidian
     }))
@@ -1098,7 +1414,33 @@ fn task_add_fields(mut fields: Map<String, Value>) -> Map<String, Value> {
     fields
 }
 
+fn session_rows_path(thread: &str) -> PathBuf {
+    let state_dir = std::env::var_os("TASK_COMPLETE_STATE_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".codex/tmp/task_complete"));
+    state_dir.join("session_rows").join(format!("{}.json", util::sanitize_key(thread)))
+}
+
+fn register_session_row_at(path: &Path, raw_id: i64) -> R<()> {
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(api::other)?;
+    with_lock(&path, || {
+        let mut rows: Vec<i64> = std::fs::read_to_string(&path).ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        if !rows.contains(&raw_id) { rows.push(raw_id); }
+        write_atomic(&path, &serde_json::to_string(&rows).map_err(api::other)?)
+    })
+}
+
+pub fn register_session_row(raw_id: i64) -> R<()> {
+    let Ok(thread) = std::env::var("CODEX_THREAD_ID") else { return Ok(()); };
+    if thread.is_empty() { return Ok(()); }
+    register_session_row_at(&session_rows_path(&thread), raw_id)
+}
+
 pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind: Option<&str>, judge: &str) -> R<Value> {
+    crate::gate::require_main("task-add")?;
     if project_arg.is_some() && kind.is_none() {
         return api::fail("arguments", "task-add --project needs --type 기능 추가|개선|오류 해결");
     }
@@ -1110,26 +1452,16 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
             fields.insert("G".to_string(), Value::String(code.to_string()));
         }
     }
-    let fields = task_add_fields(fields);
-    let mut result = api::add(TASK_TABLE, &fields)?;
-    if let Some(p) = project_arg {
-        let project_dir = util::resolve(Path::new(p));
-        let raw_id = result.get("id").and_then(|v| v.as_i64()).unwrap_or(0);
-        let title = fields
-            .get("B")
-            .filter(|v| util::truthy(Some(v)))
-            .map(util::val_str)
-            .unwrap_or_else(|| format!("작업 {raw_id}"));
-        let record = register_item(&project_dir, raw_id, &title, kind.unwrap_or(""), judge)?;
-        if let Some(obj) = result.as_object_mut() {
-            obj.insert(
-                "record".to_string(),
-                Value::String(record.file_name().unwrap().to_string_lossy().into_owned()),
-            );
-        }
-        apply_row(&project_dir, raw_id, &fields)?;
-    }
-    Ok(result)
+    let mut ctx = crate::task::TaskCtx {
+        project_dir: project_arg.map(|p| util::resolve(Path::new(p))),
+        fields: task_add_fields(fields),
+        kind: kind.unwrap_or("").to_string(),
+        judge: judge.to_string(),
+        ..Default::default()
+    };
+    let step = crate::task::Step::Add;
+    crate::task::TaskChain::standard(step).run(step, &mut ctx)?;
+    Ok(ctx.result)
 }
 
 pub fn task_show(project_arg: &str, raw_id: i64, section_opt: Option<&str>) -> R<Value> {
@@ -1159,62 +1491,157 @@ pub fn task_show(project_arg: &str, raw_id: i64, section_opt: Option<&str>) -> R
         }
         out
     };
+    let goal_lines = || -> Vec<String> {
+        goal_bodies(&project_dir, raw_id)
+            .map(|b| b.iter().enumerate().map(|(n, t)| format!("{}. {t}", n + 1)).collect())
+            .unwrap_or_default()
+    };
     if let Some(sec) = section_opt.filter(|s| !s.trim().is_empty()) {
+        let lines = match sec.trim() {
+            "목표" => goal_lines(),
+            stage @ ("초안" | "검증" | "확인" | "완료") => latest_stage_block(&lines[start..end], stage, raw_id),
+            name => extract_sub(name),
+        };
         return Ok(json!({
             "id": raw_id,
             "section": sec,
-            "lines": extract_sub(sec.trim())
+            "lines": lines
         }));
     }
     Ok(json!({
         "id": raw_id,
-        "goal": extract_sub("목표"),
+        "goal": goal_lines(),
         "steps": extract_sub("구현")
     }))
 }
 
-pub fn task_step(project_arg: &str, raw_id: i64, step: &str, text: &str) -> R<Value> {
-    if !matches!(step, "▷" | "▶" | "○" | "●") {
-        return api::fail("validation", "step must be one of ▷, ▶, ○, ●");
+/// Lines of the latest `#### <stage> (#id)` record inside a row's block, up to the next heading.
+fn latest_stage_block(block: &[String], stage: &str, raw_id: i64) -> Vec<String> {
+    let heading_line = format!("#### {stage} (#{raw_id})");
+    let Some(at) = block.iter().rposition(|line| util::strip(line) == heading_line) else {
+        return Vec::new();
+    };
+    block[at + 1..]
+        .iter()
+        .take_while(|line| !line.starts_with('#'))
+        .map(|line| line.trim_end().to_string())
+        .filter(|line| !util::strip(line).is_empty())
+        .collect()
+}
+
+/// Replaces the `### 구현` line that starts with `- [step]`, or inserts it after the last `- [` line before the first `####`.
+fn upsert_step(lines: &mut Vec<String>, raw_id: i64, step: &str, clean: &str) -> String {
+    let prefix = format!("- [{step}]");
+    let new_line = format!("{prefix} {clean}");
+    let (sub_start, sub_end) = subsection(lines, raw_id, "구현");
+    let mut h4_at = sub_end;
+    for idx in (sub_start + 1)..sub_end {
+        if lines[idx].starts_with("#### ") {
+            h4_at = idx;
+            break;
+        }
+    }
+    for idx in (sub_start + 1)..h4_at {
+        if lines[idx].trim_start().starts_with(&prefix) {
+            lines[idx] = new_line.clone();
+            return new_line;
+        }
+    }
+    let mut insert_at = sub_start + 1;
+    for idx in (sub_start + 1)..h4_at {
+        if lines[idx].trim_start().starts_with("- [") {
+            insert_at = idx + 1;
+        }
+    }
+    lines.insert(insert_at, new_line.clone());
+    new_line
+}
+
+pub fn task_step(project_arg: &str, raw_id: i64, step: &str, text: &str, goal: usize) -> R<Value> {
+    if matches!(step, "○" | "●") {
+        return api::fail("validation", "○ and ● are recorded only by `task-confirm`; task-step takes ▷ or ▶");
+    }
+    if !matches!(step, "▷" | "▶") {
+        return api::fail("validation", "step must be one of ▷, ▶");
     }
     let clean = util::strip(text).replace('\n', " ");
     if clean.is_empty() {
         return api::fail("validation", "step text must not be empty");
     }
     let (project_dir, _, _) = owned(project_arg, raw_id)?;
-    let prefix = format!("- [{step}]");
-    let new_line = format!("{prefix} {clean}");
-    let updated = edit_item(&project_dir, raw_id, |lines| {
-        let (sub_start, sub_end) = subsection(lines, raw_id, "구현");
-        let mut h4_at = sub_end;
-        for idx in (sub_start + 1)..sub_end {
-            if lines[idx].starts_with("#### ") {
-                h4_at = idx;
-                break;
-            }
-        }
-        for idx in (sub_start + 1)..h4_at {
-            if lines[idx].trim_start().starts_with(&prefix) {
-                lines[idx] = new_line.clone();
-                return true;
-            }
-        }
-        let mut insert_at = sub_start + 1;
-        for idx in (sub_start + 1)..h4_at {
-            if lines[idx].trim_start().starts_with("- [") {
-                insert_at = idx + 1;
-            }
-        }
-        lines.insert(insert_at, new_line.clone());
-        true
-    })?;
-    if updated.is_none() {
-        return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
+    let bodies = goal_bodies(&project_dir, raw_id).unwrap_or_default();
+    if let Err(e) = check_goal_number(goal, bodies.len()) {
+        return api::fail("validation", format!("#{raw_id} {e}"));
     }
-    Ok(json!({"id": raw_id, "step": step, "line": new_line}))
+    let stage = api::get(TASK_TABLE, Some(&[raw_id]), None, Some(&["H".into()]))?
+        .first()
+        .and_then(|r| r.get("fields"))
+        .and_then(|f| f.get("H"))
+        .map(util::val_str)
+        .unwrap_or_default();
+    let updated = edit_item(&project_dir, raw_id, |lines| upsert_step(lines, raw_id, step, &clean))?;
+    let Some(new_line) = updated else {
+        return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
+    };
+    let mut state = crate::gate::gate_load(&project_dir, raw_id);
+    state.insert("goal_n".into(), json!(goal));
+    let mut stepped: BTreeSet<u64> = state
+        .get("goals_stepped")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+        .unwrap_or_default();
+    stepped.insert(goal as u64);
+    state.insert("goals_stepped".into(), json!(stepped.into_iter().collect::<Vec<_>>()));
+    crate::gate::gate_save(&project_dir, raw_id, &state)?;
+    let k = goal_k_line(goal, bodies.len(), &stage, &bodies[goal - 1]);
+    let mut fields = Map::new();
+    fields.insert(api::GOAL_FIELD.into(), Value::String(k.clone()));
+    api::update(TASK_TABLE, raw_id, &fields)?;
+    Ok(json!({"id": raw_id, "step": step, "line": new_line, "K": k}))
 }
 
-pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, detail: &str) -> R<Value> {
+/// Per-goal evidence: non-empty lines `N. <근거>` numbered 1..=expected in order.
+pub fn parse_evidence(text: &str, expected: usize) -> Result<Vec<String>, String> {
+    let need = || format!("evidence needs {expected} lines `N. <근거>` (N = 1..{expected}), one per goal line");
+    let mut out = Vec::new();
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let Some((number, body)) = line.split_once(". ") else { return Err(need()) };
+        let body = body.trim();
+        if number.parse::<usize>().ok() != Some(out.len() + 1) || body.is_empty() { return Err(need()); }
+        out.push(body.replace('\n', " "));
+    }
+    if expected == 0 || out.len() != expected { return Err(need()); }
+    Ok(out)
+}
+
+/// Records `- [○] <check>`, `- [●] 사용자 검토 대기` and the `#### 확인` block in one pass; idempotent for the step lines.
+/// The evidence is validated against the goal line count before anything is written.
+fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str) -> R<usize> {
+    let Some(goal) = changes_goal(project_dir, raw_id) else {
+        return api::fail("validation", format!("goal missing (#{raw_id}); evidence needs one line per goal"));
+    };
+    let evidence = match parse_evidence(evidence, crate::task::match_goal_count(&goal)) {
+        Ok(lines) => lines,
+        Err(e) => return api::fail("validation", format!("#{raw_id} {e}")),
+    };
+    let steps = edit_item(project_dir, raw_id, |lines| {
+        upsert_step(lines, raw_id, "○", check);
+        upsert_step(lines, raw_id, "●", "사용자 검토 대기");
+    })?;
+    if steps.is_none() {
+        return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
+    }
+    let block = confirm_block(raw_id, summary, check, detail, &evidence);
+    append_item(project_dir, raw_id, &block)?;
+    Ok(evidence.len())
+}
+
+fn confirm_block(raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &[String]) -> String {
+    let lines: String = evidence.iter().enumerate().map(|(n, e)| format!("- 근거 {} : {e}\n", n + 1)).collect();
+    format!("\n#### 확인 (#{raw_id})\n- 요약 : {summary}\n- [x] {check}\n  결과 : 성공\n  상세 : {detail}\n{lines}")
+}
+
+pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str) -> R<Value> {
     let summary_clean = util::strip(summary).replace('\n', " ");
     let check_clean = util::strip(check).replace('\n', " ");
     let detail_clean = util::strip(detail).replace('\n', " ");
@@ -1222,16 +1649,65 @@ pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, 
         return api::fail("validation", "summary, check, and detail must not be empty");
     }
     let (project_dir, _, _) = owned(project_arg, raw_id)?;
-    let block = format!(
-        "\n#### 확인 (#{raw_id})\n- 요약 : {summary_clean}\n- [x] {check_clean}\n  결과 : 성공\n  상세 : {detail_clean}\n"
-    );
-    append(&project_dir, &block)?;
-    Ok(json!({"id": raw_id, "summary": summary_clean, "check": check_clean}))
+    let count = confirm_in_project(&project_dir, raw_id, &summary_clean, &check_clean, &detail_clean, evidence)?;
+    Ok(json!({"id": raw_id, "summary": summary_clean, "check": check_clean, "evidence": count}))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_judge, register_item, task_add_fields};
+    use super::{format_judge, register_item, register_session_row_at, task_add_fields};
+
+    #[test]
+    fn missing_goal_steps_lists_unrecorded_numbers() {
+        let state = |v: serde_json::Value| v.as_object().cloned().unwrap();
+        assert_eq!(super::missing_goal_steps(&state(serde_json::json!({"goals_stepped": [1, 2, 3]})), 3), Vec::<usize>::new());
+        assert_eq!(super::missing_goal_steps(&state(serde_json::json!({"goal_n": 1, "goals_stepped": [1]})), 3), vec![2, 3]);
+        assert_eq!(super::missing_goal_steps(&state(serde_json::json!({})), 2), vec![1, 2]);
+    }
+
+    #[test]
+    fn diagnosis_update_needs_i_and_d() {
+        let f = |v: serde_json::Value| v.as_object().cloned().unwrap();
+        assert!(super::diagnosis_fields_ok(&f(serde_json::json!({"H": "진단", "I": "오류", "D": "🔍 점검"}))));
+        assert!(!super::diagnosis_fields_ok(&f(serde_json::json!({"H": "진단", "D": "🔍 점검"}))));
+        assert!(!super::diagnosis_fields_ok(&f(serde_json::json!({"H": "진단", "I": "오류"}))));
+        assert!(!super::diagnosis_fields_ok(&f(serde_json::json!({"H": "진단", "I": " ", "D": "🔍 점검"}))));
+        assert!(super::diagnosis_fields_ok(&f(serde_json::json!({"H": "작업"}))));
+    }
+
+    #[test]
+    fn conjunction_warnings_flag_two_action_lines() {
+        let w = super::goal_conjunction_warnings("1. [수정] 값을 바꾸고 저장한다\n2. [기능] 목록 및 상세를 보인다\n3. [수정] 남기고, 닫는다");
+        assert_eq!(w.len(), 3);
+        assert_eq!(w[0], "goal 1: [수정] 값을 바꾸고 저장한다 — 두 결과를 한 줄에 묶었는지 확인(inquire-task)");
+        assert!(w[1].starts_with("goal 2: ") && w[2].starts_with("goal 3: "));
+        assert!(super::goal_conjunction_warnings("1. [수정] 경고 문구를 보인다\n2. [기능] 참고 링크를 출력한다").is_empty());
+    }
+
+    #[test]
+    fn stage_section_returns_only_the_latest_record_block() {
+        let block: Vec<String> = "## [구현] [✒️] a (#7)\n#### 확인 (#7)\n- 요약 : 옛\n#### 검증 (#7)\n- 결과 : 성공\n#### 확인 (#7)\n- 요약 : 새\n- [x] 검사\n  결과 : 성공\n\n## [구현] [✒️] b (#8)\n".lines().map(String::from).collect();
+        assert_eq!(super::latest_stage_block(&block, "확인", 7), vec!["- 요약 : 새", "- [x] 검사", "  결과 : 성공"]);
+        assert_eq!(super::latest_stage_block(&block, "검증", 7), vec!["- 결과 : 성공"]);
+        assert!(super::latest_stage_block(&block, "초안", 7).is_empty());
+    }
+
+    #[test]
+    fn request_input_becomes_a_block_at_the_end_of_the_request_section() {
+        let block = super::request_block("# 요구 사항\n- 첫 요청\n\n# 세부 사항\n- [✒️] 문서\n- [📐] 함수\n").unwrap();
+        assert_eq!(block, vec!["## 첫 요청", "- [✒️] 문서", "- [📐] 함수"]);
+        assert!(super::request_block("# 요구 사항\n- a\n# 세부 사항\n").is_none());
+
+        let mut lines: Vec<String> = "# 작업\n\n# 완료\n\n# 진행\n".lines().map(String::from).collect();
+        super::ensure_sections(&mut lines);
+        assert_eq!(lines[0], "# 요청");
+        super::append_request(&mut lines, &block);
+        super::append_request(&mut lines, &["## 둘째".to_string(), "- [🚿] 필터".to_string()]);
+        let text = lines.join("\n");
+        assert!(text.starts_with("# 요청\n## 첫 요청\n- [✒️] 문서\n- [📐] 함수\n\n## 둘째\n- [🚿] 필터\n\n# 작업"));
+        assert_eq!(super::last_request_in(&text).unwrap(), "## 둘째\n- [🚿] 필터");
+        assert!(super::last_request_in("# 작업\n").is_none());
+    }
     use serde_json::{Map, Value};
 
     #[test]
@@ -1247,6 +1723,18 @@ mod tests {
         fields.insert("E".to_string(), Value::from(1_760_000_000));
         let fields = task_add_fields(fields);
         assert_eq!(fields.get("E"), Some(&Value::from(1_760_000_000)));
+    }
+
+    #[test]
+    fn session_row_registration_preserves_created_ids_without_duplicates() {
+        let dir = std::env::temp_dir().join(format!("grist-session-row-{}", std::process::id()));
+        let path = dir.join("rows.json");
+        register_session_row_at(&path, 277).unwrap();
+        register_session_row_at(&path, 277).unwrap();
+        register_session_row_at(&path, 278).unwrap();
+        let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(rows, vec![277, 278]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1284,11 +1772,102 @@ mod tests {
     }
 
     #[test]
-    fn judge_docs_and_work_project_split_cases() {
-        let agents = std::fs::read_to_string("/home/tree/extensions/AGENTS.md").unwrap();
-        assert!(agents.contains("판정 : [값|상태]"));
+    fn append_item_writes_into_own_row_block_between_rows() {
+        let project = std::env::temp_dir().join(format!("grist-append-item-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        let record = changes.join("260101.작업.md");
+        std::fs::write(&record, "# 작업\n1. [✒️] a (#1)\n2. [📐] b (#2)\n# 완료\n# 진행\n## [구현] [✒️] a (#1)\n### 구현\n\n## [구현] [📐] b (#2)\n### 구현\n#### 초안 (#2)\n").unwrap();
+        super::append_item(&project, 1, "\n#### 확인 (#1)\n- 요약 : x ⇒ y\n").unwrap();
+        let text = std::fs::read_to_string(&record).unwrap();
+        let first = text.find("#### 확인 (#1)").unwrap();
+        assert!(first < text.find("## [구현] [📐] b (#2)").unwrap());
+        assert!(text.ends_with("#### 초안 (#2)\n"));
+        assert!(super::append_item(&project, 9, "x").is_err());
+        std::fs::remove_dir_all(project).unwrap();
+    }
 
-        let skill_dir = crate::util::home().join("ai/skills/work-project");
+    #[test]
+    fn user_done_sync_moves_active_item_to_completed_list() {
+        let project = std::env::temp_dir().join(format!("grist-user-done-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        let record = changes.join("260101.작업.md");
+        std::fs::write(&record, "# 작업\n1. [✒️] 문서 절차 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 문서 절차 (#7)\n- 유형 : 개선\n### 구현\n").unwrap();
+        let fields = serde_json::json!({"H": "완료"}).as_object().unwrap().clone();
+        assert_eq!(super::apply_row(&project, 7, &fields).unwrap(), vec!["# 완료 이동"]);
+        assert!(super::apply_row(&project, 7, &fields).unwrap().is_empty());
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert!(text.contains("# 작업\n# 완료\n1. [✒️] 문서 절차 (#7)"));
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn changes_task_ids_uses_previous_completed_list_when_today_is_empty() {
+        let project = std::env::temp_dir().join(format!("grist-rollover-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        std::fs::write(changes.join("261021.작업.md"), "# 작업\n# 완료\n1. [✒️] 검증 대기 (#276)\n# 진행\n").unwrap();
+        std::fs::write(changes.join("261022.작업.md"), "# 작업\n# 완료\n# 진행\n").unwrap();
+        assert_eq!(super::changes_task_ids(&project), vec![276]);
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn changes_task_ids_merges_active_and_completed() {
+        let project = std::env::temp_dir().join(format!("grist-mixed-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        let record = changes.join("260101.작업.md");
+        std::fs::write(&record, "# 작업\n1. [✒️] 진행 중 (#7)\n# 완료\n1. [✒️] 완료됨 (#8)\n2. [✒️] 중복 (#7)\n# 진행\n").unwrap();
+        assert_eq!(super::changes_task_ids(&project), vec![7, 8]);
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn completion_note_uses_successful_confirmation_without_implementation_step() {
+        let project = std::env::temp_dir().join(format!("grist-confirm-note-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        let record = changes.join("260101.작업.md");
+        let text = "# 작업\n1. [✒️] 문서 절차 (#275)\n# 완료\n# 진행\n## [구현] [✒️] 문서 절차 (#275)\n### 구현\n#### 확인 (#275)\n- 요약 : [⭕️] 재탐색 ⇒ 기존 행에서 완료\n- [x] 링크와 충돌 검사\n  결과 : 성공\n  상세 : 충돌 0건\n";
+        std::fs::write(&record, text).unwrap();
+        assert!(super::ensure_completion_note(&project, 275).unwrap());
+        assert!(!super::ensure_completion_note(&project, 275).unwrap());
+        let updated = std::fs::read_to_string(&record).unwrap();
+        assert!(updated.contains("#### 완료 (#275)\n1. [⭕️] 재탐색 ⇒ 기존 행에서 완료"));
+        std::fs::write(&record, text.replace("결과 : 성공", "결과 : 실패")).unwrap();
+        assert!(!super::ensure_completion_note(&project, 275).unwrap());
+        assert!(!std::fs::read_to_string(&record).unwrap().contains("#### 완료 (#275)"));
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn completion_note_and_list_move_are_idempotent() {
+        let project = std::env::temp_dir().join(format!("grist-complete-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        let record = changes.join("260101.작업.md");
+        std::fs::write(&record, "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n### 구현\n#### 검증 (#7)\n- [▶] Rust 실행 파일 연결\n#### 확인 (#7)\n- [○] 종료 입력 검증\n").unwrap();
+        assert_eq!(super::ensure_completion_note(&project, 7).unwrap(), true);
+        assert_eq!(super::ensure_completion_note(&project, 7).unwrap(), false);
+        assert_eq!(super::complete_item(&project, 7).unwrap(), true);
+        assert_eq!(super::complete_item(&project, 7).unwrap(), false);
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(text.matches("#### 완료 (#7)").count(), 1);
+        assert!(text.contains("1. [🏗️] Rust 실행 파일 연결"));
+        assert!(text.contains("2. [🏗️] 종료 입력 검증"));
+        assert!(text.contains("# 완료\n1. [✒️] 작업 (#7)"));
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn judge_docs_and_manage_project_split_cases() {
+        let agents = std::fs::read_to_string("/home/tree/extensions/AGENTS.md").unwrap();
+        assert!(agents.contains("`manage-project` Skill 3절이 단일 원본"));
+        assert!(!agents.contains("판정 : [값|상태]"));
+
+        let skill_dir = crate::util::home().join("ai/skills/manage-project");
         let skill_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
         assert!(skill_md.contains("판정 : [값|상태]"));
         assert!(skill_md.contains("references/start.md"));
@@ -1296,13 +1875,14 @@ mod tests {
         assert!(skill_md.contains("references/verify.md"));
         assert!(skill_md.lines().count() <= 115);
 
-        for rel in ["references/start.md", "references/work.md", "references/verify.md"] {
+        for rel in ["references/start.md", "references/work.md", "references/verify.md", "references/plan.md", "references/initialize.md"] {
             assert!(skill_dir.join(rel).is_file(), "missing {rel}");
         }
         let work_md = std::fs::read_to_string(skill_dir.join("references/work.md")).unwrap();
-        assert!(work_md.contains("실패 초안 및 Red 테스트 작성"));
-        assert!(work_md.contains("함수 초안을 만들거나 조정하고"));
-        assert!(agents.contains("red test용 실패 초안 구현"));
+        assert!(work_md.contains("task-red"));
+        assert!(work_md.contains("task-ready"));
+        assert!(skill_dir.parent().unwrap().join("Complete_task/SKILL.md").is_file());
+        assert!(skill_md.contains("red test용 실패 초안 구현"));
     }
 
     #[test]
@@ -1321,7 +1901,7 @@ mod tests {
         assert!(root_agents.contains("문서 : 구현/업무/261008.작업관리기/일지/작업관리기-개발.md"));
         assert!(root_agents.contains("구현/업무/261008.작업관리기/형식/"));
         let init_skill = std::fs::read_to_string(
-            crate::util::home().join("ai/skills/initialize-project/SKILL.md"),
+            crate::util::home().join("ai/skills/manage-project/references/initialize.md"),
         )
         .unwrap();
         assert!(init_skill.contains("--project-type"));
@@ -1340,10 +1920,100 @@ mod tests {
         let global = std::fs::read_to_string(crate::util::home().join("ai/rules/Agents.md")).unwrap();
         assert!(global.contains("grist task-show --section"));
         assert!(!global.contains("약 300줄이 넘으면"));
-        let start_md = std::fs::read_to_string(crate::util::home().join("ai/skills/work-project/references/start.md")).unwrap();
+        let start_md = std::fs::read_to_string(crate::util::home().join("ai/skills/manage-project/references/start.md")).unwrap();
         assert!(!start_md.contains("단일 소규모 행은 메인 세션이 직접"));
         assert!(!start_md.contains("끝까지 읽고"));
         println!("task_show_extracts_only_requested_section_without_full_block ▷ 필요한 줄·필드만 발췌해 읽고 출력하며 구형 경로·전체 덤프·불필요한 해시 검증 0건");
     }
 
+    const GOAL_ITEM: &str = "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n- 유형 : 기능 추가\n### 목표\n1. [기능] 첫째\n2. [수정] 둘째\n\n### 메모\n- 메모 줄\n### 구현\n- [▶] 구현 줄\n#### 검증 (#7)\n- 검증\n";
+
+    fn temp_project(name: &str, text: &str) -> std::path::PathBuf {
+        let project = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join(".ai/changes")).unwrap();
+        std::fs::write(project.join(".ai/changes/260101.작업.md"), text).unwrap();
+        project
+    }
+
+    #[test]
+    fn goal_prints_only_goal_lines() {
+        let project = temp_project("grist-goal-lines", GOAL_ITEM);
+        let bodies = super::goal_bodies(&project, 7).unwrap();
+        let text = bodies.iter().enumerate().map(|(n, t)| format!("{}. {t}", n + 1)).collect::<Vec<_>>().join("\n");
+        assert_eq!(text, "1. [기능] 첫째\n2. [수정] 둘째");
+        assert_eq!(super::changes_goal(&project, 7).unwrap(), "- [기능] 첫째\n- [수정] 둘째");
+        assert!(super::goal_bodies(&project, 8).is_none());
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn goal_survives_complete_item() {
+        let project = temp_project("grist-goal-complete", GOAL_ITEM);
+        let before = super::changes_goal(&project, 7).unwrap();
+        assert!(super::complete_item(&project, 7).unwrap());
+        assert_eq!(super::changes_goal(&project, 7).unwrap(), before);
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn confirm_records_circle_steps_once_and_flow_evidence_passes() {
+        let project = temp_project("grist-confirm", GOAL_ITEM);
+        for _ in 0..2 {
+            super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "충돌 없음 확인", "충돌 검사 완료", "1. 첫째 값\n2. 둘째 값\n").unwrap();
+        }
+        let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
+        assert_eq!(text.matches("- [○] 충돌 없음 확인").count(), 1);
+        assert_eq!(text.matches("- [●] 사용자 검토 대기").count(), 1);
+        assert!(text.contains("  상세 : 충돌 검사 완료\n- 근거 1 : 첫째 값\n- 근거 2 : 둘째 값\n"));
+        let evidence = crate::task::flow_confirmation_in_text(&text, 7).unwrap();
+        assert!(evidence.is_some());
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn confirm_rejects_evidence_count_mismatch_before_writing() {
+        let project = temp_project("grist-confirm-mismatch", GOAL_ITEM);
+        for bad in ["1. 하나만", "1. a\n3. b", "1. a\n2. ", "", "1. a\n2. b\n3. c"] {
+            let err = super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "검사", "값", bad).unwrap_err();
+            assert!(format!("{err:?}").contains("evidence needs 2 lines"), "{bad}");
+        }
+        let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
+        assert!(!text.contains("#### 확인 (#7)") && !text.contains("- [○]"));
+        assert_eq!(super::parse_evidence("\n1. a\n\n2. b\n", 2).unwrap(), vec!["a", "b"]);
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn goal_k_line_and_number_range() {
+        assert_eq!(super::goal_k_line(1, 3, "작업", "[기능] a"), "[1/3 작업] [기능] a");
+        assert!(super::check_goal_number(1, 3).is_ok() && super::check_goal_number(3, 3).is_ok());
+        assert!(super::check_goal_number(0, 3).is_err() && super::check_goal_number(4, 3).is_err());
+        assert!(super::check_goal_number(1, 0).is_err());
+    }
+
+    #[test]
+    fn symbol_lines_and_d_single_line() {
+        for ok in ["[⭕️] a", "[⭕] a", "1. [🛣] b", "[🗝\u{FE0F}] c", "2. [🅰] d", "[🔳] e"] {
+            assert!(super::valid_symbol_line(ok), "{ok}");
+        }
+        for bad in ["[유실] a", "1. [유실] a", "[❌]", "[❌] ", "[❌]x", "❌ a", "b"] {
+            assert!(!super::valid_symbol_line(bad), "{bad}");
+        }
+        let f = |k: &str, v: &str| serde_json::json!({ k: v }).as_object().unwrap().clone();
+        assert!(super::check_symbol_fields(&f("J", "1. [⭕️] a\n2. [🛣] b")).is_ok());
+        assert!(super::check_symbol_fields(&f("J", "1. [⭕️] a\n2. b")).is_err());
+        assert!(super::check_symbol_fields(&f("D", "[🚥] 점검")).is_ok());
+        assert!(super::check_symbol_fields(&f("D", "[🚥] a\n[🚥] b")).is_err());
+        assert!(super::check_symbol_fields(&f("D", "메모")).is_err());
+        assert!(super::check_symbol_fields(&f("I", "자유")).is_ok());
+    }
+
+    #[test]
+    fn task_step_rejects_circle_steps() {
+        for step in ["○", "●"] {
+            let err = super::task_step("/nonexistent", 7, step, "x", 1).unwrap_err();
+            assert!(format!("{err:?}").contains("task-confirm"));
+        }
+    }
 }

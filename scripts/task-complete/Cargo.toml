@@ -1,0 +1,7 @@
+[package]
+name = "task-complete"
+version = "0.0.15"
+edition = "2021"
+
+[dependencies]
+grist = { path = "../grist" }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Project"
+  short_description: "Initialize, plan, delegate and close project work"
+  default_prompt: "Use $manage-project to initialize the project if needed, record the request, split it into Table26 rows, delegate or implement them, and close them against the request."

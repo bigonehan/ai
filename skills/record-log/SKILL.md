@@ -5,7 +5,9 @@ description: Give external API calls a traceable project/row/agent ID and emit a
 
 # Record Log
 
-An external API log line has four fields: `ID | calling function | attempt | result`. Use a two-digit attempt (`01`, `02`, …). The ID has 11 characters: six decimal project digits, four decimal Table26 row digits, and one agent character from `0-9A-HJ-NP-Z` (no `I` or `O`). A result is one line of at most 120 characters: `ok`, an error type, or a short message. Do not include a JSON object/array, token, Authorization header, original payload, or private full path. Keep those values out of the calling function field as well.
+An external API log line has four fields: `ID | calling function | attempt | result`. Use a two-digit attempt (`01`, `02`, …). The ID has 11 characters: six decimal project digits, four decimal Table26 row digits, and one agent character from `0-9A-HJ-NP-Z` (no `I` or `O`). A result is one line of at most 120 characters. Do not include a JSON object/array, token, Authorization header, original payload, or private full path. Keep those values out of the calling function field as well.
+
+For an external API integration, put `ack=<received|rejected|expired|not_observed|not_applicable>`, the body fields needed to identify the result (for example `body.status=failed` or `body.code=invalid_request`), and `error=<sanitized error message|none>` in `result`. Record `body=none` when no response body arrived. Preserve the meaningful error message after masking credentials and private paths; do not replace it with only a generic success/failure label. Never log the whole JSON body, a serialized request/response object, or raw body text. `ack=not_observed` means the ACK was not seen and does not claim that the receiver rejected or missed the request.
 
 ## Commands
 
@@ -19,7 +21,7 @@ $R append ID CALLING_FUNCTION ATTEMPT RESULT [--project PROJECT_DIR]
 $R find ID [--project PROJECT_DIR]
 ```
 
-`start` (the caller runs it right after `invoke_subagent`; the subagent does not) allocates the next free agent character from `1` (`1`-`9`, `A`-`Z` without `I`/`O`: 33 sub-agent characters; exit 2 when exhausted); `0` is issued only with `--role main` (exit 2 if an `에이전트 0 :` line already exists), records one line `에이전트 <char> : <role> · <conversation>` (plus ` ← <caller char> <caller name>` with `--caller`; main is `0 main`) in that row's changes `### 메모` through `grist task-update ROW --fields '{"D": ...}'` (never edits the changes file), and prints the 11-character ID. The project digits come from the `ID :` in `PROJECT_DIR/AGENTS.md`. A per-row lock serializes parallel starts. Give the conversation's stable reference, not its message body.
+`start` (the caller runs it right after spawning the subagent; the subagent does not) allocates the next free agent character from `1` (`1`-`9`, `A`-`Z` without `I`/`O`: 33 sub-agent characters; exit 2 when exhausted); `0` is issued only with `--role main` (exit 2 if an `에이전트 0 :` line already exists), records one line `에이전트 <char> : <role> · <conversation>` (plus ` ← <caller char> <caller name>` with `--caller`; main is `0 main`) in that row's changes `### 메모` through `grist task-update ROW --fields '{"D": ...}'` (never edits the changes file), and prints the 11-character ID. The project digits come from the `ID :` in `PROJECT_DIR/AGENTS.md`. A per-row lock serializes parallel starts. Give the conversation's stable reference, not its message body.
 
 `grist task-red --agent-id <ID>` uses the printed ID: it skips when 메모 has that agent line and only warns otherwise; without it task-red calls `start` once and prints `agent-id: <ID>`.
 

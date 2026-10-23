@@ -1,8 +1,11 @@
 [package]
 name = "grist"
-version = "0.0.12"
+version = "0.0.28"
 edition = "2021"
 description = "Grist access CLI for the extensions workflow"
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "grist"

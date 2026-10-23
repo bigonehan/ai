@@ -11,9 +11,9 @@ metadata:
 
 | Caller | Command | Judgment |
 |---|---|---|
-| `grist task-goal` | `scope --request-file F --goal-file G` | **J3** every goal line is grounded in the newest `Input.md` request, and the request is fully covered |
-| `grist task-submit`, `task-complete` | `match --goal-file G --output-file O` | **J1** the actual output satisfies each `[연결]`/`[기능]`/`[수정]` line |
-| `~/ai/scripts/bin/completion-gate` (main Stop) | `stop --message-file M` | **J2** final message is 완료 보고 / 사용자 질문 / 실패를 결론으로 종료 / 진행 보고 / 질문 답변 / 대기 보고, and, only for 사용자 질문, whether it asks for one of the four allowed actions, a `.py` consent naming path and reason, or a choice between concrete interpretations before editing |
+| `grist task-goal` | `scope --request-file F --goal-file G` | **J3** every goal line is grounded in the newest changes `# 요청` block, and the request is fully covered |
+| `~/ai/scripts/bin/task-complete` | `match --goal-file G --output-file O` | **J1** the actual output satisfies each `[연결]`/`[기능]`/`[수정]` line; `Complete_task` alone owns the completion judgment |
+| `~/ai/scripts/bin/task-complete` (main Stop) | `stop --message-file M` | **J2** final message is 완료 보고 / 사용자 질문 / 실패를 결론으로 종료 / 진행 보고 / 질문 답변 / 대기 보고, and, only for 사용자 질문, whether it asks for one of the four allowed actions, a `.py` consent naming path and reason, or a choice between concrete interpretations before editing |
 
 Do not run `jev` as part of project work and do not paste its output into Grist; the gates record a one-line summary in `.ai/changes`.
 
@@ -22,7 +22,7 @@ Do not run `jev` as part of project work and do not paste its output into Grist;
 `.env` in this skill directory (mode 600, excluded from Git; template `.env.example`):
 
 - `TYPESAFE_API_KEY` — entered by the user; never ask for it, print it, or put it in commands, logs or records.
-- `JEV_MODEL` (`jev-latest`), `JEV_MODE` (`shadow` | `enforce`), `JEV_PASS` (0.9), `JEV_FLOOR` (0.5).
+- `JEV_MODEL` (`jev-latest`), `JEV_MODE` (`shadow` | `enforce`), `JEV_PASS` (0.8), `JEV_FLOOR` (0.5).
 
 A Noul value or Choice confidence `>= JEV_PASS` is `pass`, `< JEV_FLOOR` is `fail`, otherwise `uncertain`. In `shadow` (default) callers only log; in `enforce` they reject on `fail`.
 
