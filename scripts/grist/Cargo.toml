@@ -1,6 +1,6 @@
 [package]
 name = "grist"
-version = "0.0.28"
+version = "0.0.30"
 edition = "2021"
 description = "Grist access CLI for the extensions workflow"
 

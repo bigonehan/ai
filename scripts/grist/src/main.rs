@@ -196,8 +196,9 @@ fn run(argv: &[String]) -> R<Value> {
         }
         "task-update" => {
             let row_id = args.pos_i64(0, "row_id")?;
-            let fields = parse_fields_obj(args.flag_req("fields")?, "--fields")?;
+            let mut fields = parse_fields_obj(args.flag_req("fields")?, "--fields")?;
             api::validate_task_fields(&fields)?;
+            records::single_line_cells(&mut fields)?;
             records::check_symbol_fields(&fields)?;
             records::check_diagnosis_fields(&fields)?;
             let mut record = api::update(TASK_TABLE, row_id, &fields)?;

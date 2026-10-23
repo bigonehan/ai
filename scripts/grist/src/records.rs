@@ -33,6 +33,24 @@ pub fn valid_symbol_line(line: &str) -> bool {
 }
 
 /// `task-update` CLI check: every `$J` line and the single `$D` line must start with an error symbol.
+/// Grist `$I`·`$J`·`$D` cells hold only the latest single line; the numbered history lives in changes.
+/// Rejects two or more lines and drops a leading `N. ` so changes appends the next number.
+pub fn single_line_cells(fields: &mut Map<String, Value>) -> R<()> {
+    for (cell, _) in CELL_SECTIONS {
+        let Some(value) = fields.get(cell).filter(|v| !v.is_null()) else { continue };
+        let text = util::val_str(value);
+        let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        if lines.len() > 1 {
+            return api::fail("validation", format!("${cell} is one latest line in Grist; earlier lines stay in the changes list, so pass only the new line"));
+        }
+        if let Some(line) = lines.first() {
+            let body = parse_numbered_line(line).map(|(_, b)| b.trim()).unwrap_or(line);
+            fields.insert(cell.to_string(), Value::String(body.to_string()));
+        }
+    }
+    Ok(())
+}
+
 pub fn check_symbol_fields(fields: &Map<String, Value>) -> R<()> {
     let symbols = ERROR_SYMBOLS.join("|");
     let lines = |key: &str| -> Option<Vec<String>> {
@@ -1990,6 +2008,19 @@ mod tests {
         assert!(super::check_goal_number(1, 3).is_ok() && super::check_goal_number(3, 3).is_ok());
         assert!(super::check_goal_number(0, 3).is_err() && super::check_goal_number(4, 3).is_err());
         assert!(super::check_goal_number(1, 0).is_err());
+    }
+
+    #[test]
+    fn grist_cells_keep_one_unnumbered_line() {
+        let mut two = Map::new();
+        two.insert("J".into(), Value::String("1. [🛣] a\n2. [🏷] b".into()));
+        assert!(super::single_line_cells(&mut two).is_err());
+        let mut one = Map::new();
+        one.insert("I".into(), Value::String("2. 수정 뒤에도 빈 값".into()));
+        one.insert("J".into(), Value::String("[🏷] 옛 빌드".into()));
+        super::single_line_cells(&mut one).unwrap();
+        assert_eq!(one.get("I"), Some(&Value::String("수정 뒤에도 빈 값".into())));
+        assert_eq!(one.get("J"), Some(&Value::String("[🏷] 옛 빌드".into())));
     }
 
     #[test]

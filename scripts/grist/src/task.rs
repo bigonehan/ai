@@ -217,7 +217,10 @@ impl TaskStore for GristStore {
         if ctx.stage == CONFIRMED_STAGE {
             return Ok(());
         }
-        Self::set_stage(ctx, CONFIRMED_STAGE)
+        let summary = ctx.project_dir.as_deref().and_then(|dir| gate::flow_summary(dir, ctx.raw_id));
+        api::update(TASK_TABLE, ctx.raw_id, &gate::confirmed_fields(CONFIRMED_STAGE, summary.as_deref()))?;
+        ctx.result = json!({"id": ctx.raw_id, "H": CONFIRMED_STAGE});
+        Ok(())
     }
 }
 

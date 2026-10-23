@@ -22,9 +22,13 @@ fn confirmation_note(summary: &str) -> String {
     util::head(summary, 300)
 }
 
-fn flow_wait_fields(summary: &str) -> Map<String, Value> {
+/// The `$H=확인` write: the stage plus `$D` = the latest `#### 확인` summary (완료 표시 기호 한 줄) when one exists.
+pub fn confirmed_fields(stage: &str, summary: Option<&str>) -> Map<String, Value> {
     let mut fields = Map::new();
-    fields.insert("D".into(), Value::String(confirmation_note(summary)));
+    fields.insert("H".into(), Value::String(stage.into()));
+    if let Some(summary) = summary {
+        fields.insert("D".into(), Value::String(confirmation_note(summary)));
+    }
     fields
 }
 
@@ -63,7 +67,7 @@ fn flow_summary_from_text(text: &str, raw_id: i64) -> Option<String> {
     summary
 }
 
-fn flow_summary(project_dir: &Path, raw_id: i64) -> Option<String> {
+pub fn flow_summary(project_dir: &Path, raw_id: i64) -> Option<String> {
     util::glob(&project_dir.join(".ai").join("changes"), "", ".md")
         .into_iter()
         .filter_map(|record| std::fs::read_to_string(record).ok())
@@ -1322,9 +1326,7 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
     let mut result = Vec::new();
     for row in &fetched {
         if row.h_str() == SUBMITTED_STAGE {
-            let summary = summaries.iter().find(|(id, _)| *id == row.id).map(|(_, text)| text.as_str()).unwrap();
-            let upd = flow_wait_fields(summary);
-            result.push(api::update(TASK_TABLE, row.id, &upd)?);
+            result.push(json!({"id": row.id, "flow_wait": true}));
             let mut state = gate_load(&project_dir, row.id);
             state.insert("flow_wait".into(), Value::Bool(true));
             gate_save(&project_dir, row.id, &state)?;
@@ -1346,7 +1348,7 @@ mod tests {
         assert_eq!(super::worker_row_from(Some("worker"), Some("x")), None);
     }
 
-    use super::{record_log_paths, agent_start_args, origin_action, parse_agent_id, OriginAction, Row, flow_submitted_ids, flow_wait_fields, confirmation_note, flow_summary_from_text, goal_lines, preparation_of};
+    use super::{record_log_paths, agent_start_args, origin_action, parse_agent_id, OriginAction, Row, flow_submitted_ids, confirmed_fields, confirmation_note, flow_summary_from_text, goal_lines, preparation_of};
     use serde_json::{json, Map, Value};
     use std::path::Path;
 
@@ -1358,10 +1360,12 @@ mod tests {
     }
 
     #[test]
-    fn flow_wait_writes_summary_without_advancing_stage() {
-        let fields = flow_wait_fields("[🏗️] 입력 ⇒ 확인 증거");
+    fn confirmed_write_carries_summary_note_with_stage() {
+        let fields = confirmed_fields("확인", Some("[🏗️] 입력 ⇒ 확인 증거"));
+        assert_eq!(fields.get("H"), Some(&json!("확인")));
         assert_eq!(fields.get("D"), Some(&json!("[🏗️] 입력 ⇒ 확인 증거")));
-        assert!(!fields.contains_key("H"));
+        let bare = confirmed_fields("확인", None);
+        assert!(!bare.contains_key("D") && bare.get("H") == Some(&json!("확인")));
     }
 
     #[test]
