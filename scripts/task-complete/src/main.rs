@@ -5,6 +5,7 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 const MAIN_ALLOWED: &[&str] = &["완료", "확인"];
 const AGENT_ALLOWED: &[&str] = &["검증", "완료"];
@@ -272,8 +273,25 @@ fn agent_reason(row: &Value, project_dir: Option<&str>) -> String {
         "Table26 #{id} $H={h}: 담당 작업이 아직 제출되지 않았어요. $D 최신 항목: {d}. \
 ### 목표를 확인하는 단위 테스트를 만들고 통과시킨 뒤 \
 `{CMD} task-submit {id} --project {proj}`로 제출하세요. \
-실패하면 `$H=진단`, `$I`·`$J`를 기록하고 원인을 고치세요. 사용자에게 질문하지 말고 막힌 경계는 결과 텍스트로 메인에 보고하세요."
+실패하면 `$H=진단`, `$I`·`$J`를 기록하고 원인을 고치세요. 메인의 결정이 필요하면 질문으로 끝내세요."
     )
+}
+
+fn worker_question(message: &str) -> bool {
+    let Some(last) = message.lines().rev().map(str::trim).find(|line| !line.is_empty()) else {
+        return false;
+    };
+    last.starts_with("[요청]")
+        || last.ends_with('?')
+        || last.ends_with('？')
+        || last.ends_with("할까요")
+}
+
+fn worker_stop_allowed(event: &Value, previous: &Value, reason: &str) -> bool {
+    let message = event.get("last_assistant_message").and_then(Value::as_str).unwrap_or("");
+    worker_question(message)
+        || (event.get("stop_hook_active") == Some(&Value::Bool(true))
+            && previous.get("reason").and_then(Value::as_str) == Some(reason))
 }
 
 fn init_reason(project_dir: &str) -> String {
@@ -282,6 +300,34 @@ fn init_reason(project_dir: &str) -> String {
 `manage-project` 초기화 절차(`references/initialize.md`)로 Table7 행·Obsidian 문서·`# 상태` 헤더를 만들고, 현재 요청을 `request-record`·`task-add`·`task-goal`로 기록한 뒤 \
 `manage-project` 흐름을 이어가세요."
     )
+}
+
+fn running_dispatch(project_dir: &Path) -> bool {
+    let dispatch_dir = project_dir.join(".ai/dispatch");
+    let Ok(entries) = std::fs::read_dir(&dispatch_dir) else { return false };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("sh") || !path.is_file() {
+            return false;
+        }
+        let exit = path.with_extension("exit");
+        let log = path.with_extension("log");
+        !exit.exists() && log.metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age <= Duration::from_secs(60 * 60))
+    })
+}
+
+fn dispatch_wait_allowed(rows: &[Value], project_dir: &Path) -> bool {
+    let pending: Vec<&str> = rows.iter()
+        .filter_map(|row| row.get("H").and_then(Value::as_str))
+        .filter(|stage| !MAIN_ALLOWED.contains(stage))
+        .collect();
+    !pending.is_empty()
+        && pending.iter().all(|stage| ["초안", "작업", "교정", "진단"].contains(stage))
+        && running_dispatch(project_dir)
 }
 
 fn main_reason(rows: &[Value], pending: &[Value], project_dir: &str) -> String {
@@ -578,13 +624,23 @@ fn main() {
     };
 
     let project_dir = status.get("project_dir").and_then(Value::as_str).unwrap_or(cwd);
-    let completion_checked = agent_path.is_empty() && uninitialized.is_empty();
+    // The orchestrator alone runs the completion judgment; a t26 subagent or dispatch-agent worker ends at 검증.
+    let orchestrator = agent_path.is_empty() && worker_row.is_none();
+    let completion_checked = orchestrator && uninitialized.is_empty();
+    let waiting_for_dispatch = hook_main && dispatch_wait_allowed(&initial_rows, Path::new(project_dir));
     let mut completion_error = if completion_checked {
-        initial_rows.iter().try_for_each(|row| complete_row(project_dir, row)).err()
+        initial_rows.iter().try_for_each(|row| {
+            if waiting_for_dispatch && row.get("H").and_then(Value::as_str)
+                .is_some_and(|stage| ["초안", "작업", "교정", "진단"].contains(&stage)) {
+                Ok(())
+            } else {
+                complete_row(project_dir, row)
+            }
+        }).err()
     } else { None };
     let rows_completed = completion_checked && completion_error.is_none();
     let mut rows = initial_rows;
-    if agent_path.is_empty() && uninitialized.is_empty() {
+    if orchestrator && uninitialized.is_empty() {
         let fresh = if let Some(id) = cli_row.as_deref() {
             grist(&["gate", "--cwd", cwd, "--row", id])
         } else {
@@ -604,7 +660,7 @@ fn main() {
         let h = r.get("H").and_then(Value::as_str).unwrap_or("");
         !allowed.contains(&h)
     }).cloned().collect();
-    if agent_path.is_empty() && uninitialized.is_empty() && !rows.is_empty() && rows_completed && pending.is_empty() {
+    if orchestrator && uninitialized.is_empty() && !rows.is_empty() && rows_completed && pending.is_empty() {
         let done = completed_ids(project_dir);
         if !complete_work_valid(&rows, &rows, &done) {
             completion_error = Some("COMPLETE_WORK: completed list omitted a task".into());
@@ -641,6 +697,12 @@ fn main() {
         }
     }
 
+    if hook_main && uninitialized.is_empty() && completion_error.is_none()
+        && dispatch_wait_allowed(&rows, Path::new(project_dir)) {
+        let _ = std::fs::remove_file(&state_file);
+        emit(vec![("systemMessage".into(), s("실행 중 구현자 대기: Stop hook 종료 허용"))], &sync_note);
+    }
+
     if pending.is_empty() && !jev_block && uninitialized.is_empty() && completion_error.is_none() {
         let _ = std::fs::remove_file(&state_file);
         emit(vec![], &sync_note);
@@ -665,18 +727,12 @@ fn main() {
         0
     };
 
-    let _ = std::fs::create_dir_all(&s_dir);
-    let mut new_state = Vec::new();
-    obj_set(&mut new_state, "blocks", Value::Num((blocks + 1).to_string()));
-    obj_set(&mut new_state, "stages", stages);
-    let _ = std::fs::write(&state_file, json::dumps(&Value::Obj(new_state)));
-
     let project_dir = status
         .get("project_dir")
         .filter(|v| v.truthy())
         .and_then(Value::as_str);
 
-    let reason = if !agent_path.is_empty() {
+    let reason = if worker_row.is_some() || !agent_path.is_empty() {
         agent_reason(&pending[0], project_dir)
     } else if !uninitialized.is_empty() {
         init_reason(uninitialized)
@@ -710,6 +766,18 @@ fn main() {
         pending_reason_with_error(r, completion_error.as_deref())
     };
 
+    if worker_row.is_some() && worker_stop_allowed(&event, &state, &reason) {
+        let _ = std::fs::remove_file(&state_file);
+        emit(vec![], &sync_note);
+    }
+
+    let _ = std::fs::create_dir_all(&s_dir);
+    let mut new_state = Vec::new();
+    obj_set(&mut new_state, "blocks", Value::Num((blocks + 1).to_string()));
+    obj_set(&mut new_state, "stages", stages);
+    obj_set(&mut new_state, "reason", s(&reason));
+    let _ = std::fs::write(&state_file, json::dumps(&Value::Obj(new_state)));
+
     let mut out_obj = Vec::new();
     obj_set(&mut out_obj, "decision", s("block"));
     obj_set(
@@ -722,7 +790,86 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{complete_work_valid, main_reason, needs_j2, parse_j2_response, pending_reason_with_error, session_row_ids_at, session_rows, json::s, Value, MAIN_ALLOWED};
+    use super::{complete_work_valid, dispatch_wait_allowed, main_reason, needs_j2, parse_j2_response, pending_reason_with_error, running_dispatch, session_row_ids_at, session_rows, worker_stop_allowed, json::s, Value, MAIN_ALLOWED};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime};
+
+    fn dispatch_fixture() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("tc-dispatch-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let dispatch = dir.join(".ai/dispatch");
+        std::fs::create_dir_all(&dispatch).unwrap();
+        std::fs::write(dispatch.join("359.sh"), "").unwrap();
+        std::fs::write(dispatch.join("359.log"), "").unwrap();
+        dir
+    }
+
+    fn stage_row(stage: &str) -> Value {
+        Value::Obj(vec![("id".into(), Value::Num("359".into())), ("H".into(), s(stage))])
+    }
+
+    #[test]
+    fn worker_question_ends_stop() {
+        for message in ["진행 중이에요.\n메인이 답해 주실까요?", "[요청] 어느 경로를 사용할까요", "할까요"] {
+            let event = Value::Obj(vec![("last_assistant_message".into(), s(message))]);
+            assert!(worker_stop_allowed(&event, &Value::Obj(vec![]), "미제출"));
+        }
+    }
+
+    #[test]
+    fn worker_report_keeps_block() {
+        let event = Value::Obj(vec![("last_assistant_message".into(), s("구현을 진행 중이에요."))]);
+        assert!(!worker_stop_allowed(&event, &Value::Obj(vec![]), "미제출"));
+        let earlier_question = Value::Obj(vec![("last_assistant_message".into(), s("할까요?\n구현을 진행 중이에요."))]);
+        assert!(!worker_stop_allowed(&earlier_question, &Value::Obj(vec![]), "미제출"));
+    }
+
+    #[test]
+    fn worker_same_reason_second_block_is_allowed() {
+        let event = Value::Obj(vec![("stop_hook_active".into(), Value::Bool(true))]);
+        let previous = Value::Obj(vec![("reason".into(), s("미제출"))]);
+        assert!(worker_stop_allowed(&event, &previous, "미제출"));
+        assert!(!worker_stop_allowed(&event, &previous, "다른 사유"));
+        let first_stop = Value::Obj(vec![("stop_hook_active".into(), Value::Bool(false))]);
+        assert!(!worker_stop_allowed(&first_stop, &previous, "미제출"));
+    }
+
+    #[test]
+    fn dispatch_wait_allows_draft_with_running_worker() {
+        let dir = dispatch_fixture();
+        assert!(running_dispatch(&dir));
+        assert!(dispatch_wait_allowed(&[stage_row("초안")], &dir));
+        assert!(!dispatch_wait_allowed(&[stage_row("초안"), stage_row("검증")], &dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dispatch_wait_blocks_draft_without_worker() {
+        let dir = std::env::temp_dir().join(format!("tc-dispatch-none-{}", std::process::id()));
+        assert!(!running_dispatch(&dir));
+        assert!(!dispatch_wait_allowed(&[stage_row("초안")], &dir));
+    }
+
+    #[test]
+    fn dispatch_wait_blocks_stale_log() {
+        let dir = dispatch_fixture();
+        let log = dir.join(".ai/dispatch/359.log");
+        std::fs::File::open(log).unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(61 * 60)).unwrap();
+        assert!(!running_dispatch(&dir));
+        assert!(!dispatch_wait_allowed(&[stage_row("초안")], &dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dispatch_wait_blocks_completed_worker() {
+        let dir = dispatch_fixture();
+        std::fs::write(dir.join(".ai/dispatch/359.exit"), "0").unwrap();
+        assert!(!running_dispatch(&dir));
+        assert!(!dispatch_wait_allowed(&[stage_row("초안")], &dir));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     fn done_in(text: &str) -> Vec<String> {
         grist::task::section_ids_in_text(text, "# 완료").iter().map(i64::to_string).collect()

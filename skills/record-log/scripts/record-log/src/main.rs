@@ -107,6 +107,15 @@ fn kst_date(unix_secs: u64) -> String {
     format!("{:02}{m:02}{d:02}", y % 100)
 }
 
+fn kst_time(unix_secs: u64) -> String {
+    let seconds = (unix_secs + 9 * 3600) % 86_400;
+    format!("{:02}:{:02}:{:02}", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+}
+
+fn timed_line(now: u64, id: &str, function: &str, attempt: &str, result: &str) -> Result<String, String> {
+    Ok(format!("{} | {}", kst_time(now), log_line(id, function, attempt, result)?))
+}
+
 fn log_path(dir: &str, date: &str) -> PathBuf { Path::new(dir).join(".ai/logs").join(format!("{date}.log")) }
 
 /// Project number from the top of an AGENTS.md header text.
@@ -120,9 +129,26 @@ fn header_project_id(text: &str) -> Option<u32> {
     None
 }
 
-/// Log lines containing the ID, at most 20 lines of at most 200 characters.
+fn timed_fields(line: &str) -> Option<(&str, &str, &str, &str, &str)> {
+    let mut fields = line.splitn(5, " | ");
+    let (time, id, function, attempt, result) =
+        (fields.next()?, fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+    if !valid_time(time) || parse_id(id).is_err() || function.is_empty()
+        || attempt.len() != 2 || !attempt.bytes().all(|b| b.is_ascii_digit()) { return None; }
+    Some((time, id, function, attempt, result))
+}
+
+fn valid_time(time: &str) -> bool {
+    let b = time.as_bytes();
+    b.len() == 8 && b[2] == b':' && b[5] == b':' &&
+        [0, 1, 3, 4, 6, 7].iter().all(|&i| b[i].is_ascii_digit()) &&
+        &time[..2] < "24" && &time[3..5] < "60" && &time[6..8] < "60"
+}
+
+/// Only timestamp-prefixed lines for this ID, capped for display.
 fn filter_log(text: &str, id: &str) -> Vec<String> {
-    text.lines().filter(|l| l.contains(id)).take(20).map(|l| l.chars().take(200).collect()).collect()
+    text.lines().filter(|l| timed_fields(l).is_some_and(|(_, found, _, _, _)| found == id))
+        .take(20).map(|l| l.chars().take(200).collect()).collect()
 }
 
 fn parse_memo_line(text: &str) -> Option<Entry> {
@@ -173,6 +199,10 @@ fn run_grist(args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+fn memo_write_args(dir: &str, row: u32, line: &str) -> [String; 6] {
+    ["task-memo".into(), row.to_string(), "--project".into(), dir.into(), "--line".into(), line.into()]
+}
+
 fn memo_from_show(output: &str) -> Result<Vec<String>, String> {
     let value: serde_json::Value = serde_json::from_str(output).map_err(|e| format!("task-show output: {e}"))?;
     let lines = value.get("lines").and_then(|l| l.as_array()).ok_or("task-show output has no lines")?;
@@ -208,8 +238,8 @@ fn start(dir: &str, row: u32, role: &str, conversation: &str, caller: Option<(ch
     let agent = allocate(&read_memo(dir, row)?, role)?;
     let line = memo_line(agent, role, conversation, caller)?;
     let id = make_id(project, row, agent)?;
-    let fields = serde_json::json!({ "D": line }).to_string();
-    run_grist(&["task-update", &row.to_string(), "--project", dir, "--fields", &fields])?;
+    let args = memo_write_args(dir, row, &line);
+    run_grist(&args.each_ref().map(String::as_str))?;
     Ok(id)
 }
 
@@ -247,13 +277,104 @@ fn root_paths() -> Vec<&'static Path> { ROOTS.iter().map(Path::new).collect() }
 
 fn append(id: &str, function: &str, attempt: &str, result: &str, explicit: Option<&str>) -> Result<String, String> {
     use std::io::Write;
-    let line = log_line(id, function, attempt, result)?;
+    let now = now_secs();
+    let line = timed_line(now, id, function, attempt, result)?;
     let dir = project_dir(explicit, &root_paths(), parse_id(id)?.project)?;
-    let path = log_path(&dir, &kst_date(now_secs()));
+    let path = log_path(&dir, &kst_date(now));
     fs::create_dir_all(path.parent().unwrap()).map_err(|e| format!("logs dir: {e}"))?;
     let mut f = fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| format!("log: {e}"))?;
     writeln!(f, "{line}").map_err(|e| format!("log: {e}"))?;
     Ok(line)
+}
+
+#[derive(Clone)]
+struct LogEvent {
+    time: String,
+    stage: String,
+    ack: String,
+    error: String,
+    body: Vec<String>,
+}
+
+fn token<'a>(result: &'a str, key: &str) -> Option<&'a str> {
+    result.split_whitespace().find_map(|word| word.strip_prefix(key))
+}
+
+fn error_value(result: &str) -> Option<&str> {
+    result.match_indices("error=").find_map(|(index, _)| {
+        if index == 0 || result[..index].chars().last().is_some_and(char::is_whitespace) {
+            Some(&result[index + "error=".len()..])
+        } else {
+            None
+        }
+    })
+}
+
+fn latest_lines(text: &str, fn_filter: Option<&str>, since: Option<&str>) -> Vec<String> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(String, String), Vec<LogEvent>> = BTreeMap::new();
+    for line in text.lines() {
+        let Some((time, id, function, _, result)) = timed_fields(line) else { continue };
+        if fn_filter.is_some_and(|name| name != function) || since.is_some_and(|start| time < start) { continue; }
+        let mut body: Vec<String> = result.split_whitespace().filter(|word| word.starts_with("body=") || word.starts_with("body."))
+            .map(str::to_owned).collect();
+        body.sort();
+        groups.entry((id.into(), function.into())).or_default().push(LogEvent {
+            time: time.into(),
+            stage: token(result, "stage=").unwrap_or("-").into(),
+            ack: token(result, "ack=").unwrap_or("-").into(),
+            error: error_value(result).unwrap_or("-").into(),
+            body,
+        });
+    }
+    let mut lines = vec![];
+    for ((id, function), mut events) in groups {
+        events.sort_by(|a, b| a.time.cmp(&b.time));
+        let last = events.last().unwrap();
+        let last_ok = events.iter().rev().find(|event| event.error == "none").map(|event| event.time.as_str()).unwrap_or("-");
+        let fails = events.iter().rev().take_while(|event| event.error != "none").count();
+        let failures: Vec<_> = events.iter().filter(|event| event.error != "none").collect();
+        let fixed = failures.len() >= 2 && failures[0].ack != "-" && !failures[0].body.is_empty()
+            && failures.iter().all(|event| event.ack == failures[0].ack && event.body == failures[0].body);
+        let warnings = format!("{}{}",
+            if failures.iter().any(|event| event.stage == "-") { " warn=no_stage" } else { "" },
+            if fixed { " warn=fixed_ack_body" } else { "" });
+        let (mut function, mut stage, mut ack, mut error) =
+            (function, last.stage.clone(), last.ack.clone(), last.error.clone());
+        let line = loop {
+            let line = format!("{} | {id} | {function} | last={} stage={stage} ack={ack} error={error} last_ok={last_ok} fails={fails}{warnings}",
+                last.time, if last.error == "none" { "ok" } else { "fail" });
+            if line.chars().count() <= 200 { break line; }
+            let field = [&mut error, &mut function, &mut stage, &mut ack].into_iter()
+                .find(|value| value.chars().count() > 1);
+            if let Some(value) = field { value.pop(); } else { break line.chars().take(200).collect(); }
+        };
+        lines.push((last.time.clone(), line));
+    }
+    lines.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    lines.into_iter().take(20).map(|(_, line)| line).collect()
+}
+
+fn latest(explicit: Option<&str>, fn_filter: Option<&str>, since: Option<&str>, now: u64) -> Result<String, String> {
+    let since = since.map(|value| {
+        let full = format!("{value}:00");
+        if value.len() == 5 && valid_time(&full) { Ok(full) } else { Err("--since must be HH:MM".to_owned()) }
+    }).transpose()?;
+    let dir = match explicit {
+        Some(dir) => dir.to_owned(),
+        None => {
+            let cwd = env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+            let project = project_id(cwd.to_str().ok_or("cwd is not UTF-8")?)?;
+            project_dir(None, &root_paths(), project)?
+        }
+    };
+    let path = log_path(&dir, &kst_date(now));
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("log: {e}")),
+    };
+    Ok(latest_lines(&text, fn_filter, since.as_deref()).join("\n"))
 }
 
 fn changes_has_row(dir: &str, row: u32) -> bool {
@@ -281,7 +402,7 @@ fn find(id: &str, explicit: Option<&str>) -> Result<String, String> {
     Ok(out.join("\n"))
 }
 
- fn run(args: &[String]) -> Result<String, String> {
+fn run(args: &[String]) -> Result<String, String> {
     match args.first().map(String::as_str) {
         Some("start") if args.len() >= 3 => {
             let row = args[2].parse::<u32>().map_err(|_| "row must be a number")?;
@@ -303,9 +424,27 @@ fn find(id: &str, explicit: Option<&str>) -> Result<String, String> {
                 e.caller.map(|(c, n)| format!(" | caller={c} {n}")).unwrap_or_default()))
         }
         Some("append") if args.len() == 5 || args.len() == 7 => append(&args[1], &args[2], &args[3], &args[4], flag(args, "--project").as_deref()),
+        Some("latest") => {
+            let mut project = None;
+            let mut function = None;
+            let mut since = None;
+            let mut options = args[1..].chunks_exact(2);
+            for pair in &mut options {
+                let slot = match pair[0].as_str() {
+                    "--project" => &mut project,
+                    "--fn" => &mut function,
+                    "--since" => &mut since,
+                    _ => return Err("usage: latest [--project DIR] [--fn NAME] [--since HH:MM]".into()),
+                };
+                if slot.is_some() || pair[1].starts_with("--") { return Err("duplicate or missing latest option value".into()); }
+                *slot = Some(pair[1].as_str());
+            }
+            if !options.remainder().is_empty() { return Err("latest option needs a value".into()); }
+            latest(project, function, since, now_secs())
+        }
         Some("find") if args.len() == 2 || args.len() == 4 => find(&args[1], flag(args, "--project").as_deref()),
         Some("log-line") if args.len() == 5 => log_line(&args[1], &args[2], &args[3], &args[4]),
-        _ => Err("usage: record-log start PROJECT_DIR ROW --role NAME [--conversation ID] [--caller CHAR NAME] | parse ID --project DIR | log-line ID FUNCTION ATTEMPT RESULT | append ID FUNCTION ATTEMPT RESULT [--project DIR] | find ID [--project DIR]".into()),
+        _ => Err("usage: record-log start PROJECT_DIR ROW --role NAME [--conversation ID] [--caller CHAR NAME] | parse ID --project DIR | log-line ID FUNCTION ATTEMPT RESULT | append ID FUNCTION ATTEMPT RESULT [--project DIR] | find ID [--project DIR] | latest [--project DIR] [--fn NAME] [--since HH:MM]".into()),
     }
 }
 
@@ -435,6 +574,11 @@ mod tests {
         assert!(memo_line('2', "r", "c", Some(('O', "main"))).is_err());
         assert!(memo_line('2', "r", "c", Some(('0', "a\nb"))).is_err());
     }
+    #[test] fn memo_write_uses_changes_command() {
+        let line = "에이전트 1 : codex_338 · 4910ec9c ← 0 main";
+        assert_eq!(memo_write_args("/project", 338, line),
+            ["task-memo", "338", "--project", "/project", "--line", line]);
+    }
     #[test] fn parse_caller_and_legacy() {
         let e = parse_memo_line("3. 에이전트 2 : t26_241 · conv-9 ← 0 main").unwrap();
         assert_eq!(e, Entry { agent: '2', role: "t26_241".into(), conversation: "conv-9".into(), caller: Some(('0', "main".into())) });
@@ -456,14 +600,78 @@ mod tests {
     }
     #[test] fn filter_log_matches_caps_and_truncates() {
         let id = "0011980241A";
-        let mut text = String::from("other | f | 01 | ok\n");
-        for i in 0..30 { text.push_str(&format!("{id} | f | {i:02} | ok\n")); }
-        text.push_str(&format!("{id} | f | 99 | {}\n", "y".repeat(300)));
+        let mut text = format!("{id} | f | 01 | old\n10:00:00 | 0011980241B | f | 01 | {id}\n");
+        for i in 0..30 { text.push_str(&format!("10:00:{i:02} | {id} | f | {i:02} | ok\n")); }
+        text.push_str(&format!("10:00:59 | {id} | f | 99 | {}\n", "y".repeat(300)));
         let out = filter_log(&text, id);
         assert_eq!(out.len(), 20);
-        assert!(out.iter().all(|l| l.contains(id) && l.chars().count() <= 200));
-        let long = filter_log(&format!("{id} | f | 99 | {}\n", "y".repeat(300)), id);
+        assert_eq!(out[0], format!("10:00:00 | {id} | f | 00 | ok"));
+        assert!(out.iter().all(|l| l.chars().count() <= 200));
+        let long = filter_log(&format!("10:00:59 | {id} | f | 99 | {}\n", "y".repeat(300)), id);
         assert_eq!(long[0].chars().count(), 200);
         assert!(filter_log("nothing\n", id).is_empty());
+    }
+
+    #[test] fn append_line_uses_kst_time_from_now() {
+        assert_eq!(timed_line(1_792_594_800, "00119803801", "record.append", "01", "ack=received error=none").unwrap(),
+            "00:00:00 | 00119803801 | record.append | 01 | ack=received error=none");
+        assert_eq!(kst_date(1_792_594_800), "261022");
+    }
+
+    #[test] fn latest_groups_judges_and_warns() {
+        let text = concat!(
+            "09:00:00 | 00119803801 | send | 01 | ack=received error=none\n",
+            "09:01:00 | 00119803801 | send | 02 | ack=not_observed body=none error=timeout\n",
+            "09:02:00 | 00119803801 | send | 03 | ack=not_observed body=none error=timeout\n",
+            "09:03:00 | 00119803801 | other | 01 | stage=send ack=rejected body.status=failed error=bad\n",
+            "00119803801 | send | 04 | old\n");
+        let lines = latest_lines(text, None, None);
+        assert_eq!(lines, vec![
+            "09:03:00 | 00119803801 | other | last=fail stage=send ack=rejected error=bad last_ok=- fails=1",
+            "09:02:00 | 00119803801 | send | last=fail stage=- ack=not_observed error=timeout last_ok=09:00:00 fails=2 warn=no_stage warn=fixed_ack_body",
+        ]);
+        assert_eq!(latest_lines(text, Some("send"), Some("09:02:00")), vec![
+            "09:02:00 | 00119803801 | send | last=fail stage=- ack=not_observed error=timeout last_ok=- fails=1 warn=no_stage",
+        ]);
+    }
+
+    #[test] fn latest_keeps_multiword_error_value() {
+        let text = concat!(
+            "09:00:00 | 00119803801 | send | 01 | ack=received error=none\n",
+            "09:01:00 | 00119803801 | send | 02 | stage=send ack=not_observed body=none error=too long\n",
+        );
+        assert_eq!(latest_lines(text, None, None), vec![
+            "09:01:00 | 00119803801 | send | last=fail stage=send ack=not_observed error=too long last_ok=09:00:00 fails=1",
+        ]);
+    }
+
+    #[test] fn latest_limits_groups_and_line_length() {
+        let mut text = String::new();
+        for i in 0..25 {
+            text.push_str(&format!("10:{i:02}:00 | 00119803801 | fn{i} | 01 | stage=send ack=rejected body=none error={}\n", "x".repeat(120)));
+        }
+        let lines = latest_lines(&text, None, None);
+        assert_eq!(lines.len(), 20);
+        assert!(lines[0].starts_with("10:24:00"));
+        assert!(lines.iter().all(|line| line.chars().count() <= 200));
+    }
+
+    #[test] fn latest_keeps_spaces_in_error_value() {
+        let text = "11:00:00 | 00119803801 | send | 01 | ack=received body.status=failed stage=receiver_reject error=too long\n";
+        assert_eq!(latest_lines(text, None, None), vec![
+            "11:00:00 | 00119803801 | send | last=fail stage=receiver_reject ack=received error=too long last_ok=- fails=1",
+        ]);
+        assert_eq!(error_value("prefixerror=wrong ack=received error=too long"), Some("too long"));
+    }
+
+    #[test] fn latest_trims_error_to_keep_200_character_line() {
+        let function = "extraordinarily_long_receiver_function";
+        let result = format!("ack=received body.status=failed stage=receiver_reject error=too long {}", "x".repeat(105));
+        let text = format!("11:00:00 | 00119803801 | {function} | 01 | {result}\n");
+        let line = latest_lines(&text, None, None).remove(0);
+        assert_eq!(line.chars().count(), 200);
+        assert!(line.contains("error=too long "));
+        assert!(line.ends_with("last_ok=- fails=1"));
+        assert!(!line.contains(&"x".repeat(105)));
     }
 }

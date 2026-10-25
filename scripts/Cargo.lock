@@ -51,7 +51,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "dispatch-agent"
-version = "0.0.2"
+version = "0.0.5"
 
 [[package]]
 name = "displaydoc"
@@ -104,7 +104,7 @@ dependencies = [
 
 [[package]]
 name = "grist"
-version = "0.0.30"
+version = "0.0.34"
 dependencies = [
  "regex",
  "serde_json",
@@ -267,6 +267,13 @@ name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+
+[[package]]
+name = "main-edit-gate"
+version = "0.0.34"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "memchr"
@@ -487,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "task-complete"
-version = "0.0.17"
+version = "0.0.21"
 dependencies = [
  "grist",
 ]

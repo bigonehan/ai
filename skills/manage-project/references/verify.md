@@ -6,7 +6,7 @@
 
 ## 1. 숨긴 사례 검증 (`Flow 5: Hidden cases`, main)
 
-- 각 행이 `$H=검증`이 되면 에이전트가 보지 못한 새로운 입력·경계값·빈 값 사례로 `task-hidden`을 실행한다:
+- 각 행이 `$H=검증`이 되면 메인은 에이전트가 보지 못한 새로운 입력·경계값·빈 값 사례의 입력·기대값만 정한다. 테스트 파일(`test/tmp/`)은 메인이 직접 쓰지 않고 `dispatch-agent --agent codex` 구현자에게 그 입력·기대값으로 작성시킨 뒤, 메인은 `task-hidden`으로 실행만 한다:
   ```bash
   ~/ai/scripts/bin/grist task-hidden <id> --project <dir> --purpose "<원하는 결과 라벨>" --test "<새 입력 테스트 명령>"
   ```

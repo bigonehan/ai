@@ -71,9 +71,13 @@ pub fn check_symbol_fields(fields: &Map<String, Value>) -> R<()> {
     Ok(())
 }
 
-/// `[N/M <stage>] <goal line N body>` for Table26 `$K`.
-pub fn goal_k_line(n: usize, m: usize, stage: &str, body: &str) -> String {
-    format!("[{n}/{m} {stage}] {body}")
+/// Goal line body without its `[연결|기능|수정]` tag, for Table26 `$K`.
+pub fn goal_k_line(body: &str) -> String {
+    let body = body.trim();
+    match body.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        Some((tag, rest)) if matches!(tag, "연결" | "기능" | "수정") => rest.trim().to_string(),
+        _ => body.to_string(),
+    }
 }
 
 pub fn check_goal_number(n: usize, m: usize) -> Result<(), String> {
@@ -84,21 +88,6 @@ pub fn check_goal_number(n: usize, m: usize) -> Result<(), String> {
         return Err(format!("--goal {n} out of range 1..={m}"));
     }
     Ok(())
-}
-
-/// Rewrites `$K` with the stored `goal_n` and the given stage; no-op without `goal_n` or for 확인·완료.
-pub fn write_goal_stage(project_dir: &Path, raw_id: i64, stage: &str) -> R<Option<Value>> {
-    if matches!(stage, "확인" | "완료") {
-        return Ok(None);
-    }
-    let Some(n) = crate::gate::gate_load(project_dir, raw_id).get("goal_n").and_then(|v| v.as_u64()) else {
-        return Ok(None);
-    };
-    let bodies = goal_bodies(project_dir, raw_id).unwrap_or_default();
-    let Some(body) = bodies.get((n as usize).wrapping_sub(1)) else { return Ok(None) };
-    let mut k = Map::new();
-    k.insert(api::GOAL_FIELD.into(), Value::String(goal_k_line(n as usize, bodies.len(), stage, body)));
-    api::update(TASK_TABLE, raw_id, &k).map(Some)
 }
 
 /// Goal numbers in 1..=m not yet recorded by `task-step --goal` (gate state `goals_stepped`, else `goal_n`).
@@ -773,6 +762,23 @@ pub fn record_cell(project_dir: &Path, raw_id: i64, name: &str, value: &str) -> 
     Ok(res.unwrap_or(false))
 }
 
+/// Append one agent identity to the changes memo without writing Table26 `$D`.
+pub fn record_agent_memo(project_dir: &Path, raw_id: i64, line: &str) -> R<bool> {
+    if !line.starts_with("에이전트 ") || line.trim() != line || line.contains(['\n', '\r']) {
+        return api::fail("validation", "task-memo needs one agent line starting with `에이전트 `");
+    }
+    if item_file(project_dir, raw_id).is_none() {
+        return api::fail("records", format!("Table26 #{raw_id} block not found in .ai/changes"));
+    }
+    record_cell(project_dir, raw_id, "메모", line)
+}
+
+pub fn task_memo(project_arg: &str, raw_id: i64, line: &str) -> R<Value> {
+    let (project_dir, _, _) = owned(project_arg, raw_id)?;
+    let added = record_agent_memo(&project_dir, raw_id, line)?;
+    Ok(json!({ "id": raw_id, "added": added }))
+}
+
 pub struct ItemInfo {
     pub title: String,
     pub kind: String,
@@ -856,25 +862,37 @@ pub fn ensure_completion_note(project_dir: &Path, raw_id: i64) -> R<bool> {
         let impl_end = span(lines, impl_start, 3).min(item_end);
         let heading = format!("#### 완료 (#{raw_id})");
         if lines[impl_start + 1..impl_end].iter().any(|line| line.trim() == heading) { return false; }
-        let actions: Vec<String> = lines[impl_start + 1..impl_end].iter()
-            .filter_map(|line| {
-                let trimmed = line.trim();
-                let text = trimmed.strip_prefix("- [▶]").or_else(|| trimmed.strip_prefix("- [○]"))?;
-                let text = text.trim();
-                if text.is_empty() { None } else { Some(text.to_string()) }
-            }).collect();
+        let actions = completion_action_lines(&lines[impl_start + 1..impl_end]);
         let mut note = vec![heading];
         if actions.is_empty() {
             let Some(line) = confirmed_completion_line(&lines[impl_start + 1..impl_end], raw_id) else { return false; };
             note.push(line);
         } else {
-            for (index, action) in actions.iter().rev().take(5).rev().enumerate() {
-                note.push(format!("{}. [🏗️] {}", index + 1, action));
-            }
+            note.extend(actions);
         }
         lines.splice(impl_end..impl_end, note);
         true
     })?.unwrap_or(false))
+}
+
+fn completion_action_lines(lines: &[String]) -> Vec<String> {
+    let actions: Vec<String> = lines.iter().filter_map(|line| {
+        let trimmed = line.trim();
+        let (text, numbered) = if let Some(text) = trimmed.strip_prefix("- [▶]") {
+            (text.trim(), true)
+        } else {
+            (trimmed.strip_prefix("- [○]")?.trim(), false)
+        };
+        let text = if numbered {
+            text.split_once(". ")
+                .filter(|(number, _)| number.parse::<usize>().is_ok())
+                .map_or(text, |(_, body)| body.trim())
+        } else { text };
+        if text.is_empty() { None } else { Some(text.to_string()) }
+    }).collect();
+    actions.iter().rev().take(5).rev().enumerate()
+        .map(|(index, action)| format!("{}. [🏗️] {}", index + 1, action))
+        .collect()
 }
 
 pub fn has_completion_note(project_dir: &Path, raw_id: i64) -> bool {
@@ -1547,10 +1565,11 @@ fn latest_stage_block(block: &[String], stage: &str, raw_id: i64) -> Vec<String>
         .collect()
 }
 
-/// Replaces the `### 구현` line that starts with `- [step]`, or inserts it after the last `- [` line before the first `####`.
-fn upsert_step(lines: &mut Vec<String>, raw_id: i64, step: &str, clean: &str) -> String {
+/// Replaces the matching step and goal, keeping goal steps ahead of confirmation steps.
+fn upsert_step(lines: &mut Vec<String>, raw_id: i64, step: &str, clean: &str, goal: Option<usize>) -> String {
     let prefix = format!("- [{step}]");
-    let new_line = format!("{prefix} {clean}");
+    let key = goal.map_or_else(|| prefix.clone(), |number| format!("{prefix} {number}."));
+    let new_line = goal.map_or_else(|| format!("{prefix} {clean}"), |number| format!("{prefix} {number}. {clean}"));
     let (sub_start, sub_end) = subsection(lines, raw_id, "구현");
     let mut h4_at = sub_end;
     for idx in (sub_start + 1)..sub_end {
@@ -1560,14 +1579,16 @@ fn upsert_step(lines: &mut Vec<String>, raw_id: i64, step: &str, clean: &str) ->
         }
     }
     for idx in (sub_start + 1)..h4_at {
-        if lines[idx].trim_start().starts_with(&prefix) {
+        if lines[idx].trim_start().starts_with(&format!("{key} ")) {
             lines[idx] = new_line.clone();
             return new_line;
         }
     }
     let mut insert_at = sub_start + 1;
     for idx in (sub_start + 1)..h4_at {
-        if lines[idx].trim_start().starts_with("- [") {
+        let line = lines[idx].trim_start();
+        if (goal.is_none() && line.starts_with("- ["))
+            || (goal.is_some() && (line.starts_with("- [▷]") || line.starts_with("- [▶]"))) {
             insert_at = idx + 1;
         }
     }
@@ -1591,13 +1612,7 @@ pub fn task_step(project_arg: &str, raw_id: i64, step: &str, text: &str, goal: u
     if let Err(e) = check_goal_number(goal, bodies.len()) {
         return api::fail("validation", format!("#{raw_id} {e}"));
     }
-    let stage = api::get(TASK_TABLE, Some(&[raw_id]), None, Some(&["H".into()]))?
-        .first()
-        .and_then(|r| r.get("fields"))
-        .and_then(|f| f.get("H"))
-        .map(util::val_str)
-        .unwrap_or_default();
-    let updated = edit_item(&project_dir, raw_id, |lines| upsert_step(lines, raw_id, step, &clean))?;
+    let updated = edit_item(&project_dir, raw_id, |lines| upsert_step(lines, raw_id, step, &clean, Some(goal)))?;
     let Some(new_line) = updated else {
         return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
     };
@@ -1611,7 +1626,7 @@ pub fn task_step(project_arg: &str, raw_id: i64, step: &str, text: &str, goal: u
     stepped.insert(goal as u64);
     state.insert("goals_stepped".into(), json!(stepped.into_iter().collect::<Vec<_>>()));
     crate::gate::gate_save(&project_dir, raw_id, &state)?;
-    let k = goal_k_line(goal, bodies.len(), &stage, &bodies[goal - 1]);
+    let k = goal_k_line(&bodies[goal - 1]);
     let mut fields = Map::new();
     fields.insert(api::GOAL_FIELD.into(), Value::String(k.clone()));
     api::update(TASK_TABLE, raw_id, &fields)?;
@@ -1643,8 +1658,8 @@ fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &st
         Err(e) => return api::fail("validation", format!("#{raw_id} {e}")),
     };
     let steps = edit_item(project_dir, raw_id, |lines| {
-        upsert_step(lines, raw_id, "○", check);
-        upsert_step(lines, raw_id, "●", "사용자 검토 대기");
+        upsert_step(lines, raw_id, "○", check, None);
+        upsert_step(lines, raw_id, "●", "사용자 검토 대기", None);
     })?;
     if steps.is_none() {
         return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
@@ -1674,6 +1689,31 @@ pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, 
 #[cfg(test)]
 mod tests {
     use super::{format_judge, register_item, register_session_row_at, task_add_fields};
+
+    #[test]
+    fn goal_steps_keep_each_number_and_precede_confirmation_steps() {
+        let mut lines: Vec<String> = "## [구현] 기록 (#327)\n### 구현\n- [○] 확인\n- [●] 사용자 검토 대기\n#### 확인 (#327)"
+            .lines().map(String::from).collect();
+        super::upsert_step(&mut lines, 327, "▶", "첫 내역", Some(1));
+        super::upsert_step(&mut lines, 327, "▶", "둘째 내역", Some(2));
+        assert_eq!(&lines[2..6], ["- [▶] 1. 첫 내역", "- [▶] 2. 둘째 내역", "- [○] 확인", "- [●] 사용자 검토 대기"]);
+
+        super::upsert_step(&mut lines, 327, "▶", "첫 내역 수정", Some(1));
+        assert_eq!(&lines[2..6], ["- [▶] 1. 첫 내역 수정", "- [▶] 2. 둘째 내역", "- [○] 확인", "- [●] 사용자 검토 대기"]);
+        super::upsert_step(&mut lines, 327, "▷", "초안", Some(2));
+        assert_eq!(&lines[2..7], ["- [▶] 1. 첫 내역 수정", "- [▶] 2. 둘째 내역", "- [▷] 2. 초안", "- [○] 확인", "- [●] 사용자 검토 대기"]);
+        super::upsert_step(&mut lines, 327, "○", "다시 확인", None);
+        assert_eq!(lines[5], "- [○] 다시 확인");
+    }
+
+    #[test]
+    fn completion_actions_omit_goal_number_prefix() {
+        let lines = ["- [▶] 1. 첫 내역", "- [▶] 2. 둘째 내역", "- [○] 확인"]
+            .map(String::from);
+        assert_eq!(super::completion_action_lines(&lines), [
+            "1. [🏗️] 첫 내역", "2. [🏗️] 둘째 내역", "3. [🏗️] 확인"
+        ]);
+    }
 
     #[test]
     fn missing_goal_steps_lists_unrecorded_numbers() {
@@ -1966,6 +2006,23 @@ mod tests {
     }
 
     #[test]
+    fn task_memo_appends_only_agent_line_to_memo() {
+        let project = temp_project("grist-task-memo", GOAL_ITEM);
+        let line = "에이전트 1 : codex_338 · 4910ec9c ← 0 main";
+        assert!(super::record_agent_memo(&project, 7, line).unwrap());
+        assert!(!super::record_agent_memo(&project, 7, line).unwrap());
+        assert!(super::record_agent_memo(&project, 7, "다른 메모").is_err());
+        assert!(super::record_agent_memo(&project, 7, "에이전트 2 : a\nb").is_err());
+        let file = super::item_file(&project, 7).unwrap();
+        let content = std::fs::read_to_string(file).unwrap();
+        let mut lines = crate::util::splitlines(&content);
+        let (start, end) = super::subsection(&mut lines, 7, "메모");
+        assert_eq!(lines[(start + 1)..end].iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(),
+            vec!["- 메모 줄", "1. 에이전트 1 : codex_338 · 4910ec9c ← 0 main"]);
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn goal_survives_complete_item() {
         let project = temp_project("grist-goal-complete", GOAL_ITEM);
         let before = super::changes_goal(&project, 7).unwrap();
@@ -2004,7 +2061,9 @@ mod tests {
 
     #[test]
     fn goal_k_line_and_number_range() {
-        assert_eq!(super::goal_k_line(1, 3, "작업", "[기능] a"), "[1/3 작업] [기능] a");
+        assert_eq!(super::goal_k_line("[수정] task-step --goal N ⇒ 줄이 남는다"), "task-step --goal N ⇒ 줄이 남는다");
+        assert_eq!(super::goal_k_line("[기능] a"), "a");
+        assert_eq!(super::goal_k_line("[값] a"), "[값] a");
         assert!(super::check_goal_number(1, 3).is_ok() && super::check_goal_number(3, 3).is_ok());
         assert!(super::check_goal_number(0, 3).is_err() && super::check_goal_number(4, 3).is_err());
         assert!(super::check_goal_number(1, 0).is_err());

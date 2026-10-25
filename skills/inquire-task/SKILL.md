@@ -19,6 +19,6 @@ description: Split one `# 요청` detail line of an /home/tree/extensions reques
 
 ## 이후 단계와의 연결
 
-- 줄 번호 N이 그대로 측정 단위 번호다. 구현자는 `task-step --goal N`으로 진행 중인 단위를 기록하고, Grist `$K`에 `[N/M <단계>] <목표 N줄>`이 표시된다.
+- 줄 번호 N이 그대로 측정 단위 번호다. 구현자는 `task-step --goal N`으로 진행 중인 단위를 기록하고, Grist `$K`에 `[연결|기능|수정]` 태그를 뺀 목표 N줄 본문만 표시된다.
 - 검증 뒤 `task-confirm --evidence`는 목표 줄마다 `N. <실제 관측값>` 한 줄을 받는다. 목표 한 줄에 관측값이 하나여야 근거 한 줄과 1:1로 맞고 J1 판정이 의미를 가진다.
 - 작업 중 오류가 나도 목표 줄을 늘리지 않는다. 오류는 `$I`·`$J`(`[오류 기호] 한 줄`, `manage-project` 3절 `### 원인`)에만 기록한다. 사용자가 새 요구를 말하면 새 `request-record` 블록과 새 목표를 만든다.

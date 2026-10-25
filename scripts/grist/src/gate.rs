@@ -123,6 +123,17 @@ fn worker_row_from(role: Option<&str>, row: Option<&str>) -> Option<i64> {
     row?.trim().parse().ok()
 }
 
+fn delegate_boundary(role: Option<&str>, raw_id: i64, changed: usize, files: &[String]) -> Option<Value> {
+    if role == Some("worker") || changed < 3 { return None; }
+    Some(json!({
+        "boundary": "delegate",
+        "raw_id": raw_id,
+        "changed": changed,
+        "files": files,
+        "reason": "main session changed 3 or more files; delegate implementation with dispatch-agent"
+    }))
+}
+
 pub fn actor() -> (String, Option<i64>) {
     if let Some(row) = worker_row() {
         return ("agent".into(), Some(row));
@@ -606,9 +617,11 @@ pub fn jev_summary(result: &Value) -> String {
 
 // --- git scope --------------------------------------------------------------
 
+/// Paths left out of the change count: build caches and the records `grist` itself writes
+/// (`.ai/changes`, `.ai/gate`), which change on every grist command and say nothing about the work.
 fn generated(path: &str) -> bool {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(^|/)(__pycache__|\.pytest_cache|node_modules|\.mypy_cache)(/|$)|\.pyc$").unwrap())
+    RE.get_or_init(|| Regex::new(r"(^|/)(__pycache__|\.pytest_cache|node_modules|\.mypy_cache)(/|$)|\.pyc$|(^|/)\.ai/(changes|gate)/").unwrap())
         .is_match(path)
 }
 
@@ -632,11 +645,57 @@ pub fn snapshot(project_dir: &Path) -> Option<String> {
     tree.filter(|t| !t.is_empty())
 }
 
-/// Files (relative to the project) that differ between the preparation snapshot and now.
+/// Files (relative to the repo at `project_dir`) that differ between the preparation snapshot and now;
+/// `external_changed` reuses it for packages outside the project.
 pub fn changed_since(project_dir: &Path, prepared: &str) -> BTreeSet<String> {
     let Some(now) = snapshot(project_dir) else { return BTreeSet::new() };
     let names = git(project_dir, &["diff", "--name-only", "--relative", prepared, &now]).unwrap_or_default();
     util::splitlines(&names).into_iter().filter(|l| !l.is_empty() && !generated(l)).collect()
+}
+
+/// Packages outside the project that hold the row's test files, as (git repo root, package path relative to it).
+/// The package is the nearest folder with `Cargo.toml` or `package.json` above the test file, inside its repo.
+pub fn external_scopes(project_dir: &Path, tests: &[String]) -> Vec<(PathBuf, String)> {
+    let mut scopes: Vec<(PathBuf, String)> = Vec::new();
+    for test in tests {
+        let path = Path::new(test);
+        if !path.is_absolute() || path.starts_with(project_dir) { continue; }
+        let Some(dir) = path.parent() else { continue };
+        let Some(top) = git(dir, &["rev-parse", "--show-toplevel"]).map(|s| PathBuf::from(util::strip(&s))) else { continue };
+        let package = dir.ancestors().take_while(|d| d.starts_with(&top))
+            .find(|d| d.join("Cargo.toml").is_file() || d.join("package.json").is_file())
+            .unwrap_or(dir);
+        let scope = package.strip_prefix(&top).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        if !scopes.iter().any(|(r, s)| *r == top && *s == scope) { scopes.push((top, scope)); }
+    }
+    scopes
+}
+
+/// `external` record for ready/red: each outside package with its repo snapshot.
+fn external_snapshots(project_dir: &Path, tests: &[String]) -> Value {
+    Value::Array(external_scopes(project_dir, tests).into_iter()
+        .filter_map(|(repo, scope)| snapshot(&repo).map(|tree| json!({"repo": util::path_str(&repo), "scope": scope, "snapshot": tree})))
+        .collect())
+}
+
+/// Files changed since preparation inside the recorded outside packages (other packages of the same repo are ignored).
+fn external_changed_files(prepared: &Map<String, Value>) -> Vec<String> {
+    let Some(items) = prepared.get("external").and_then(Value::as_array) else { return Vec::new() };
+    items.iter().flat_map(|item| {
+        let (Some(repo), Some(scope), Some(tree)) = (
+            item.get("repo").and_then(Value::as_str),
+            item.get("scope").and_then(Value::as_str),
+            item.get("snapshot").and_then(Value::as_str),
+        ) else { return Vec::new() };
+        let scope = vec![scope.to_string()];
+        changed_since(Path::new(repo), tree).iter()
+            .filter(|f| scope[0].is_empty() || inside(f, &scope))
+            .map(|f| Path::new(repo).join(f).to_string_lossy().to_string()).collect::<Vec<_>>()
+    }).collect()
+}
+
+pub fn external_changed(prepared: &Map<String, Value>) -> usize {
+    external_changed_files(prepared).len()
 }
 
 pub fn inside(path: &str, prefixes: &[String]) -> bool {
@@ -906,7 +965,8 @@ pub fn task_red(
         "test": command,
         "tests": tests,
         "paths": paths,
-        "snapshot": snapshot(&project_dir)
+        "snapshot": snapshot(&project_dir),
+        "external": external_snapshots(&project_dir, tests)
     });
     let det_one = one_line(detail, &project_dir);
     let rec_detail = if !det_one.is_empty() {
@@ -966,7 +1026,8 @@ pub fn task_ready(
         "test": command,
         "tests": tests,
         "paths": paths,
-        "snapshot": snapshot(&project_dir)
+        "snapshot": snapshot(&project_dir),
+        "external": external_snapshots(&project_dir, tests)
     });
     let mut ctx = TaskCtx {
         project_dir: Some(project_dir),
@@ -1055,6 +1116,12 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
         }
     }
 
+    let mut files: Vec<String> = changed.iter().cloned().collect();
+    files.extend(external_changed_files(&prepared));
+    let changed_count = files.len();
+    if let Some(boundary) = delegate_boundary(std::env::var("T26_ROLE").ok().as_deref(), raw_id, changed_count, &files) {
+        return gate_err(boundary);
+    }
     let mut ctx = TaskCtx {
         project_dir: Some(project_dir),
         raw_id,
@@ -1065,18 +1132,10 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
         detail: format!("집중 테스트 통과 {}", run.suffix()),
         test: test_cmd,
         output: run.output,
-        changed: changed.len(),
+        changed: changed_count,
         ..Default::default()
     };
-    let goal_dir = ctx.project_dir.clone();
     TaskChain::standard(Step::Submit).run(Step::Submit, &mut ctx)?;
-    if let Some(dir) = goal_dir {
-        if let Some(record) = records::write_goal_stage(&dir, raw_id, SUBMITTED_STAGE)? {
-            if let (Some(obj), Some(k)) = (ctx.result.as_object_mut(), record.get("fields").and_then(|f| f.get(GOAL_FIELD))) {
-                obj.insert("K".into(), k.clone());
-            }
-        }
-    }
     Ok(ctx.result)
 }
 
@@ -1341,6 +1400,18 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn submit_delegates_main_three_files_but_allows_two_and_worker() {
+        let files = vec!["a".into(), "b".into(), "c".into()];
+        let denied = super::delegate_boundary(None, 375, 3, &files).unwrap();
+        assert_eq!(denied["boundary"], "delegate");
+        assert_eq!(denied["raw_id"], 375);
+        assert_eq!(denied["changed"], 3);
+        assert_eq!(denied["files"], serde_json::json!(files));
+        assert!(denied["reason"].as_str().unwrap().contains("dispatch-agent"));
+        assert!(super::delegate_boundary(None, 375, 2, &files[..2]).is_none());
+        assert!(super::delegate_boundary(Some("worker"), 375, 3, &files).is_none());
+    }
+    #[test]
     fn worker_row_needs_worker_role_and_numeric_row() {
         assert_eq!(super::worker_row_from(Some("worker"), Some("307")), Some(307));
         assert_eq!(super::worker_row_from(Some("main"), Some("307")), None);
@@ -1380,6 +1451,41 @@ mod tests {
         assert_eq!(data.get("test"), Some(&Value::String("printf ready".into())));
         let run = crate::testrun::run(data.get("test").unwrap().as_str().unwrap(), Path::new("."));
         assert_eq!((run.code, run.output.as_str()), (0, "ready"));
+    }
+
+    #[test]
+    fn grist_records_are_not_counted_as_changes() {
+        for p in [".ai/changes/261023.a.md", ".ai/gate/7.json", "sub/.ai/changes/x.md", "node_modules/a.js"] {
+            assert!(super::generated(p), "{p}");
+        }
+        for p in [".ai/docs/architecture.md", "src/a.rs", "AGENTS.md", "docs/changes/x.md"] {
+            assert!(!super::generated(p), "{p}");
+        }
+    }
+
+    #[test]
+    fn outside_package_changes_count_only_inside_the_test_package() {
+        let dir = std::env::temp_dir().join(format!("grist-external-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (project, repo) = (dir.join("project"), dir.join("repo"));
+        for p in [&project, &repo.join("a/src"), &repo.join("b/src")] { std::fs::create_dir_all(p).unwrap(); }
+        for r in [&project, &repo] { std::process::Command::new("git").arg("-C").arg(r).arg("init").arg("-q").status().unwrap(); }
+        std::fs::write(repo.join("a/Cargo.toml"), "[package]").unwrap();
+        std::fs::write(repo.join("b/Cargo.toml"), "[package]").unwrap();
+        std::fs::write(repo.join("a/src/lib.rs"), "1").unwrap();
+        std::fs::write(repo.join("b/src/lib.rs"), "1").unwrap();
+        let test = repo.join("a/src/lib.rs").to_string_lossy().to_string();
+        let scopes = super::external_scopes(&project, &[test.clone(), "local.rs".into()]);
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(scopes[0].1, "a");
+        let mut prepared = Map::new();
+        prepared.insert("external".into(), super::external_snapshots(&project, &[test]));
+        std::fs::write(repo.join("a/src/lib.rs"), "2").unwrap();
+        std::fs::write(repo.join("a/src/new.rs"), "3").unwrap();
+        std::fs::write(repo.join("b/src/lib.rs"), "2").unwrap();
+        println!("external changed = {}", super::external_changed(&prepared));
+        assert_eq!(super::external_changed(&prepared), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

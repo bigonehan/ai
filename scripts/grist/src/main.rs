@@ -201,14 +201,7 @@ fn run(argv: &[String]) -> R<Value> {
             records::single_line_cells(&mut fields)?;
             records::check_symbol_fields(&fields)?;
             records::check_diagnosis_fields(&fields)?;
-            let mut record = api::update(TASK_TABLE, row_id, &fields)?;
-            if fields.get("H").and_then(|v| v.as_str()) == Some(gate::ERROR_STAGE) {
-                if let Some(project_dir) = records::hook_project(row_id) {
-                    if let Some(rewritten) = records::write_goal_stage(&project_dir, row_id, gate::ERROR_STAGE)? {
-                        record = rewritten;
-                    }
-                }
-            }
+            let record = api::update(TASK_TABLE, row_id, &fields)?;
             Ok(with_row_state(record))
         }
         "task-add" => {
@@ -328,6 +321,12 @@ fn run(argv: &[String]) -> R<Value> {
             let project = args.flag_req("project")?;
             let section = args.flag_opt("section");
             records::task_show(project, row_id, section)
+        }
+        "task-memo" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            let line = args.flag_req("line")?;
+            records::task_memo(project, row_id, line)
         }
         "task-step" => {
             let row_id = args.pos_i64(0, "row_id")?;

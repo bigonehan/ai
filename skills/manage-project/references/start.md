@@ -65,13 +65,14 @@
    - 전역 규칙 원문 또는 Skill 절차 텍스트(`SKILL.md`·`references/*.md`)만 바꾸는 행은 메인이 직접 처리한다. 전역 규칙은 `agent-rules` 원본·생성본·상태를 확인한다. 두 종류 모두 다른 하위 프로젝트 `AGENTS.md`의 명시적 지시가 새 기준과 충돌하는지만 검사한다. 충돌이 없으면 `task-confirm`으로 실제 결과를 기록하고 `task-complete --row <id> --project <dir>`가 목표와 확인 증거를 판정해 `$H=확인`으로 전환한다. 충돌이 있으면 해소한 뒤 전환한다. 이 경우 `t26_<id>` 배정과 `task-red`·`task-submit`을 하지 않는다. 제품 코드·CLI·hook·Skill 스크립트 변경은 아래 배정 절차를 따른다.
    - 서브에이전트는 띄울 때마다 `read-architecture`·행 조회·Skill 읽기·소스 탐색을 처음부터 반복하므로 토큰은 동시 실행 수가 아니라 호출 횟수로 늘어난다. 호출 횟수를 줄이는 기준으로 배정한다:
      - 수정 파일이 1~2개인 작은 행(여러 하위 프로젝트에 흩어진 작은 행 포함)은 메인이 `t26_<id>` 없이 직접 `task-ready` → 수정 → 집중 테스트 → `task-submit`한다.
-     - 수정 파일 3개 이상인 묶음만 프로젝트(수정 경로 묶음)마다 `t26_<첫 행 id>` 서브에이전트 1개(대화 문맥을 넘기지 않는 새 에이전트)에 그 프로젝트의 행을 모두 맡겨 순서대로 처리하게 한다. 행마다 따로 띄우지 않는다.
+     - 수정 파일 3개 이상인 묶음만 프로젝트(수정 경로 묶음)마다 Codex 구현자 1개(`dispatch-agent --agent codex`, `references/plan.md` 2절)에 그 프로젝트의 행을 모두 맡겨 순서대로 처리하게 한다. 행마다 따로 띄우지 않는다. Claude `t26_<id>` 서브에이전트는 사용자가 지정한 경우에만 쓴다.
    - 에이전트 프롬프트에는 다음만 전달한다:
      - 프로젝트 경로와 첫 명령 `~/ai/scripts/bin/read-architecture --project <dir> --query "<키워드>"` 실행 지시
      - `Table26 #<id>`와 메인이 받은 최신 `row` 줄(에이전트는 이 줄로 행을 읽고 다시 조회하지 않는다)
      - 수정 허용 경로 목록(형제 프로젝트, 전역 설정, Skill, 다른 행의 파일 수정 금지)
      - `~/ai/skills/manage-project/references/work.md`를 읽고 오류는 `$I`, 사용자 제공 원인 또는 `task-red` 재현으로 찾은 원인은 `$J`에 기록한 `task-update`의 `row` 줄 경계를 수정하라는 지시(원인 확정이면 `task-ready` → 집중 테스트 → `task-submit`)
-   - 서브에이전트를 띄운 직후 호출자가 `agent-id start <project dir> <row> --role t26_<row> --conversation <conversationId> --caller <own char> <own name>`을 실행해 에이전트 번호와 호출자를 행 메모에 기록한다(메인은 `0 main`). 출력된 11자 ID를 서브에이전트 메시지로 전달하고, 서브에이전트는 선택한 작업 게이트에 `--agent-id <ID>`를 전달해 기록 중복을 막는다. 서브에이전트 자신은 start를 실행하지 않는다.
-   - 한 에이전트에 여러 행을 맡기면 `agent-id start`를 맡긴 행마다 실행해 각 ID를 함께 전달한다.
+   - 서브에이전트를 띄운 직후 호출자가 `cargo run --quiet --manifest-path ~/ai/skills/record-log/scripts/record-log/Cargo.toml -- start <project dir> <row> --role <codex_<row>|t26_<row>> --conversation <conversationId> --caller <own char> <own name>`(`record-log` Skill)을 실행해 에이전트 번호와 호출자를 행 메모에 기록한다(메인은 `0 main`). 출력된 11자 ID를 서브에이전트 메시지로 전달하고, 서브에이전트는 선택한 작업 게이트에 `--agent-id <ID>`를 전달해 기록 중복을 막는다. 서브에이전트 자신은 start를 실행하지 않는다.
+   - 한 에이전트에 여러 행을 맡기면 `record-log start`를 맡긴 행마다 실행해 각 ID를 함께 전달한다.
+   - 행이 외부 API(AI 사이트·Eagle·Grist·원격 서버 등)를 부르면 위임 프롬프트에 `record-log` Skill 형식 로그(`ID | 호출 함수 | 시도 | 결과`, 위 start로 받은 ID, `ack=`·`body.<필드>=`·`error=` 포함 120자 한 줄)를 각 호출 경계에 구현하고, 메인이 읽을 수 있는 로그 위치(프로젝트 `.ai/logs/YYMMDD.log` 또는 기존 개발 로그 파일)에 남기라는 요구를 넣는다. 구현자는 실패 시 그 로그 한 줄로 실패 경계를 찾을 수 있는지 테스트로 확인한다.
    - 메인이 이미 찾은 파일 경로·줄 범위·`$J` 원인을 프롬프트에 넣어 에이전트가 같은 탐색을 반복하지 않게 한다.
    - 프로젝트가 여럿이면 수정 경로가 겹치지 않는 프로젝트 에이전트끼리만 병렬로 실행한다.
