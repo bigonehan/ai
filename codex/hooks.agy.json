@@ -1,0 +1,24 @@
+{
+  "extensions-gates": {
+    "SessionStart": [
+      {"type": "command", "command": "~/ai/scripts/bin/agy-hook session-start", "timeout": 20}
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "edit_file|write_file",
+        "hooks": [
+          {"type": "command", "command": "~/ai/scripts/bin/agy-hook pre-edit", "timeout": 20}
+        ]
+      },
+      {
+        "matcher": "ask_question",
+        "hooks": [
+          {"type": "command", "command": "~/ai/scripts/bin/agy-hook pre-ask", "timeout": 15}
+        ]
+      }
+    ],
+    "Stop": [
+      {"type": "command", "command": "~/ai/scripts/bin/agy-hook stop", "timeout": 60}
+    ]
+  }
+}

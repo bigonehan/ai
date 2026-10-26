@@ -58,6 +58,33 @@ fn session_row_ids(thread: &str) -> Vec<String> {
     session_row_ids_at(&state_dir().join("session_rows").join(format!("{}.json", sanitize(thread))))
 }
 
+fn claude_session_path_at(state: &Path, cwd: &Path) -> PathBuf {
+    let project = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    state.join("claude_project_session").join(format!("{}.json", sanitize(&project.to_string_lossy())))
+}
+
+fn record_claude_session_at(state: &Path, cwd: &Path, session_id: &str) -> std::io::Result<()> {
+    let path = claude_session_path_at(state, cwd);
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let project = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let data = Value::Obj(vec![("cwd".into(), s(project.to_string_lossy())), ("session_id".into(), s(session_id))]);
+    std::fs::write(path, json::dumps(&data))
+}
+
+fn record_claude_session(cwd: &Path, session_id: &str) -> std::io::Result<()> {
+    record_claude_session_at(&state_dir(), cwd, session_id)
+}
+
+fn session_id_from(event: &Value, codex_thread: Option<&str>) -> Option<String> {
+    codex_thread.filter(|id| !id.is_empty()).map(str::to_string)
+        .or_else(|| event.get("session_id").filter(|v| v.truthy()).and_then(Value::as_str).map(str::to_string))
+}
+
+fn hook_session_id(event: &Value) -> Option<String> {
+    let codex_thread = std::env::var("CODEX_THREAD_ID").ok();
+    session_id_from(event, codex_thread.as_deref())
+}
+
 fn session_rows(rows: Vec<Value>, owned: &[String]) -> Vec<Value> {
     rows.into_iter().filter(|row| row.get("id")
         .is_some_and(|id| owned.contains(&id.py_str()))).collect()
@@ -516,12 +543,22 @@ fn unregistered_reason(thread: &str, changed: &[String]) -> Option<String> {
 }
 
 fn main() {
-    if std::env::args().any(|a| a == "--session-start") {
+    let session_start = std::env::args().any(|a| a == "--session-start");
+    let session_touch = std::env::args().any(|a| a == "--session-touch");
+    if session_start || session_touch {
         let event = json::parse(&read_stdin_bounded()).unwrap_or(Value::Obj(vec![]));
-        let thread = std::env::var("CODEX_THREAD_ID").ok().filter(|id| !id.is_empty())
-            .or_else(|| event.get("session_id").filter(|v| v.truthy()).and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_else(|| "unknown".into());
-        record_session_start(&event, &thread);
+        if let (Some(cwd), Some(session_id)) = (event.get("cwd").and_then(Value::as_str), event.get("session_id").and_then(Value::as_str)) {
+            if !session_id.is_empty() && std::env::var("CODEX_THREAD_ID").ok().filter(|id| !id.is_empty()).is_none() {
+                if let Err(error) = record_claude_session(Path::new(cwd), session_id) {
+                    eprintln!("task-complete: Claude session pointer: {error}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        if session_start {
+            let thread = hook_session_id(&event).unwrap_or_else(|| "unknown".into());
+            record_session_start(&event, &thread);
+        }
         std::process::exit(0);
     }
     let cli_cwd = parse_cli_cwd();
@@ -608,8 +645,7 @@ fn main() {
         _ => vec![],
     };
     let hook_main = agent_path.is_empty() && worker_row.is_none() && cli_cwd.is_none() && cli_row.is_none();
-    let session_id = std::env::var("CODEX_THREAD_ID").ok().filter(|id| !id.is_empty())
-        .unwrap_or_else(|| thread.to_string());
+    let session_id = hook_session_id(&event).unwrap_or_else(|| thread.to_string());
     let owned = if hook_main { session_row_ids(&session_id) } else { vec![] };
     let initial_rows = if hook_main { session_rows(gate_rows, &owned) } else { gate_rows };
 
@@ -927,6 +963,33 @@ mod tests {
         assert_eq!(session_rows(vec![previous.clone(), current.clone()], &owned), vec![current]);
         assert!(session_rows(vec![previous], &owned).is_empty());
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn claude_pointer_records_session_for_project() {
+        let dir = std::env::temp_dir().join(format!("task-complete-claude-{}", std::process::id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        super::record_claude_session_at(&dir, &project, "claude-123").unwrap();
+        let pointer = super::json::parse(&std::fs::read_to_string(super::claude_session_path_at(&dir, &project)).unwrap()).unwrap();
+        assert_eq!(pointer.get("session_id").and_then(Value::as_str), Some("claude-123"));
+        assert_eq!(pointer.get("cwd").and_then(Value::as_str), project.to_str());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn claude_stop_session_blocks_verification_and_allows_confirmed_row() {
+        let event = super::json::parse(r#"{"session_id":"claude-123","cwd":"/project"}"#).unwrap();
+        assert_eq!(super::session_id_from(&event, None).as_deref(), Some("claude-123"));
+        assert_eq!(super::session_id_from(&event, Some("codex-456")).as_deref(), Some("codex-456"));
+        let owned = vec!["410".to_string()];
+        let verifying = Value::Obj(vec![("id".into(), Value::Num("410".into())), ("H".into(), s("검증"))]);
+        let confirmed = Value::Obj(vec![("id".into(), Value::Num("410".into())), ("H".into(), s("확인"))]);
+        let done = vec!["410".to_string()];
+        let rows = session_rows(vec![verifying], &owned);
+        assert!(!complete_work_valid(&rows, &rows, &done));
+        let rows = session_rows(vec![confirmed], &owned);
+        assert!(complete_work_valid(&rows, &rows, &done));
     }
 
     #[test]

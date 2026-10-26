@@ -11,6 +11,7 @@ members = [
     "agy-hook",
     "dispatch-agent",
     "main-edit-gate",
+    "ask-notify",
 ]
 
 [profile.release]

@@ -13,7 +13,7 @@
 
 ## 2. 실행
 
-- 수정 파일 3개 이상 묶음만 위임한다(1~2개 행은 오케스트레이터가 직접 처리한다). 프로젝트(수정 경로 묶음)당 1개 구현자다.
+- 수정 파일 3개 이상 묶음만 위임한다(1~2개 행은 오케스트레이터가 직접 처리한다). 프로젝트(수정 경로 묶음)당 1개 구현자이며 한 번에 처리하는 에이전트는 최대 2개로 제한한다.
 - 구현자는 기본으로 Codex다. tmux 안에서 다음으로 실행한다(`--agent gemini`나 Claude `t26_<id>` 서브에이전트는 사용자가 지정한 경우에만 쓴다).
 
   ```
@@ -21,7 +21,7 @@
   ```
 
   - 프로젝트 밖을 고치는 행은 수정 경로를 `--add-dir`로 넘긴다. `~/ai/scripts` crate는 작업공간 루트(`--add-dir /home/tree/ai/scripts`)를 넘겨야 `cargo test`가 `target`·`Cargo.lock`에 쓸 수 있다(crate 폴더만 넘기면 target이 읽기 전용이 된다).
-  - 여러 행은 행마다 백그라운드로 동시에 실행해도 된다. 같은 작업공간을 쓰면 구현자는 `cargo build`·버전 올리기를 하지 않고 메인이 마감 때 한 번 한다.
+  - 여러 행은 한 번에 최대 2개 에이전트까지만 백그라운드로 동시에 실행한다. 같은 작업공간을 쓰면 구현자는 `cargo build`·버전 올리기를 하지 않고 메인이 마감 때 한 번 한다.
   - 구현자가 질문으로 끝나면(`last=`가 질문) 범위 안의 판단은 메인이 답하고 `dispatch-agent --resume --agent codex --project <dir> --row <id> --prompt-file <답변> [--add-dir …]`로 같은 codex 세션을 이어 실행한다(로그의 `session id`, 같은 sandbox·네트워크·worker 환경, 로그 이어 쓰기). 로그인·비용 같은 사용자 전용 동작만 사용자에게 넘긴다.
 
   - 새 pane에서 headless로 실행되고 `T26_ROW`·`T26_ROLE=worker`가 넘어간다. 권한은 작업 디렉터리 쓰기까지다(codex `-s workspace-write`, gemini `--approval-mode auto_edit`).

@@ -31,6 +31,24 @@ pub fn to_snake(event: &Value, hook_event_name: &str) -> String {
     dumps(&Value::Obj(o))
 }
 
+/// agy PreToolUse input ⇒ ask-notify input (`tool_name`, `tool_input`, `cwd`).
+pub fn ask_event(event: &Value) -> String {
+    let tool_call = event.get("toolCall");
+    let tool_name = tool_call
+        .and_then(|tc| tc.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("ask_question");
+    let tool_input = tool_call
+        .and_then(|tc| tc.get("args"))
+        .cloned()
+        .unwrap_or(Value::Obj(vec![]));
+    let mut o = Vec::new();
+    obj_set(&mut o, "tool_name", s(tool_name));
+    obj_set(&mut o, "tool_input", tool_input);
+    obj_set(&mut o, "cwd", s(workspace(event)));
+    dumps(&Value::Obj(o))
+}
+
 fn inject(text: &str) -> String {
     let inner = Value::Obj(vec![("systemMessage".into(), s(text))]);
     let step = Value::Obj(vec![("systemMessage".into(), inner)]);
@@ -103,7 +121,7 @@ pub fn stop_output(child_stdout: &str) -> Option<String> {
     Some(dumps(&Value::Obj(o)))
 }
 
-fn run(name: &str, args: &[&str], stdin: &str) -> Result<String, String> {
+fn run_status(name: &str, args: &[&str], stdin: &str) -> Result<(i32, String), String> {
     let mut child = Command::new(bin(name))
         .args(args)
         .stdin(Stdio::piped())
@@ -115,7 +133,12 @@ fn run(name: &str, args: &[&str], stdin: &str) -> Result<String, String> {
         let _ = si.write_all(stdin.as_bytes());
     }
     let out = child.wait_with_output().map_err(|e| format!("{name}: {e}"))?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let code = out.status.code().unwrap_or(-1);
+    Ok((code, String::from_utf8_lossy(&out.stdout).into_owned()))
+}
+
+fn run(name: &str, args: &[&str], stdin: &str) -> Result<String, String> {
+    run_status(name, args, stdin).map(|(_, out)| out)
 }
 
 fn main() {
@@ -135,13 +158,29 @@ fn main() {
                 run("grist", &["gate", "--cwd", &cwd], "").map(|o| pre_edit_output(&o))
             }
         }
+        "pre-ask" => {
+            let payload = ask_event(&event);
+            match run_status("ask-notify", &[], &payload) {
+                Ok((0, _)) => Ok(pre_tool("allow", "")),
+                Ok((code, _)) => Ok(pre_tool(
+                    "deny",
+                    &format!("nf 알림 전송 실패(exit {code}): 질문 전에 nf가 동작하도록 고친 뒤 다시 질문하세요."),
+                )),
+                Err(e) => Ok(pre_tool("deny", &format!("nf 알림 실행 실패({e})"))),
+            }
+        }
         "stop" => {
             let reason = first_str(&event, "terminationReason");
-            if reason == "USER_CANCELED" || reason == "ERROR" {
+            if reason == "USER_CANCELED" || reason == "ERROR" || event.get("fullyIdle") == Some(&Value::Bool(false)) {
                 Ok("{}".into())
             } else {
                 let snake = to_snake(&event, "Stop");
-                Ok(run("task-complete", &[], &snake).ok().and_then(|o| stop_output(&o)).unwrap_or_else(|| "{}".into()))
+                if let Some(block) = run("task-complete", &[], &snake).ok().and_then(|o| stop_output(&o)) {
+                    Ok(block)
+                } else {
+                    let _ = run("ask-notify", &[], &snake);
+                    Ok("{}".into())
+                }
             }
         }
         other => Err(format!("unknown subcommand {other}")),
@@ -150,7 +189,7 @@ fn main() {
         Ok(text) => println!("{text}"),
         Err(e) => {
             eprintln!("agy-hook: {e}");
-            if sub == "pre-edit" {
+            if sub == "pre-edit" || sub == "pre-ask" {
                 println!("{}", pre_tool("allow", ""));
             } else {
                 println!("{{}}");
@@ -202,5 +241,14 @@ mod tests {
             r#"{"decision": "continue", "reason": "r"}"#
         );
         assert!(stop_output("{}").is_none());
+    }
+
+    #[test]
+    fn ask_event_maps_tool_call() {
+        let e = parse(r#"{"toolCall":{"name":"ask_question","args":{"questions":[{"question":"타입 선택"}]}},"workspacePaths":["/home/tree/extensions"]}"#).unwrap();
+        assert_eq!(
+            ask_event(&e),
+            r#"{"tool_name": "ask_question", "tool_input": {"questions": [{"question": "타입 선택"}]}, "cwd": "/home/tree/extensions"}"#
+        );
     }
 }

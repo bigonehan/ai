@@ -1451,11 +1451,22 @@ fn task_add_fields(mut fields: Map<String, Value>) -> Map<String, Value> {
 }
 
 fn session_rows_path(thread: &str) -> PathBuf {
-    let state_dir = std::env::var_os("TASK_COMPLETE_STATE_DIR")
+    state_dir().join("session_rows").join(format!("{}.json", util::sanitize_key(thread)))
+}
+
+fn state_dir() -> PathBuf {
+    std::env::var_os("TASK_COMPLETE_STATE_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".codex/tmp/task_complete"));
-    state_dir.join("session_rows").join(format!("{}.json", util::sanitize_key(thread)))
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".codex/tmp/task_complete"))
+}
+
+fn claude_session_id_at(state: &Path, project: &Path) -> Option<String> {
+    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    let path = state.join("claude_project_session").join(format!("{}.json", util::sanitize_key(&project.to_string_lossy())));
+    let pointer: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    (pointer.get("cwd")?.as_str()? == project.to_string_lossy() && !pointer.get("session_id")?.as_str()?.is_empty())
+        .then(|| pointer.get("session_id").unwrap().as_str().unwrap().to_string())
 }
 
 fn register_session_row_at(path: &Path, raw_id: i64) -> R<()> {
@@ -1473,6 +1484,19 @@ pub fn register_session_row(raw_id: i64) -> R<()> {
     let Ok(thread) = std::env::var("CODEX_THREAD_ID") else { return Ok(()); };
     if thread.is_empty() { return Ok(()); }
     register_session_row_at(&session_rows_path(&thread), raw_id)
+}
+
+fn register_claude_session_row_at(state: &Path, project: &Path, raw_id: i64, codex_thread: Option<&str>) -> R<()> {
+    if codex_thread.is_some_and(|id| !id.is_empty()) { return Ok(()); }
+    if let Some(session_id) = claude_session_id_at(state, project) {
+        register_session_row_at(&state.join("session_rows").join(format!("{}.json", util::sanitize_key(&session_id))), raw_id)?;
+    }
+    Ok(())
+}
+
+fn register_claude_session_row(project: &Path, raw_id: i64) -> R<()> {
+    let codex_thread = std::env::var("CODEX_THREAD_ID").ok();
+    register_claude_session_row_at(&state_dir(), project, raw_id, codex_thread.as_deref())
 }
 
 pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind: Option<&str>, judge: &str) -> R<Value> {
@@ -1497,6 +1521,9 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
     };
     let step = crate::task::Step::Add;
     crate::task::TaskChain::standard(step).run(step, &mut ctx)?;
+    if let Some(project) = ctx.project_dir.as_deref() {
+        register_claude_session_row(project, ctx.raw_id)?;
+    }
     Ok(ctx.result)
 }
 
@@ -1792,6 +1819,25 @@ mod tests {
         register_session_row_at(&path, 278).unwrap();
         let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(rows, vec![277, 278]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn claude_project_pointer_resolves_session_for_task_add() {
+        let dir = std::env::temp_dir().join(format!("grist-claude-session-{}", std::process::id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let pointer = dir.join("claude_project_session").join(format!("{}.json", crate::util::sanitize_key(&project.to_string_lossy())));
+        std::fs::create_dir_all(pointer.parent().unwrap()).unwrap();
+        std::fs::write(&pointer, serde_json::json!({"cwd": project, "session_id": "claude-123"}).to_string()).unwrap();
+        assert_eq!(super::claude_session_id_at(&dir, &project).as_deref(), Some("claude-123"));
+        let row_path = dir.join("session_rows/claude-123.json");
+        super::register_claude_session_row_at(&dir, &project, 410, None).unwrap();
+        let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(row_path).unwrap()).unwrap();
+        assert_eq!(rows, vec![410]);
+        super::register_claude_session_row_at(&dir, &project, 411, Some("codex-1")).unwrap();
+        let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_rows/claude-123.json")).unwrap()).unwrap();
+        assert_eq!(rows, vec![410]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
