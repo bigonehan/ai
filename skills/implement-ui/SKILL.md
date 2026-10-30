@@ -1,6 +1,6 @@
 ---
 name: implement-ui
-description: Design, implement, debug, and verify UI or UX changes against the rendered layout, including sizing, spacing, alignment, responsive behavior, controls, screenshots, and reference-image fidelity. Use for frontend presentation work; do not use for non-visual backend-only changes.
+description: Design, implement, debug, and verify UI or UX changes against the rendered layout, including sizing, spacing, alignment, responsive behavior, controls, event wiring (control → handler call), screenshots, and reference-image fidelity. Use for frontend presentation work; do not use for non-visual backend-only changes.
 ---
 
 # UI Design Implementation

@@ -4,6 +4,7 @@ use crate::api::{self, R, DONE_STAGE, GOAL_FIELD, SUBMITTED_STAGE, TASK_TABLE};
 use crate::util;
 use crate::records::{self, NEW_FEATURE};
 use crate::task::{Step, TaskChain, TaskCtx};
+use crate::task;
 use crate::testrun;
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Map, Value};
@@ -17,6 +18,8 @@ pub const ERROR_STAGE: &str = "진단";
 pub const WORKING_STAGES: [&str; 3] = ["작업", "교정", "진단"];
 pub const ALWAYS_EDITABLE: [&str; 3] = [".ai", "AGENTS.md", "test/tmp"];
 pub const OUTPUT_TAIL: usize = 4000;
+pub const PURPOSE_FORMAT: &str = "80자 이하의 결과 한 줄 (명령, 백틱, --옵션 제외)";
+pub const PATHS_FORMAT: &str = "프로젝트 기준 최상위 경로 쉼표 구분 (`.` 제외)";
 
 fn confirmation_note(summary: &str) -> String {
     util::head(summary, 300)
@@ -81,6 +84,7 @@ pub struct Row {
     pub h: Value,
     pub d: Value,
     pub i: Value,
+    pub j: Value,
     pub k: String,
 }
 
@@ -100,6 +104,7 @@ impl Row {
             "H": self.h,
             "D": self.d,
             "I": self.i,
+            "J": self.j,
             "K": self.k,
         })
     }
@@ -109,6 +114,7 @@ impl Row {
             "H": self.h,
             "D": self.d,
             "I": self.i,
+            "J": self.j,
         })
     }
 }
@@ -123,20 +129,48 @@ fn worker_row_from(role: Option<&str>, row: Option<&str>) -> Option<i64> {
     row?.trim().parse().ok()
 }
 
-fn delegate_boundary(role: Option<&str>, raw_id: i64, changed: usize, files: &[String]) -> Option<Value> {
-    if role == Some("worker") || changed < 3 { return None; }
+pub fn verifier_row() -> Option<i64> {
+    verifier_row_from(std::env::var("T26_ROLE").ok().as_deref(), std::env::var("T26_ROW").ok().as_deref())
+}
+
+fn verifier_row_from(role: Option<&str>, row: Option<&str>) -> Option<i64> {
+    (role == Some("verifier")).then_some(())?;
+    row?.trim().parse().ok()
+}
+
+fn main_code_file(path: &str) -> bool {
+    let path = Path::new(path);
+    if matches!(path.file_name().and_then(|name| name.to_str()), Some("Cargo.toml" | "package.json" | "manifest.json" | "runtime-contract.js")) {
+        return false;
+    }
+    let extension_source = !path.is_absolute() || path.starts_with("/home/tree/extensions");
+    let script_source = path.starts_with("/home/tree/ai/scripts");
+    script_source || (extension_source
+        && !path.components().any(|part| part.as_os_str() == ".ai")
+        && path.file_name().and_then(|name| name.to_str()) != Some("AGENTS.md")
+        && path.extension().and_then(|ext| ext.to_str()) != Some("md"))
+}
+
+fn delegate_boundary(role: Option<&str>, raw_id: i64, files: &[String]) -> Option<Value> {
+    if role == Some("worker") || role == Some("verifier") || !files.iter().any(|file| main_code_file(file)) { return None; }
     Some(json!({
         "boundary": "delegate",
         "raw_id": raw_id,
-        "changed": changed,
+        "changed": files.len(),
         "files": files,
-        "reason": "main session changed 3 or more files; delegate implementation with dispatch-agent"
+        "reason": "main session changed a code file; delegate implementation with dispatch-agent"
     }))
 }
 
 pub fn actor() -> (String, Option<i64>) {
     if let Some(row) = worker_row() {
         return ("agent".into(), Some(row));
+    }
+    if let Some(row) = verifier_row() {
+        return ("verifier".into(), Some(row));
+    }
+    if std::env::var("T26_ROLE").ok().as_deref() == Some("verifier") {
+        return ("verifier".into(), None);
     }
     let Ok(thread) = std::env::var("CODEX_THREAD_ID") else {
         return ("main".into(), None);
@@ -211,18 +245,38 @@ pub fn require_main(command: &str) -> R<()> {
 
 pub fn require_row(command: &str, raw_id: i64) -> R<()> {
     let (role, row) = actor();
-    if role == "helper" || (role == "agent" && row != Some(raw_id)) {
+    if !row_command_allowed(&role, row, std::env::var("T26_ROWS").ok().as_deref(), command, raw_id) {
         let suffix = row.map(|r| format!(" t26_{r}")).unwrap_or_default();
         return api::fail(
             "actor",
-            format!("`{command} {raw_id}` is run by the main session or agent t26_{raw_id} only (caller: {role}{suffix})"),
+            format!("`{command} {raw_id}` is not allowed for caller: {role}{suffix}"),
         );
     }
     Ok(())
 }
 
+fn verifier_rows_contains(rows: Option<&str>, raw_id: i64) -> bool {
+    rows.is_some_and(|rows| rows.split(',').any(|id| id.trim().parse::<i64>().ok() == Some(raw_id)))
+}
+
+fn row_command_allowed(role: &str, row: Option<i64>, rows: Option<&str>, command: &str, raw_id: i64) -> bool {
+    if role == "helper" || (role == "agent" && row != Some(raw_id)) { return false; }
+    if role == "verifier" {
+        return (row == Some(raw_id) || verifier_rows_contains(rows, raw_id))
+            && matches!(command, "task-hidden" | "task-step" | "task-show" | "goal" | "task");
+    }
+    true
+}
+
+pub fn worker_update_allowed(role: Option<&str>, row: Option<i64>, raw_id: i64, fields: &Map<String, Value>) -> bool {
+    role != Some("worker") || (row == Some(raw_id) && fields.keys().all(|key| {
+        matches!(key.as_str(), "D" | "I" | "J")
+            || (key == "H" && matches!(fields.get(key).and_then(Value::as_str), Some("진단" | "교정")))
+    }))
+}
+
 pub fn rows(ids: &[i64]) -> R<Vec<Row>> {
-    let fields = vec!["H".into(), "D".into(), "I".into(), GOAL_FIELD.into()];
+    let fields = vec!["H".into(), "D".into(), "I".into(), "J".into(), GOAL_FIELD.into()];
     let raw = api::get(TASK_TABLE, Some(ids), None, Some(&fields))?;
     let map: HashMap<i64, Map<String, Value>> = api::rows_by_id(&raw).into_iter().collect();
     let missing: Vec<i64> = ids.iter().copied().filter(|i| !map.contains_key(i)).collect();
@@ -244,6 +298,7 @@ pub fn rows(ids: &[i64]) -> R<Vec<Row>> {
                 h: f.get("H").cloned().unwrap_or(Value::Null),
                 d: f.get("D").cloned().unwrap_or(Value::Null),
                 i: f.get("I").cloned().unwrap_or(Value::Null),
+                j: f.get("J").cloned().unwrap_or(Value::Null),
                 k,
             }
         })
@@ -353,7 +408,7 @@ pub fn check_purpose(text: &str) -> R<String> {
     if label.is_empty() || cmd_like.is_match(label) || label.chars().count() > 80 {
         return api::fail(
             "validation",
-            "--purpose is a short one-line label of the wanted result (no command, backticks or --options)",
+            format!("--purpose: {PURPOSE_FORMAT}"),
         );
     }
     Ok(label.to_string())
@@ -986,6 +1041,7 @@ pub fn task_red(
         ..Default::default()
     };
     TaskChain::standard(Step::Ready).run(Step::Ready, &mut ctx)?;
+    ctx.result.as_object_mut().unwrap().insert("next".into(), json!(task::STAGE_WORK_CARD));
     Ok(ctx.result)
 }
 
@@ -1013,7 +1069,7 @@ pub fn task_ready(
         return api::fail("ready", format!("Table26 #{raw_id} has no goal; the main session writes it with task-goal first"));
     }
     if command.trim().is_empty() || paths.is_empty() || tests.is_empty() || paths.iter().any(|p| p.trim().is_empty() || p == ".") {
-        return api::fail("ready", "task-ready needs a focused --test command, --tests files, and explicit top-level --paths");
+        return api::fail("ready", format!("task-ready needs a focused --test command, --tests files, and --paths: {PATHS_FORMAT}"));
     }
     for name in tests {
         if !project_dir.join(name).is_file() {
@@ -1041,6 +1097,7 @@ pub fn task_ready(
         ..Default::default()
     };
     TaskChain::standard(Step::Ready).run(Step::Ready, &mut ctx)?;
+    ctx.result.as_object_mut().unwrap().insert("next".into(), json!(task::STAGE_WORK_CARD));
     Ok(ctx.result)
 }
 
@@ -1119,7 +1176,7 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
     let mut files: Vec<String> = changed.iter().cloned().collect();
     files.extend(external_changed_files(&prepared));
     let changed_count = files.len();
-    if let Some(boundary) = delegate_boundary(std::env::var("T26_ROLE").ok().as_deref(), raw_id, changed_count, &files) {
+    if let Some(boundary) = delegate_boundary(std::env::var("T26_ROLE").ok().as_deref(), raw_id, &files) {
         return gate_err(boundary);
     }
     let mut ctx = TaskCtx {
@@ -1160,7 +1217,8 @@ pub fn submitted_and_hidden(project_dir: &Path, raw_id: i64) -> (Option<Map<Stri
 }
 
 pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str, detail: &str) -> R<Value> {
-    require_main("task-hidden")?;
+    if actor().0 == "verifier" { require_row("task-hidden", raw_id)?; }
+    else { require_main("task-hidden")?; }
     let purpose = check_purpose(purpose)?;
     let (project_dir, _, _) = records::owned(project_arg, raw_id)?;
     let row = rows(&[raw_id])?.into_iter().next().unwrap();
@@ -1218,6 +1276,10 @@ pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str,
             "ms": run.ms,
             "output": output
         }));
+    }
+    if actor().0 == "verifier" {
+        state.insert("verifier_recorded".into(), json!(true));
+        gate_save(&project_dir, raw_id, &state)?;
     }
     Ok(json!({"id": raw_id, "hidden": purpose, "result": "성공"}))
 }
@@ -1332,7 +1394,8 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
                     "id": row.id,
                     "test": cmd_opt,
                     "exit": code_opt,
-                    "output": output
+                    "output": output,
+                    "next": task::STAGE_START_CARD
                 }));
                 break;
             }
@@ -1349,6 +1412,7 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
         return gate_err(json!({
             "boundary": "flow",
             "reason": format!("submitted or hidden tests failed; rows set to {ERROR_STAGE}"),
+            "next": task::STAGE_START_CARD,
             "rows": failed
         }));
     }
@@ -1400,16 +1464,23 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn submit_delegates_main_three_files_but_allows_two_and_worker() {
-        let files = vec!["a".into(), "b".into(), "c".into()];
-        let denied = super::delegate_boundary(None, 375, 3, &files).unwrap();
+    fn submit_delegates_main_one_code_file_but_allows_documents_and_worker() {
+        let files = vec!["src/main.rs".into()];
+        let denied = super::delegate_boundary(None, 375, &files).unwrap();
         assert_eq!(denied["boundary"], "delegate");
         assert_eq!(denied["raw_id"], 375);
-        assert_eq!(denied["changed"], 3);
+        assert_eq!(denied["changed"], 1);
         assert_eq!(denied["files"], serde_json::json!(files));
         assert!(denied["reason"].as_str().unwrap().contains("dispatch-agent"));
-        assert!(super::delegate_boundary(None, 375, 2, &files[..2]).is_none());
-        assert!(super::delegate_boundary(Some("worker"), 375, 3, &files).is_none());
+        for file in ["README.md", "AGENTS.md", ".ai/docs/a.json", "Cargo.toml", "app/package.json", "app/manifest.json", "app/public/manifest.json", "app/runtime-contract.js", "/home/tree/ai/scripts/grist/Cargo.toml", "/home/tree/ai/skills/a/SKILL.md", "/home/tree/ai/rules/settings.json"] {
+            assert!(super::delegate_boundary(None, 375, &[file.into()]).is_none(), "{file}");
+        }
+        for file in ["app/package-lock.json", "app/runtime-contract.test.js"] {
+            assert!(super::delegate_boundary(None, 375, &[file.into()]).is_some(), "{file}");
+        }
+        assert!(super::delegate_boundary(None, 375, &["README.md".into(), "src/main.rs".into()]).is_some());
+        assert!(super::delegate_boundary(None, 375, &["/home/tree/ai/scripts/a.md".into()]).is_some());
+        assert!(super::delegate_boundary(Some("worker"), 375, &files).is_none());
     }
     #[test]
     fn worker_row_needs_worker_role_and_numeric_row() {
@@ -1418,6 +1489,58 @@ mod tests {
         assert_eq!(super::worker_row_from(Some("worker"), None), None);
         assert_eq!(super::worker_row_from(Some("worker"), Some("x")), None);
     }
+    #[test]
+    fn worker_task_update_only_own_diagnosis_fields() {
+        let allowed = serde_json::json!({"H":"진단", "I":"오류", "D":"[🛣] 점검", "J":"[🛣] 원인"}).as_object().unwrap().clone();
+        assert!(super::worker_update_allowed(Some("worker"), Some(507), 507, &allowed));
+        assert!(!super::worker_update_allowed(Some("worker"), Some(507), 508, &allowed));
+        for fields in [serde_json::json!({"K":"목표"}), serde_json::json!({"H":"검증"})] {
+            assert!(!super::worker_update_allowed(Some("worker"), Some(507), 507, fields.as_object().unwrap()));
+        }
+        assert!(super::worker_update_allowed(None, None, 507, &allowed));
+    }
+    #[test]
+    fn verifier_row_and_command_boundary() {
+        assert_eq!(super::verifier_row_from(Some("verifier"), Some("504")), Some(504));
+        assert_eq!(super::verifier_row_from(Some("worker"), Some("504")), None);
+        assert_eq!(super::verifier_row_from(Some("verifier"), Some("bad")), None);
+        assert!(super::delegate_boundary(Some("verifier"), 504, &["a".into(), "b".into(), "c".into()]).is_none());
+        for command in ["task-hidden", "task-step", "task-show", "goal", "task"] {
+            assert!(super::row_command_allowed("verifier", Some(504), None, command, 504));
+        }
+        for command in ["task-ready", "task-submit", "task-goal", "task-add", "flow-wait", "task-complete"] {
+            assert!(!super::row_command_allowed("verifier", Some(504), None, command, 504));
+        }
+        assert!(!super::row_command_allowed("verifier", Some(503), None, "task-hidden", 504));
+    }
+
+    #[test]
+    fn verifier_rows_allow_listed_rows_and_primary_row() {
+        for command in ["task-hidden", "task-step", "task-show", "goal", "task"] {
+            for id in [526, 527, 528] {
+                assert!(super::row_command_allowed("verifier", Some(528), Some("526,527"), command, id));
+            }
+        }
+    }
+
+    #[test]
+    fn verifier_rows_reject_outside_rows_and_unlisted_commands() {
+        assert!(!super::row_command_allowed("verifier", Some(528), Some("526,527"), "task-hidden", 529));
+        assert!(!super::row_command_allowed("verifier", Some(528), Some("526,527"), "task-submit", 526));
+        assert!(!super::row_command_allowed("verifier", Some(528), Some("bad,527"), "task-hidden", 526));
+    }
+
+    #[test]
+    fn verifier_rows_do_not_expand_worker_access() {
+        assert!(!super::row_command_allowed("agent", Some(528), Some("526,527"), "task-step", 526));
+        assert!(super::row_command_allowed("agent", Some(528), Some("526,527"), "task-step", 528));
+    }
+
+    #[test]
+    fn verifier_rows_absent_preserves_single_row_access() {
+        assert!(super::row_command_allowed("verifier", Some(528), None, "task-show", 528));
+        assert!(!super::row_command_allowed("verifier", Some(528), None, "task-show", 527));
+    }
 
     use super::{record_log_paths, agent_start_args, origin_action, parse_agent_id, OriginAction, Row, flow_submitted_ids, confirmed_fields, confirmation_note, flow_summary_from_text, goal_lines, preparation_of};
     use serde_json::{json, Map, Value};
@@ -1425,7 +1548,7 @@ mod tests {
 
     #[test]
     fn flow_wait_selects_only_submitted_row_from_completed_list() {
-        let row = |id, stage| Row { id, h: json!(stage), d: Value::Null, i: Value::Null, k: String::new() };
+        let row = |id, stage| Row { id, h: json!(stage), d: Value::Null, i: Value::Null, j: Value::Null, k: String::new() };
         let rows = vec![row(234, "완료"), row(269, "확인"), row(276, "검증")];
         assert_eq!(flow_submitted_ids(&rows), vec![276]);
     }

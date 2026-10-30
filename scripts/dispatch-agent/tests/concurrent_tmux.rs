@@ -47,8 +47,11 @@ fn concurrent_dispatches_split_right_then_below_first_agent() {
     fs::create_dir_all(&bin).unwrap();
     let _fixture = Fixture { dir: dir.clone() };
     let gemini = bin.join("gemini");
-    fs::write(&gemini, "#!/bin/sh\nprintf 'done\\n'\n").unwrap();
+    fs::write(&gemini, "#!/bin/sh\ncase \"$*\" in *to=검증자*) printf '실패 — 35402: consumer error\\n' ;; *) printf 'done\\n' ;; esac\n").unwrap();
     fs::set_permissions(&gemini, fs::Permissions::from_mode(0o700)).unwrap();
+    let grist = bin.join("grist");
+    fs::write(&grist, "#!/bin/sh\ncase \"$1\" in\n  task-show) printf '{\"id\":%s,\"section\":\"row\",\"lines\":[]}\\n' \"$2\" ;;\n  task) printf '[{\"id\":%s,\"fields\":{\"H\":\"작업\",\"I\":\"\",\"J\":\"\",\"K\":\"sample\"}}]\\n' \"$2\" ;;\n  goal) printf '1. [기능] sample ▷ done\\n' ;;\n  task-update) printf '%s' \"$6\" > \"$GRIST_RECORD_FILE\"; printf '{\"id\":%s}\\n' \"$2\" ;;\nesac\n").unwrap();
+    fs::set_permissions(&grist, fs::Permissions::from_mode(0o700)).unwrap();
     let first_prompt = dir.join("first.txt");
     let second_prompt = dir.join("second.txt");
     fs::write(&first_prompt, "first").unwrap();
@@ -63,6 +66,8 @@ fn concurrent_dispatches_split_right_then_below_first_agent() {
     let second = dispatch(&dir, &second_prompt, 35402, &socket, &caller, &bin).spawn().unwrap();
     successful(first.wait_with_output().unwrap());
     successful(second.wait_with_output().unwrap());
+    let saved = fs::read_to_string(dir.join(".ai/dispatch/35401.prompt")).unwrap();
+    assert!(saved.contains("row: H=작업 | I= | J= | K=sample\n목표:\n1. [기능] sample ▷ done\n"));
 
     let panes = tmux(&["list-panes", "-t", SERVER, "-F", "#{pane_id}\t#{pane_left}\t#{pane_top}\t#{@dispatch-agent}"]);
     let entries: Vec<_> = panes.lines().map(|line| {
@@ -77,4 +82,21 @@ fn concurrent_dispatches_split_right_then_below_first_agent() {
     assert!(agents[0].1 > caller_left, "first pane must split right: {panes}");
     assert_eq!(agents[1].1, agents[0].1, "second pane must stay below the first: {panes}");
     assert!(agents[1].2 > agents[0].2, "second pane must split below the first: {panes}");
+
+    fs::write(dir.join("AGENTS.md"), "# 상태\n### 실행\nruntime : local CLI\n").unwrap();
+    let record = dir.join("record.json");
+    let output = dispatch(&dir, &first_prompt, 35401, &socket, &caller, &bin)
+        .args(["--role", "verifier", "--rows", "35401,35402"])
+        .env("GRIST_RECORD_FILE", &record)
+        .output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("recorded=I:35402"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("00119805311 | dispatch-agent.verifier-fail | 01 | ack=received body.row=35402 error=none"));
+    let fields: serde_json::Value = serde_json::from_slice(&fs::read(record).unwrap()).unwrap();
+    assert_eq!(fields["H"], "진단");
+    assert_eq!(fields["I"], "실패 — 35402: consumer error");
+    let saved = fs::read_to_string(dir.join(".ai/dispatch/35401.verify.prompt")).unwrap();
+    assert!(saved.contains("runtime : local CLI\n"));
+    assert!(saved.contains("row 35401: H=작업 | I= | J= | K=sample\n목표:\n"));
+    assert!(saved.contains("row 35402: H=작업 | I= | J= | K=sample\n목표:\n"));
 }

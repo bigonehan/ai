@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 
 const MAIN_ALLOWED: &[&str] = &["완료", "확인"];
 const AGENT_ALLOWED: &[&str] = &["검증", "완료"];
+const VERIFIER_ALLOWED: &[&str] = &["초안", "작업", "교정", "진단", "검증", "확인", "완료"];
 const CMD: &str = "~/ai/scripts/bin/grist";
 
 const FAILURE_REASON: &str = "마지막 메시지가 실패를 결론으로 종료하고 있어요. CDP·runner·Stagehand 실패와 runtime-unverified는 종료 사유가 아니에요. \
@@ -28,6 +29,11 @@ fn grist_bin() -> PathBuf {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| home_dir().join("ai/scripts/bin/grist"))
+}
+
+fn verifier_recorded(project_dir: &Path, row_id: i64) -> bool {
+    grist::gate::gate_load(project_dir, row_id)
+        .get("verifier_recorded").and_then(|v| v.as_bool()) == Some(true)
 }
 
 fn jev_bin() -> PathBuf {
@@ -357,6 +363,24 @@ fn dispatch_wait_allowed(rows: &[Value], project_dir: &Path) -> bool {
         && running_dispatch(project_dir)
 }
 
+fn user_action_wait_rows(pending: &[Value]) -> Option<Value> {
+    if pending.is_empty() || pending.iter().any(|row| {
+        let d = row.get("D").and_then(Value::as_str).unwrap_or("").trim();
+        !d.starts_with("[🏷]") || !d.contains("사용자") || !(d.contains("대기") || d.contains("확인 중"))
+    }) {
+        return None;
+    }
+    Some(Value::Arr(pending.iter().map(|row| Value::Obj(vec![
+        ("id".into(), row.get("id").cloned().unwrap_or(Value::Null)),
+        ("H".into(), row.get("H").cloned().unwrap_or(Value::Null)),
+        ("D".into(), row.get("D").cloned().unwrap_or(Value::Null)),
+    ])).collect()))
+}
+
+fn repeated_user_action_wait(previous: &Value, waiting: &Value) -> bool {
+    previous.get("wait_rows").is_some_and(|rows| rows.py_eq(waiting))
+}
+
 fn main_reason(rows: &[Value], pending: &[Value], project_dir: &str) -> String {
     let stages = rows
         .iter()
@@ -377,9 +401,19 @@ fn main_reason(rows: &[Value], pending: &[Value], project_dir: &str) -> String {
                 .unwrap_or(false)
         })
     };
-    let step = if has_stage(&["초안"]) {
-        "`초안` 행은 수정 파일 1~2개면 메인이 직접 처리하고, 3개 이상 묶음만 행마다 구현자(`t26_<RawID>` 또는 `dispatch-agent`)에게 맡기세요(`manage-project` `references/plan.md`).".to_string()
-    } else if has_stage(&["작업", "교정", "진단"]) {
+    let step = if has_stage(&["진단"]) {
+        let cause_missing = pending.iter().any(|row| {
+            row.get("H").and_then(Value::as_str) == Some("진단")
+                && row.get("J").and_then(Value::as_str).is_none_or(|cause| cause.trim().is_empty())
+        });
+        if cause_missing {
+            "진단 행은 `$J`가 비어 있으므로 재현만 목표로 대행자에게 맡기세요(`task-red`·`$J` 후 종료; stage-start.md 진단 갈림길).".to_string()
+        } else {
+            "진단 행은 `$J`에 기록된 원인으로 구현을 맡기세요(`task-ready`; stage-start.md 진단 갈림길).".to_string()
+        }
+    } else if has_stage(&["초안"]) {
+        "`초안` 행의 코드 변경은 파일 수와 상관없이 `dispatch-agent` 대행자에게 맡기고, 규칙·Skill 문서 행만 메인이 직접 처리하세요(`manage-project` `references/plan.md`).".to_string()
+    } else if has_stage(&["작업", "교정"]) {
         "구현자 결과를 기다리세요. 끝난 구현자의 행이 `검증`이 아니면 같은 행으로 다음 교정을 맡기세요.".to_string()
     } else {
         format!(
@@ -389,7 +423,7 @@ fn main_reason(rows: &[Value], pending: &[Value], project_dir: &str) -> String {
     };
     format!(
         "종료 차단: Table26 {stages} (작업 폴더 {project_dir}). {step} \
-사용자 입력(로그인·결제·비가역 외부 전송·OS 앱 조작)만 남았으면 `$D`에 구현 결과와 사유를 기록한 뒤 질문하세요. `$H`는 직접 바꾸지 않고, 사용자가 Grist에서 `완료`로 처리하면 종료돼요."
+사용자 입력(로그인·결제·비가역 외부 전송·OS 앱 조작)만 남았으면 `$D`에 `[🏷]`와 `사용자`, `대기` 또는 `확인 중`을 포함한 사유를 기록한 뒤 질문하세요. 같은 행 상태의 두 번째 Stop은 허용돼요. `$H`는 직접 바꾸지 않고, 사용자가 Grist에서 `완료`로 처리하면 종료돼요."
     )
 }
 
@@ -424,8 +458,71 @@ fn parse_cli_row() -> Option<String> {
     None
 }
 
-fn needs_j2(has_rows: bool, agent_path: &str, cli_cwd: Option<&str>, cli_row: Option<&str>) -> bool {
-    has_rows && agent_path.is_empty() && cli_cwd.is_none() && cli_row.is_none()
+fn needs_j2(has_rows: bool, agent_path: &str, worker_row: Option<&str>, cli_cwd: Option<&str>, cli_row: Option<&str>) -> bool {
+    has_rows && agent_path.is_empty() && worker_row.is_none() && cli_cwd.is_none() && cli_row.is_none()
+}
+
+fn last_assistant_message_from(event: &Value) -> String {
+    if let Some(msg) = event.get("last_assistant_message").filter(|v| v.truthy()).and_then(Value::as_str) {
+        if !msg.trim().is_empty() {
+            return msg.to_string();
+        }
+    }
+    let Some(path) = event.get("transcript_path").filter(|v| v.truthy()).and_then(Value::as_str) else {
+        return String::new();
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    text.lines()
+        .rev()
+        .filter_map(|line| json::parse(line).ok())
+        .find_map(|entry| match entry.get("type").and_then(Value::as_str)? {
+            "assistant" => {
+                let Some(Value::Arr(parts)) = entry.get("message").and_then(|m| m.get("content")) else {
+                    return None;
+                };
+                let joined: Vec<&str> = parts
+                    .iter()
+                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect();
+                (!joined.is_empty()).then(|| joined.join("\n"))
+            }
+            "PLANNER_RESPONSE" => {
+                let content = entry.get("content").and_then(Value::as_str)?.trim();
+                (!content.is_empty()).then(|| content.to_string())
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn main_asked_user(event: &Value) -> bool {
+    let Some(path) = event.get("transcript_path").and_then(Value::as_str) else { return false };
+    let Ok(text) = std::fs::read_to_string(path) else { return false };
+    let mut awaiting = false;
+    for line in text.lines() {
+        let Ok(entry) = json::parse(line) else { continue };
+        match entry.get("type").and_then(Value::as_str) {
+            Some("assistant") => {
+                let Some(Value::Arr(parts)) = entry.get("message").and_then(|m| m.get("content")) else { continue };
+                for part in parts {
+                    if part.get("type").and_then(Value::as_str) == Some("tool_use") {
+                        awaiting = part.get("name").and_then(Value::as_str) == Some("AskUserQuestion");
+                    }
+                }
+            }
+            Some("user") => {
+                let tool_result_only = matches!(entry.get("message").and_then(|m| m.get("content")), Some(Value::Arr(parts))
+                    if !parts.is_empty() && parts.iter().all(|part| part.get("type").and_then(Value::as_str) == Some("tool_result")));
+                if !tool_result_only { awaiting = false; }
+            }
+            Some("USER_INPUT") => awaiting = false,
+            _ => {}
+        }
+    }
+    awaiting
 }
 
 #[repr(C)]
@@ -606,9 +703,15 @@ fn main() {
     }
 
     let cli_row = parse_cli_row();
-    let worker_row = grist::gate::worker_row().map(|row| row.to_string());
+    let verifier_role = std::env::var("T26_ROLE").ok().as_deref() == Some("verifier");
+    let verifier_row = grist::gate::verifier_row().map(|row| row.to_string());
+    if verifier_role && verifier_row.is_none() {
+        println!("{{\"decision\": \"block\", \"reason\": \"검증자 T26_ROW가 없거나 숫자가 아니에요.\"}}");
+        std::process::exit(2);
+    }
+    let worker_row = grist::gate::worker_row().map(|row| row.to_string()).or_else(|| verifier_row.clone());
     if worker_row.is_some() && cli_row.is_some() {
-        println!("{{\"decision\": \"block\", \"reason\": \"task-complete --row is run by the orchestrator, not a dispatch-agent worker (T26_ROLE=worker)\"}}");
+        println!("{{\"decision\": \"block\", \"reason\": \"task-complete --row is run by the orchestrator, not a dispatch-agent worker or verifier\"}}");
         std::process::exit(2);
     }
     let (code, out, err, allowed) = if let Some(row_id) = cli_row.as_deref() {
@@ -616,7 +719,7 @@ fn main() {
         (c, o, e, MAIN_ALLOWED)
     } else if let Some(row_id) = worker_row.as_deref() {
         let (c, o, e) = grist(&["gate", "--cwd", cwd, "--row", row_id]);
-        (c, o, e, AGENT_ALLOWED)
+        (c, o, e, if verifier_row.is_some() { VERIFIER_ALLOWED } else { AGENT_ALLOWED })
     } else if !agent_path.is_empty() {
         let Some(row_id) = extract_agent_task(&agent_path) else {
             emit(vec![], &sync_note);
@@ -660,6 +763,12 @@ fn main() {
     };
 
     let project_dir = status.get("project_dir").and_then(Value::as_str).unwrap_or(cwd);
+    if let Some(row_id) = verifier_row.as_deref() {
+        let recorded = row_id.parse::<i64>().ok().is_some_and(|id| verifier_recorded(Path::new(project_dir), id));
+        if !recorded {
+            emit(vec![("decision".into(), s("block")), ("reason".into(), s(format!("검증자 #{row_id}: task-hidden 또는 task-step 검증 기록을 남긴 뒤 종료하세요.")))], &sync_note);
+        }
+    }
     // The orchestrator alone runs the completion judgment; a t26 subagent or dispatch-agent worker ends at 검증.
     let orchestrator = agent_path.is_empty() && worker_row.is_none();
     let completion_checked = orchestrator && uninitialized.is_empty();
@@ -704,15 +813,11 @@ fn main() {
     }
 
     // J2 only decides a stop the rows would allow, so a blocked stop skips the Jev call.
-    let judgment_result = if needs_j2(rows.iter().any(|row| !user_done(row)), &agent_path, cli_cwd.as_deref(), cli_row.as_deref())
+    let judgment_result = if needs_j2(rows.iter().any(|row| !user_done(row)), &agent_path, worker_row.as_deref(), cli_cwd.as_deref(), cli_row.as_deref())
         && pending.is_empty() && uninitialized.is_empty() && completion_error.is_none()
     {
-        let last_msg = event
-            .get("last_assistant_message")
-            .filter(|v| v.truthy())
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        jev_stop_cached(&s_dir.join(format!("j2-{}.json", sanitize(thread))), last_msg, &rows)
+        let last_msg = last_assistant_message_from(&event);
+        jev_stop_cached(&s_dir.join(format!("j2-{}.json", sanitize(thread))), &last_msg, &rows)
     } else {
         Ok(Value::Obj(vec![]))
     };
@@ -731,6 +836,11 @@ fn main() {
         if let Some(reason) = unregistered_reason(&session_id, &unregistered_changes(&session_id)) {
             emit(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], &sync_note);
         }
+    }
+
+    if hook_main && uninitialized.is_empty() && !pending.is_empty() && main_asked_user(&event) {
+        let _ = std::fs::remove_file(&state_file);
+        emit(vec![], &sync_note);
     }
 
     if hook_main && uninitialized.is_empty() && completion_error.is_none()
@@ -757,6 +867,13 @@ fn main() {
         .and_then(|t| json::parse(&t).ok())
         .unwrap_or(Value::Obj(vec![]));
 
+    let wait_rows = if hook_main { user_action_wait_rows(&pending) } else { None };
+    if let Some(ref waiting) = wait_rows {
+        if repeated_user_action_wait(&state, waiting) {
+            emit(vec![], &sync_note);
+        }
+    }
+
     let blocks = if state.get("stages").map(|st| st.py_eq(&stages)).unwrap_or(false) {
         state.get("blocks").and_then(Value::as_i64).unwrap_or(0)
     } else {
@@ -768,7 +885,7 @@ fn main() {
         .filter(|v| v.truthy())
         .and_then(Value::as_str);
 
-    let reason = if worker_row.is_some() || !agent_path.is_empty() {
+    let reason = if (worker_row.is_some() || !agent_path.is_empty()) && !pending.is_empty() {
         agent_reason(&pending[0], project_dir)
     } else if !uninitialized.is_empty() {
         init_reason(uninitialized)
@@ -812,6 +929,9 @@ fn main() {
     obj_set(&mut new_state, "blocks", Value::Num((blocks + 1).to_string()));
     obj_set(&mut new_state, "stages", stages);
     obj_set(&mut new_state, "reason", s(&reason));
+    if let Some(waiting) = wait_rows {
+        obj_set(&mut new_state, "wait_rows", waiting);
+    }
     let _ = std::fs::write(&state_file, json::dumps(&Value::Obj(new_state)));
 
     let mut out_obj = Vec::new();
@@ -843,6 +963,17 @@ mod tests {
 
     fn stage_row(stage: &str) -> Value {
         Value::Obj(vec![("id".into(), Value::Num("359".into())), ("H".into(), s(stage))])
+    }
+
+    #[test]
+    fn verifier_stop_needs_a_recorded_check() {
+        let dir = dispatch_fixture();
+        assert!(!super::verifier_recorded(&dir, 504));
+        let path = grist::gate::gate_path(&dir, 504);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{\"verifier_recorded\":true}").unwrap();
+        assert!(super::verifier_recorded(&dir, 504));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -937,18 +1068,72 @@ mod tests {
 
     #[test]
     fn jev_skip_without_rows_or_for_subagent() {
-        assert!(!needs_j2(false, "", None, None));
-        assert!(!needs_j2(true, "t26_276", None, None));
+        assert!(!needs_j2(false, "", None, None, None));
+        assert!(!needs_j2(true, "t26_276", None, None, None));
+        assert!(!needs_j2(true, "", Some("443"), None, None));
+    }
+
+    #[test]
+    fn last_assistant_message_falls_back_to_transcript_path() {
+        let path = std::env::temp_dir().join(format!("tc-transcript-{}.jsonl", std::process::id()));
+        std::fs::write(
+            &path,
+            "{\"type\":\"USER_INPUT\",\"content\":\"질문\"}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"최종 보고예요.\"}\n",
+        )
+        .unwrap();
+        let event = Value::Obj(vec![("transcript_path".into(), s(path.to_string_lossy()))]);
+        assert_eq!(super::last_assistant_message_from(&event), "최종 보고예요.");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn main_question_wait_tracks_transcript_tool_and_user_reply() {
+        let path = std::env::temp_dir().join(format!("tc-ask-{}.jsonl", std::process::id()));
+        let event = Value::Obj(vec![("transcript_path".into(), s(path.to_string_lossy()))]);
+        let ask = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"AskUserQuestion\"}]}}\n";
+        let result = "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"content\":\"\"}]}}\n";
+        let text = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"답변을 기다려요.\"}]}}\n";
+        std::fs::write(&path, text).unwrap();
+        assert!(!super::main_asked_user(&event));
+        std::fs::write(&path, ask).unwrap();
+        assert!(super::main_asked_user(&event));
+        std::fs::write(&path, format!("{ask}{result}{text}")).unwrap();
+        assert!(super::main_asked_user(&event));
+        std::fs::write(&path, format!("{ask}{result}{text}{{\"type\":\"USER_INPUT\",\"content\":\"답변\"}}\n")).unwrap();
+        assert!(!super::main_asked_user(&event));
+        std::fs::write(&path, format!("{ask}{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"OtherTool\"}}]}}}}\n")).unwrap();
+        assert!(!super::main_asked_user(&event));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn user_action_wait_needs_every_pending_row_and_exact_state() {
+        let row = |id: &str, d: &str| Value::Obj(vec![
+            ("id".into(), Value::Num(id.into())), ("H".into(), s("검증")), ("D".into(), s(d)),
+        ]);
+        let waiting = row("514", "[🏷] 구현 결과 확인, 사용자에게 확인 중");
+        let second = row("515", "[🏷] 로그인 사용자 입력 대기");
+        let signature = super::user_action_wait_rows(&[waiting.clone(), second.clone()]).unwrap();
+        assert!(signature.py_eq(&super::user_action_wait_rows(&[waiting, second]).unwrap()));
+        let first_stop = Value::Obj(vec![]);
+        let after_first_block = Value::Obj(vec![("wait_rows".into(), signature.clone())]);
+        assert!(!super::repeated_user_action_wait(&first_stop, &signature));
+        assert!(super::repeated_user_action_wait(&after_first_block, &signature));
+        assert!(!signature.py_eq(&super::user_action_wait_rows(&[row("514", "[🏷] 다른 사용자 입력 대기"), row("515", "[🏷] 로그인 사용자 입력 대기")]).unwrap()));
+        assert!(super::user_action_wait_rows(&[row("514", "[🏷] 사용자에게 확인 중"), row("515", "[🏷] 구현 중")]).is_none());
+        assert!(super::user_action_wait_rows(&[row("514", "[🏷] 사용자 동작 필요")]).is_none());
+        assert!(super::user_action_wait_rows(&[row("514", "사용자 입력 대기")]).is_none());
     }
 
     #[test]
     fn j2_is_required_only_for_main_stop_hook() {
-        assert!(needs_j2(true, "", None, None));
-        assert!(!needs_j2(false, "", None, None));
-        assert!(!needs_j2(true, "", Some("/project"), None));
-        assert!(!needs_j2(true, "", Some("/project"), Some("276")));
-        assert!(!needs_j2(true, "", None, Some("276")));
-        assert!(!needs_j2(true, "t26_276", None, None));
+        assert!(needs_j2(true, "", None, None, None));
+        assert!(!needs_j2(false, "", None, None, None));
+        assert!(!needs_j2(true, "", None, Some("/project"), None));
+        assert!(!needs_j2(true, "", None, Some("/project"), Some("276")));
+        assert!(!needs_j2(true, "", None, None, Some("276")));
+        assert!(!needs_j2(true, "t26_276", None, None, None));
+        assert!(!needs_j2(true, "", Some("443"), None, None));
         let done = Value::Obj(vec![("id".into(), Value::Num("7".into())), ("H".into(), s("완료"))]);
         assert!(!super::user_done(&Value::Obj(vec![("H".into(), s("확인"))])) && super::user_done(&done));
     }
@@ -1042,6 +1227,30 @@ mod tests {
         assert!(msg.contains("task-confirm <id>") && msg.contains("--section 확인") && !msg.contains("당일 `.ai/changes`에"));
         assert!(!msg.contains("`$H=확인`과"));
         assert!(msg.contains("Grist에서 `완료`로 처리하면 종료돼요"));
+    }
+
+    #[test]
+    fn diagnosis_stop_reason_branches_on_cause() {
+        let row = Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단"))]);
+        let msg = main_reason(&[row.clone()], &[row], "/home/tree/extensions");
+        assert!(msg.contains("재현만 목표로 대행자에게 맡기세요(`task-red`·`$J` 후 종료"));
+        assert!(msg.contains("stage-start.md 진단 갈림길"));
+        assert!(!msg.contains("구현자 결과를 기다리세요"));
+        let known = Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단")), ("J".into(), s("[🛣] 원인"))]);
+        let known_msg = main_reason(&[known.clone()], &[known], "/home/tree/extensions");
+        assert!(known_msg.contains("`$J`에 기록된 원인으로 구현을 맡기세요(`task-ready`"));
+        assert!(!known_msg.contains("재현만 목표로"));
+        let draft = Value::Obj(vec![("id".into(), Value::Num("501".into())), ("H".into(), s("초안"))]);
+        let mixed = main_reason(&[draft.clone(), Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단"))])], &[draft, Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단"))])], "/home/tree/extensions");
+        assert!(mixed.contains("재현만 목표로 대행자에게"));
+    }
+
+    #[test]
+    fn draft_stop_reason_assigns_code_to_dispatch_agent() {
+        let draft = Value::Obj(vec![("id".into(), Value::Num("501".into())), ("H".into(), s("초안"))]);
+        let msg = main_reason(&[draft.clone()], &[draft], "/home/tree/extensions");
+        assert!(msg.contains("`초안` 행의 코드 변경은 파일 수와 상관없이 `dispatch-agent` 대행자에게 맡기고, 규칙·Skill 문서 행만 메인이 직접 처리하세요(`manage-project` `references/plan.md`)."));
+        assert!(!msg.contains("수정 파일 1~2개"));
     }
 
     #[test]

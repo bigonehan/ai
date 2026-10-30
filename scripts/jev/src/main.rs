@@ -569,7 +569,7 @@ fn run_scope(cfg: &Config, request: &str, goal: &str) -> (String, Vec<Value>, Op
     cov.insert(
         "instructions".into(),
         Value::String(format!(
-            "사용자 요청의 모든 요구가 아래 목표 조건들에 빠짐없이 반영되어 있다:\n{goal}"
+            "사용자 요청의 모든 요구가 아래 목표 조건들에 빠짐없이 반영되어 있으며, 제품 기능 수정 시 문구·UI 표시만 확인하는 데 그치지 않고 실제 기능이 작동해 최종 결과가 성공하는 조건을 포함한다:\n{goal}"
         )),
     );
     questions.insert("coverage".into(), Value::Object(cov));
@@ -598,7 +598,9 @@ fn run_match(cfg: &Config, goal: &str, output: &str) -> (String, Vec<Value>, Opt
         q.insert("type".into(), Value::String("noul".into()));
         q.insert(
             "instructions".into(),
-            Value::String(format!("위 실제 출력은 이 목표 조건을 충족한다: {label}")),
+            Value::String(format!(
+                "위 실제 출력은 단순 문구·화면 표시만 부분 확인한 것이 아니라 해당 흐름을 실제로 실행해 연동 오류 없이 정상 작동함을 확인함으로써 이 목표 조건을 충족한다: {label}"
+            )),
         );
         questions.insert(name.clone(), Value::Object(q));
     }

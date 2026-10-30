@@ -1,6 +1,32 @@
 {
   "description": "Complete_task owns Stop and SubagentStop decisions. The main session ends when every current Table26 row has completion evidence and is 확인 or user-set 완료; a t26_<RawID> agent ends after its row reaches 검증. A main session with no registered rows is blocked once when files changed since its SessionStart snapshot.",
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/tree/ai/scripts/bin/main-edit-gate",
+            "timeout": 20,
+            "statusMessage": "셸 명령 확인"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/tree/ai/scripts/bin/architecture-context",
+            "timeout": 20,
+            "statusMessage": "Skill 구조 확인"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

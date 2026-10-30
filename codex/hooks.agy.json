@@ -5,6 +5,12 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "run_command",
+        "hooks": [
+          {"type": "command", "command": "~/ai/scripts/bin/agy-hook pre-command", "timeout": 20}
+        ]
+      },
+      {
         "matcher": "edit_file|write_file",
         "hooks": [
           {"type": "command", "command": "~/ai/scripts/bin/agy-hook pre-edit", "timeout": 20}
@@ -13,12 +19,20 @@
       {
         "matcher": "ask_question",
         "hooks": [
-          {"type": "command", "command": "~/ai/scripts/bin/agy-hook pre-ask", "timeout": 15}
+          {"type": "command", "command": "~/ai/scripts/bin/agy-hook pre-ask", "timeout": 45}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {"type": "command", "command": "~/ai/scripts/bin/agy-hook post-command", "timeout": 20}
         ]
       }
     ],
     "Stop": [
-      {"type": "command", "command": "~/ai/scripts/bin/agy-hook stop", "timeout": 60}
+      {"type": "command", "command": "~/ai/scripts/bin/agy-hook stop", "timeout": 90}
     ]
   }
 }

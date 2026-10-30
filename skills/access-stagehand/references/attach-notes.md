@@ -9,6 +9,7 @@
 4. Grist 위젯처럼 iframe 안의 요소는 `page.locator("iframe >> <selector>")`로 다룬다. Stagehand의 `page`에는 `frames()`가 없고 `stagehand.context`도 없다(`session.page`와 `session.pages`를 바로 사용한다).
 5. Node 25 인라인 스크립트에서 프로젝트 `.ts` 파일(`server/obsidian.ts` 등)과 `openStagehand()`를 함께 임포트할 때는 반드시 `node --experimental-transform-types --input-type=module -e '...'`를 사용한다(`npx tsx -e`는 CJS top-level `await` 오류, 기본 `node` strip-only 모드는 `readonly` 생성자 파라미터 구문 오류 발생).
 6. Grist 레코드 이동은 화면 좌표 클릭(`page.click(x, y)`) 대신 URL 앵커 `#a1.s<section id>.r<row id>`로 연다. section id는 `~/ai/scripts/bin/grist get _grist_Views_section`의 `parentId`(=page의 viewRef)로 찾는다.
+7. 여러 확장을 함께 로드해 재시작할 때는 `run_cdp --replace -e <dir1>,<dir2> --detach`처럼 단일 `-e`에 쉼표로 이어서 넘긴다(`-e`를 여러 번 주면 마지막 값만 적용돼 `extension-not-loaded`가 발생한다).
 
 ## 기록
 형식: `### YYMMDD 증상 한 줄` 아래에 `- 프로젝트 :`·`- 증상 :`(오류 원문)·`- 원인 :`·`- 복구 :`·`- 소모 :`(낭비한 시간·시도 수)·`- 재발 방지 :`·`- 재발 :`.
@@ -51,4 +52,13 @@
 - 복구 : 없음(재시도 한도 소진). 첫 시도만 성공해 첫 곡 판독.
 - 소모 : 실패 4회, 약 12분.
 - 재발 방지 : 긴 재생 흐름 전에 `/json/list`로 다른 세션 탭 변화를 보고, 다른 세션이 활동 중이면 끝난 뒤 실행한다. 스크립트 정리에 `pkill -f`를 쓰지 않는다.
+- 재발 :
+
+### 261028 다중 확장 검증 시 미로드 확장 및 중복 `-e` 옵션으로 인한 `extension-not-loaded` / `browser-launch-start` 대기
+- 프로젝트 : grist_video_maker, web_prompt_bridge, web_prompt_runner
+- 증상 : 기존 9222 브라우저가 `web_prompt_runner/dist`만 로드한 상태에서 `openStagehand({ extensions: [bridge, runner] })` 호출 시 60초 timeout 후 `doctor --restart-runtime` 및 `run_cdp --replace -e dir1 -e dir2`에서 `extension-not-loaded` 발생.
+- 원인 : `run_cdp` fish 함수는 `-e`를 여러 번 주면 마지막 `-e`로 덮어쓰며, 단일 `-e dir1,dir2`(쉼표 구분)만 모든 확장을 `--load-extension`에 포함한다.
+- 복구 : `fish -c "run_cdp --replace -e /home/tree/extensions/web_prompt_bridge/dist,/home/tree/extensions/web_prompt_runner/dist --detach"` 실행 후 즉시 attach 성공.
+- 소모 : 실패 2회, 약 1분.
+- 재발 방지 : `먼저 할 일` 7번.
 - 재발 :

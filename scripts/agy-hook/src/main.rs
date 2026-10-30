@@ -49,13 +49,41 @@ pub fn ask_event(event: &Value) -> String {
     dumps(&Value::Obj(o))
 }
 
+/// agy `run_command` ⇒ 공통 PreToolUse gate의 Bash 입력.
+pub fn command_event(event: &Value) -> String {
+    let args = event.get("toolCall").and_then(|call| call.get("args"));
+    let command = args.and_then(|args| args.get("CommandLine")).and_then(Value::as_str).unwrap_or("");
+    let cwd = args.and_then(|args| args.get("Cwd")).and_then(Value::as_str).unwrap_or("");
+    let mut input = Vec::new();
+    obj_set(&mut input, "command", s(command));
+    let mut output = Vec::new();
+    obj_set(&mut output, "tool_name", s("Bash"));
+    obj_set(&mut output, "tool_input", Value::Obj(input));
+    let fallback_cwd = workspace(event);
+    obj_set(&mut output, "cwd", s(if cwd.is_empty() { &fallback_cwd } else { cwd }));
+    obj_set(&mut output, "session_id", s(first_str(event, "conversationId")));
+    dumps(&Value::Obj(output))
+}
+
+/// 공통 gate의 Claude/Codex deny 출력 ⇒ agy deny 출력.
+pub fn pre_command_output(gate_stdout: &str) -> String {
+    let Ok(value) = parse(gate_stdout.trim()) else { return pre_tool("allow", ""); };
+    let hook = value.get("hookSpecificOutput");
+    if hook.and_then(|v| v.get("permissionDecision")).and_then(Value::as_str) == Some("deny") {
+        let reason = hook.and_then(|v| v.get("permissionDecisionReason")).and_then(Value::as_str).unwrap_or("");
+        pre_tool("deny", reason)
+    } else {
+        pre_tool("allow", "")
+    }
+}
+
 fn inject(text: &str) -> String {
     let inner = Value::Obj(vec![("systemMessage".into(), s(text))]);
     let step = Value::Obj(vec![("systemMessage".into(), inner)]);
     dumps(&Value::Obj(vec![("injectSteps".into(), Value::Arr(vec![step]))]))
 }
 
-/// architecture-context output ⇒ agy SessionStart injectSteps.
+/// architecture-context output ⇒ agy injectSteps.
 pub fn session_output(child_stdout: &str) -> String {
     let v = parse(child_stdout.trim()).unwrap_or(Value::Obj(vec![]));
     let text = v
@@ -149,6 +177,13 @@ fn main() {
     let out = match sub.as_str() {
         "session-start" => run("architecture-context", &[], &to_snake(&event, "SessionStart"))
             .map(|o| session_output(&o)),
+        "post-command" => {
+            let mut payload = parse(&command_event(&event)).unwrap_or(Value::Obj(vec![]));
+            if let Value::Obj(ref mut fields) = payload {
+                obj_set(fields, "hook_event_name", s("PostToolUse"));
+            }
+            run("architecture-context", &[], &dumps(&payload)).map(|o| session_output(&o))
+        }
         "pre-edit" => {
             let cwd = workspace(&event);
             let root = format!("{}/extensions", std::env::var("HOME").unwrap_or_default());
@@ -169,6 +204,8 @@ fn main() {
                 Err(e) => Ok(pre_tool("deny", &format!("nf 알림 실행 실패({e})"))),
             }
         }
+        "pre-command" => run("main-edit-gate", &[], &command_event(&event))
+            .map(|output| pre_command_output(&output)),
         "stop" => {
             let reason = first_str(&event, "terminationReason");
             if reason == "USER_CANCELED" || reason == "ERROR" || event.get("fullyIdle") == Some(&Value::Bool(false)) {
@@ -189,7 +226,7 @@ fn main() {
         Ok(text) => println!("{text}"),
         Err(e) => {
             eprintln!("agy-hook: {e}");
-            if sub == "pre-edit" || sub == "pre-ask" {
+            if sub == "pre-edit" || sub == "pre-ask" || sub == "pre-command" {
                 println!("{}", pre_tool("allow", ""));
             } else {
                 println!("{{}}");
@@ -250,5 +287,17 @@ mod tests {
             ask_event(&e),
             r#"{"tool_name": "ask_question", "tool_input": {"questions": [{"question": "타입 선택"}]}, "cwd": "/home/tree/extensions"}"#
         );
+    }
+
+    #[test]
+    fn command_event_and_deny_output() {
+        let event = parse(r#"{"toolCall":{"name":"run_command","args":{"CommandLine":"nf message","Cwd":"/home/tree/extensions"}},"conversationId":"c1","workspacePaths":["/home/tree/extensions"]}"#).unwrap();
+        let converted = parse(&command_event(&event)).unwrap();
+        assert_eq!(converted.get("tool_name").and_then(Value::as_str), Some("Bash"));
+        assert_eq!(converted.get("tool_input").and_then(|v| v.get("command")).and_then(Value::as_str), Some("nf message"));
+        assert_eq!(converted.get("cwd").and_then(Value::as_str), Some("/home/tree/extensions"));
+        let denial = r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"nf 차단"}}"#;
+        assert_eq!(pre_command_output(denial), r#"{"decision": "deny", "reason": "nf 차단"}"#);
+        assert_eq!(pre_command_output(""), r#"{"decision": "allow"}"#);
     }
 }

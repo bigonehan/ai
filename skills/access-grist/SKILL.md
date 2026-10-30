@@ -7,8 +7,6 @@ description: Read and write the extensions workflow's Grist document (au1EbKLtZb
 
 Use `~/ai/scripts/bin/grist` for every Grist read or write in `/home/tree/extensions` work. The API key lives in this skill's `.env` (mode 600) and is loaded by the script; never ask the user for it, never read or print `.env`, and never put the key in commands, files, logs or change records.
 
-Read a Table26 row's `$H`·`$I`·`$J`·`$K` once at work start: `grist task <id>` for an existing row (use `gate` only to find an unknown ID); `task-add`, `task-goal` and `task-update` print the same state as their `row` line (`H=… | I=… | J=… | K=…`), which is the read for a new or just-written row. Do not re-read it; pass that line to a `t26_<id>` agent. On an error, record the user's reported failure in `$I`; record the user's stated cause in `$J`, or reproduce the failure to identify it, and repair the cause shown in that update's `row` line.
-
 Run with the absolute path:
 
 ```bash
@@ -17,7 +15,7 @@ Run with the absolute path:
 
 ## Commands
 
-Full arguments, caller rules, the record hook, goal format, tables and examples: `references/commands.md` (read only the section you need).
+Required arguments, value formats (e.g. `$D` marker, `--can`, evidence lines) and one example per command: `~/ai/scripts/bin/grist <command> --help`. Do not read other docs for arguments.
 
 | Command | Purpose |
 |---|---|

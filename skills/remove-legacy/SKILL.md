@@ -13,7 +13,7 @@ metadata:
 
 1. `manage-project`의 시작 절차에 따라 사용자 요청을 `grist request-record` 입력의 `# 요구 사항`에 한 줄로 요약하고(changes `# 요청` 절에 기록), `# 세부 사항`에 `[📐|✒️|⌨️|🚿|✏️|🌍] 한 줄 요약`으로 실제 작업 단위와 새 형식의 생성 지점을 쓴다. 이미 답한 사항을 다시 묻지 않는다.
 2. 새 형식의 `시작 동작 → producer → transport/handler → authoritative consumer → 최종 효과`를 한 줄로 정한다. 입력 형식을 지정했다면 producer의 실제 출력을 먼저 구현·확인한다.
-3. 변경 전 `read-architecture` 직후 현재 Table26 행의 `$H`·`$I`·`$J`·`$K`를 한 번 읽는다(이미 받은 `row` 줄이 있으면 그 줄, 없으면 `grist task <id>`). 그다음 `rg -n`(파일 전체 읽기 금지, 필요한 섹션·줄·필드만 `rg -n` 또는 `grist task-show --section`으로 발췌)으로 소유 폴더(`src/`, `server/`, 해당 `~/ai/skills`, `~/ai/scripts`)를 고르고, 선택된 폴더만 대상으로 `rg -n`을 실행한다(`/home/tree/extensions` 루트 전체 스캔, `.ai/changes/` 이력 탐색, `git log`·`tail` 전체 뒤지기 금지; 제품 코드·테스트 수정은 `manage-project` 배정 기준대로 수정 파일 1~2개 행은 메인이, 3개 이상 묶음은 프로젝트당 1개의 `t26_<id>` 서브에이전트가 맡는다).
+3. 변경 전 `read-architecture` 직후 현재 Table26 행의 `$H`·`$I`·`$J`·`$K`를 한 번 읽는다(이미 받은 `row` 줄이 있으면 그 줄, 없으면 `grist task <id>`). 그다음 `rg -n`(파일 전체 읽기 금지, 필요한 섹션·줄·필드만 `rg -n` 또는 `grist task-show --section`으로 발췌)으로 소유 폴더(`src/`, `server/`, 해당 `~/ai/skills`, `~/ai/scripts`)를 고르고, 선택된 폴더만 대상으로 `rg -n`을 실행한다(`/home/tree/extensions` 루트 전체 스캔, `.ai/changes/` 이력 탐색, `git log`·`tail` 전체 뒤지기 금지; 제품 코드·테스트 수정은 파일 수와 상관없이 대행자(`role-agent`, `dispatch-agent`)가 맡고 메인은 규칙·Skill 문서만 직접 고친다).
    - 제품 소스(`src/`, `server/`) 안에 하드코딩된 Obsidian Vault·템플릿 상대/절대 경로(예: `구현/[타입]/YYMMDD.<이름>/...`)와 분기(신규 생성 및 `EEXIST` 기존 파일 읽기 분기 모두)를 대조해 실제 디스크 파일·`AGENTS.md` `# 상태`·Table7 `Obsidian_Id`와 일치시킨다.
    - 불필요한 해시·다이제스트 검증 및 해시 전용 로깅은 호환 유지하지 않고 제품 코드·테스트·Skill·스크립트에서 함께 제거한다.
    - 전역규칙은 `agent-rules`로만, Grist는 `access-grist`로만 읽고 쓴다. 관련된 등록·초기화 프로젝트만 다루며, 사용자가 보류한 미등록 프로젝트를 초기화하지 않는다.

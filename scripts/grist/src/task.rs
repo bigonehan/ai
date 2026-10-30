@@ -10,6 +10,9 @@ use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 
 pub const CONFIRMED_STAGE: &str = "확인";
+pub const STAGE_START_CARD: &str = "~/ai/skills/manage-project/references/stage-start.md";
+pub const STAGE_WORK_CARD: &str = "~/ai/skills/manage-project/references/stage-work.md";
+pub const STAGE_VERIFY_CARD: &str = "~/ai/skills/manage-project/references/stage-verify.md";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -120,6 +123,7 @@ impl TaskStore for GateStore {
         let dir = ctx.dir()?.to_path_buf();
         let mut state = if ctx.prep_kind == "red" { Map::new() } else { gate::gate_load(&dir, ctx.raw_id) };
         state.remove("flow_wait");
+        state.remove("verifier_recorded");
         state.remove(if ctx.prep_kind == "red" { "ready" } else { "red" });
         state.insert(ctx.prep_kind.into(), Value::Object(ctx.prepared.clone()));
         gate::gate_save(&dir, ctx.raw_id, &state)
@@ -129,6 +133,7 @@ impl TaskStore for GateStore {
         let dir = ctx.dir()?.to_path_buf();
         let mut state = gate::gate_load(&dir, ctx.raw_id);
         state.remove("flow_wait");
+        state.remove("verifier_recorded");
         state.insert(ctx.prep_kind.into(), Value::Object(ctx.prepared.clone()));
         state.insert("submit".into(), json!({"purpose": ctx.purpose, "test": ctx.test, "exit": 0, "output": ctx.output, "changed": ctx.changed}));
         state.insert("hidden".into(), json!([]));
@@ -187,7 +192,7 @@ impl GristStore {
         let mut upd = Map::new();
         upd.insert("H".into(), Value::String(stage.into()));
         api::update(TASK_TABLE, ctx.raw_id, &upd)?;
-        ctx.result = json!({"id": ctx.raw_id, "H": stage});
+        ctx.result = json!({"id": ctx.raw_id, "H": stage, "next": if stage == "작업" { STAGE_WORK_CARD } else { STAGE_VERIFY_CARD }});
         Ok(())
     }
 }
@@ -205,6 +210,7 @@ impl TaskStore for GristStore {
         if ctx.stage == gate::DRAFT_STAGE || ctx.stage == gate::ERROR_STAGE {
             Self::set_stage(ctx, "작업")
         } else {
+            ctx.result = json!({"id": ctx.raw_id, "H": ctx.stage, "next": STAGE_WORK_CARD});
             Ok(())
         }
     }
@@ -282,7 +288,23 @@ fn code_evidence(project_dir: &Path, raw_id: i64, stage: &str, state: &Map<Strin
         .ok_or_else(|| Exit::Fail("TEST".into(), format!("#{raw_id} missing flow confirmation after latest verification")))?;
     let (evidence, rest) = split_goal_evidence(flow.lines())
         .ok_or_else(|| Exit::Fail("TEST".into(), format!("#{raw_id} {EVIDENCE_MISSING}")))?;
+    if let Some(marker) = runtime_evidence_marker(project_dir, raw_id, &flow) {
+        return api::fail("TEST", format!("#{raw_id} runtime confirmation contains unverified evidence: {marker}"));
+    }
     Ok(format!("# 목표별 근거\n{evidence}\n# 전체 흐름 확인 증거\n{rest}"))
+}
+
+/// Reject incomplete runtime checks only for submitted code rows in projects with a runtime.
+pub(crate) fn runtime_evidence_marker(project_dir: &Path, raw_id: i64, evidence: &str) -> Option<&'static str> {
+    let agents = std::fs::read_to_string(project_dir.join("AGENTS.md")).ok()?;
+    let runtime = agents.lines().find_map(|line| line.trim().strip_prefix("runtime :").map(str::trim))?;
+    if runtime.starts_with("없음") || text_only_row(project_dir, raw_id) { return None; }
+    const MARKERS: [&str; 9] = [
+        "단위 테스트", "경계·통합 테스트", "통합 테스트만", "로그인 필요", "로그인이 필요",
+        "검증 중단", "확인하지 못", "미검증", "mock",
+    ];
+    let lower = evidence.to_lowercase();
+    MARKERS.into_iter().find(|marker| lower.contains(marker))
 }
 
 const EVIDENCE_MISSING: &str = "per-goal evidence missing; rerun grist task-confirm with --evidence";
@@ -566,6 +588,15 @@ mod tests {
         assert_eq!(names(Step::Check), ["changes", "grist"]);
     }
 
+    #[test]
+    fn ready_and_submit_results_link_stage_cards() {
+        assert_eq!(super::STAGE_WORK_CARD, "~/ai/skills/manage-project/references/stage-work.md");
+        assert_eq!(super::STAGE_VERIFY_CARD, "~/ai/skills/manage-project/references/stage-verify.md");
+        let mut ctx = TaskCtx { raw_id: 500, stage: "교정".into(), ..Default::default() };
+        super::GristStore.ready(&mut ctx).unwrap();
+        assert_eq!(ctx.result["next"], super::STAGE_WORK_CARD);
+    }
+
     fn tmp_project(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("grist-task-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -678,6 +709,24 @@ mod tests {
             "#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n").unwrap();
         let err = code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err();
         assert!(exit_message(&err).contains("per-goal evidence missing"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn code_evidence_rejects_unverified_runtime_confirmation() {
+        let dir = tmp_project("unverified-runtime");
+        std::fs::write(dir.join("AGENTS.md"), "runtime : 브라우저 확장\n").unwrap();
+        let path = dir.join(".ai/changes/261023.light.md");
+        for marker in ["단위 테스트", "경계·통합 테스트", "통합 테스트만", "로그인 필요", "로그인이 필요", "검증 중단", "확인하지 못", "미검증", "MOCK"] {
+            std::fs::write(&path, format!(
+                "## [구현] [📐] 코드 (#303)\n#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n- 근거 1 : {marker}\n"
+            )).unwrap();
+            let err = code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err();
+            assert!(exit_message(&err).contains("unverified evidence"), "{marker}");
+        }
+        std::fs::write(&path,
+            "## [구현] [📐] 코드 (#303)\n#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 로그인 필요\n- 근거 1 : 실제 파일 확인\n").unwrap();
+        assert!(exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err()).contains("unverified evidence"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

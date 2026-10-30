@@ -1,6 +1,6 @@
 ---
 name: create-skill
-description: Create or edit a Skill or hook under ~/ai/skills or ~/ai/codex/hooks*, keeping the originals in ~/ai and linking them into ~/.codex, ~/.claude and ~/.gemini/config. Use whenever the user asks to add, rename, move, or change a Skill or hook. Not for global rule text (use change-rules).
+description: Create or edit a Skill or hook under ~/ai/skills or ~/ai/codex/hooks*, keeping the originals in ~/ai and linking them into ~/.codex, ~/.claude and ~/.gemini/config. Use whenever the user asks to add, rename, move, or change a Skill or hook. Not for global rule text (use manage-global-rules).
 ---
 
 # Create Skill

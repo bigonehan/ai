@@ -12,6 +12,7 @@ members = [
     "dispatch-agent",
     "main-edit-gate",
     "ask-notify",
+    "obsidian-scene-block",
 ]
 
 [profile.release]

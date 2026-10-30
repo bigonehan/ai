@@ -1,9 +1,11 @@
 ---
 name: run-cdp
-description: "Use for a real UI check or browser behavior whose final effect cannot be established from existing development-mode logs and persisted consumer state. When used, check the visible action and authoritative consumer in the shared CDP browser."
+description: "Verifier-only (T26_ROLE=verifier, dispatch-agent --role verifier, after deployment): the main session and implementers never run CDP; the main session puts the checks in the verifier prompt and judges only exit·last. Use for a real UI check or browser behavior whose final effect cannot be established from existing development-mode logs and persisted consumer state. When used, check the visible action and authoritative consumer in the shared CDP browser."
 ---
 
 # Run CDP browser
+
+- 메인(위임자)과 대행자는 이 Skill을 실행하지 않는다. 메인은 확인할 화면·상태값·소비 결과를 배포 뒤 검증자(`dispatch-agent --role verifier`) 프롬프트의 실측 확인 조건으로 넣고, 돌아온 `exit`·`last` 한 줄로만 판정한다(main-edit-gate가 메인·대행자의 `run_cdp`·`stagehand.mjs`·`:9222` 실행을 거부).
 
 Choose whether to use CDP from the changed behavior and the user's requested evidence, then take the target URL, artifact (extension directory), start action, and authoritative consumer from the project's nearest `AGENTS.md`. An extension project by itself does not require CDP.
 
@@ -11,13 +13,12 @@ Choose whether to use CDP from the changed behavior and the user's requested evi
 
 | 변경·요청 경계 | 검증 |
 |---|---|
-| 브라우저 화면에서 드래그·선택·클릭 등 실제 조작과 표시 결과를 추가·수정하거나 사용자가 실제 화면 확인을 요구함 | **CDP 필수.** 보이는 컨트롤에서 실제 마우스·키보드 입력을 보내고 조작 중·후 화면을 직접 판정한다. 함수 반환값, 합성 이벤트, DOM 값만으로 합격시키지 않는다. |
-| 확장·사이트의 시작 동작, 브라우저 이벤트 수집, 메시지 전달, 다운로드·삭제·탐색 등 브라우저가 소유한 최종 효과를 변경함 | 먼저 보고된 오류와 개발 모드 로그에서 요청 ID별 수신·처리·최종 소비 결과를 읽는다. 그 기록으로 최종 효과가 확인되지 않을 때 CDP로 실제 동작과 소비 결과를 확인한다. 100개 다운로드의 완료 여부는 항목별 시도 로그만으로 판정하지 않는다. |
+| 브라우저·위젯(`runtime :` URL)·확장·외부 사이트가 관여하는 모든 제품 기능·오류 수정 | **CDP 필수.** Mock 단위 테스트, `curl` 단독 호출, 저장 상태·로그만으로 CDP 화면 확인을 생략하지 않는다. 반드시 실제 배포 런타임(`runtime :` URL·위젯 서버)과 공용 CDP 브라우저에서 시작 동작을 실행하고 화면의 실제 렌더링(`img.naturalWidth > 0`, 에러 토스트 유무 등)과 최종 소비 결과를 함께 판정한다. |
 | 이미 작동하는 로거의 출력 문자열·형식만 변경하고 이벤트 수집·전달·저장·브라우저 효과는 그대로임 | **CDP 생략.** 형식 함수의 기대 문자열과 기존 로거 호출을 집중 단위 테스트로 확인한다. |
 | Skill·규칙·문서만 변경하거나 브라우저와 무관한 CLI 출력·순수 함수만 변경함 | **CDP 생략.** 변경된 계약의 해당 경계에서 확인한다. |
 
-- 로거라도 `chrome.downloads` 구독, 이벤트 연결, 저장, 누락·중단 집계가 바뀌면 요청 ID와 최종 소비 결과를 확인한다. 개발 모드 로그와 저장된 결과로 확인할 수 없으면 CDP를 사용한다. 로그 문자열의 모양만 바뀌면 위 형식 검사로 끝낸다.
-- 사용자가 오류를 보고했으면 기존 개발 모드 로그로 실패 경계를 먼저 찾는다. 원인과 결함 위치가 이미 지정됐거나 로그로 확인됐으면 수정 전 CDP로 같은 실패를 다시 재현하지 않는다. 수정 뒤에도 로그와 소비 결과로 판정 가능하면 CDP를 실행하지 않는다.
+- 로거라도 `chrome.downloads` 구독, 이벤트 연결, 저장, 누락·중단 집계가 바뀌면 요청 ID와 최종 소비 결과를 CDP에서 확인한다. 로그 문자열의 모양만 바뀌면 위 형식 검사로 끝낸다.
+- 사용자가 오류를 보고했으면 기존 개발 모드 로그로 실패 경계를 먼저 찾는다. 원인과 결함 위치가 이미 지정됐거나 로그로 확인됐으면 수정 전 CDP로 같은 실패를 다시 재현하지 않지만, **수정 뒤에는 반드시 실제 배포 런타임과 CDP 브라우저 화면에서 시작 동작부터 최종 화면 표시(`naturalWidth > 0` 등)·소비 결과까지 직접 확인한다(로그·저장 상태·단위 테스트만으로 CDP 검증 생략 금지).**
 - 전역 Skill 절차 문구 변경의 확인은 하위 프로젝트 규칙에 이전 기준이 명시되어 새 Skill과 충돌하는지 검사하는 데까지로 한다. 충돌이 없으면 그 확인으로 끝낸다.
 
 ## Browser and profile

@@ -1,6 +1,6 @@
 [package]
 name = "main-edit-gate"
-version = "0.0.34"
+version = "0.0.38"
 edition = "2021"
 
 [dependencies]

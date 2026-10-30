@@ -15,7 +15,23 @@ pub const NEW_FEATURE: &str = "기능 추가";
 pub const CELL_SECTIONS: [(&str, &str); 3] = [("D", "메모"), ("I", "오류"), ("J", "원인")];
 
 /// The single error-symbol set for `$J` cause lines and `$D` check notes written through `task-update`.
-pub const ERROR_SYMBOLS: [&str; 10] = ["🅰️", "🗝", "❌", "⭕️", "🔢", "🛣", "👥", "🏷", "🚥", "🔳"];
+pub const ERROR_SYMBOLS: [&str; 11] = ["🅰️", "🗝", "❌", "⭕️", "🔢", "🛣", "🕧", "👥", "🏷", "🚥", "🔳"];
+pub fn error_line_format() -> String {
+    format!("[{}] <한 줄>", ERROR_SYMBOLS.join("|"))
+}
+pub const EVIDENCE_FORMAT: &str = "목표 줄 수와 같은 `N. <근거>` 줄 (N = 1..목표 줄 수)";
+pub const CAN_FORMAT: &str = "`유형 : 기능 추가`이면 필수; `수 있`을 포함한 한 줄";
+const DETAIL_SYMBOLS: [&str; 6] = ["📐", "✒️", "⌨️", "🚿", "✏️", "🌍"];
+
+pub fn normalize_detail_title(title: &str) -> String {
+    let title = util::strip(title);
+    for symbol in DETAIL_SYMBOLS {
+        if let Some(body) = title.strip_prefix(symbol).and_then(|rest| rest.strip_prefix(char::is_whitespace)) {
+            return format!("[{symbol}] {}", body.trim_start());
+        }
+    }
+    title.to_string()
+}
 
 /// `[<symbol>] <text>`, optionally prefixed by `N. `; the symbol may come with or without U+FE0F.
 pub fn valid_symbol_line(line: &str) -> bool {
@@ -52,7 +68,7 @@ pub fn single_line_cells(fields: &mut Map<String, Value>) -> R<()> {
 }
 
 pub fn check_symbol_fields(fields: &Map<String, Value>) -> R<()> {
-    let symbols = ERROR_SYMBOLS.join("|");
+    let symbol_format = error_line_format();
     let lines = |key: &str| -> Option<Vec<String>> {
         fields.get(key).filter(|v| !v.is_null()).map(|v| {
             util::val_str(v).lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
@@ -60,12 +76,12 @@ pub fn check_symbol_fields(fields: &Map<String, Value>) -> R<()> {
     };
     if let Some(j) = lines("J") {
         if let Some(bad) = j.iter().find(|l| !valid_symbol_line(l)) {
-            return api::fail("validation", format!("$J lines must start with [{symbols}] then text: `{bad}`"));
+            return api::fail("validation", format!("$J lines must start with {symbol_format}: `{bad}`"));
         }
     }
     if let Some(d) = lines("D") {
         if d.len() != 1 || !valid_symbol_line(&d[0]) {
-            return api::fail("validation", format!("$D must be one check line starting with [{symbols}] then text"));
+            return api::fail("validation", format!("$D must be one check line starting with {symbol_format}"));
         }
     }
     Ok(())
@@ -686,11 +702,12 @@ pub fn format_judge(title: &str, judge: &str) -> String {
 }
 
 pub fn register_item(project_dir: &Path, raw_id: i64, title: &str, kind: &str, judge: &str) -> R<PathBuf> {
+    let title = normalize_detail_title(title);
     with_lock(&project_dir.join(".ai").join("changes"), || {
         if let Some(existing) = item_file(project_dir, raw_id) {
             return Ok(existing);
         }
-        let record = changes_record(project_dir, Some(title))?;
+        let record = changes_record(project_dir, Some(&title))?;
         let text = std::fs::read_to_string(&record).map_err(api::other)?;
         let mut lines = util::splitlines(&text);
         ensure_sections(&mut lines);
@@ -699,7 +716,7 @@ pub fn register_item(project_dir: &Path, raw_id: i64, title: &str, kind: &str, j
         add_numbered(&mut lines, start, end, &format!("{title} (#{raw_id})"));
         let start = find(&lines, 1, "진행", 0, None).unwrap();
         let end = span(&lines, start, 1);
-        let judge_str = format_judge(title, judge);
+        let judge_str = format_judge(&title, judge);
         let heading_line = format!("## [구현] {title} (#{raw_id})");
         let mut block = vec![
             heading_line,
@@ -724,6 +741,27 @@ pub fn register_item(project_dir: &Path, raw_id: i64, title: &str, kind: &str, j
         write_atomic(&record, &format!("{}\n", lines.join("\n")))?;
         Ok(record)
     })
+}
+
+pub fn update_item_title(project_dir: &Path, raw_id: i64, title: &str) -> R<bool> {
+    let title = normalize_detail_title(title);
+    let suffix = format!("(#{raw_id})");
+    Ok(edit_item(project_dir, raw_id, |lines| {
+        let Some((start, _)) = item_span(lines, raw_id) else { return false };
+        lines[start] = format!("## [구현] {title} {suffix}");
+        for section in ["작업", "완료"] {
+            if let Some(section_start) = find(lines, 1, section, 0, None) {
+                let section_end = span(lines, section_start, 1);
+                for index in numbered(lines, section_start, section_end) {
+                    if lines[index].trim_end().ends_with(&suffix) {
+                        let number = parse_numbered_line(&lines[index]).map(|(n, _)| n).unwrap_or(1);
+                        lines[index] = format!("{number}. {title} {suffix}");
+                    }
+                }
+            }
+        }
+        true
+    })?.unwrap_or(false))
 }
 
 pub fn subsection(lines: &mut Vec<String>, raw_id: i64, name: &str) -> (usize, usize) {
@@ -1046,11 +1084,11 @@ pub fn note_section(lines: &[String], name: &str, note: &Path) -> R<(usize, usiz
     Ok((index, marker))
 }
 
-pub fn add_feature(project_dir: &Path, title: &str) -> R<bool> {
+pub fn add_feature(project_dir: &Path, capability: &str) -> R<bool> {
     let note = obsidian_file(project_dir)?;
     edit_note(&note, |lines| {
         let (start, end) = note_section(lines, "📍", &note)?;
-        let target = format!("- {title}");
+        let target = format!("- {capability}");
         let exists = lines[(start + 1)..end].iter().any(|l| util::strip(l) == target);
         if !exists {
             let at = content_end(lines, start, end);
@@ -1058,6 +1096,16 @@ pub fn add_feature(project_dir: &Path, title: &str) -> R<bool> {
         }
         Ok(())
     })
+}
+
+fn confirmed_capability(project_dir: &Path, raw_id: i64) -> Option<String> {
+    let record = item_file(project_dir, raw_id)?;
+    let text = std::fs::read_to_string(record).ok()?;
+    let lines = util::splitlines(&text);
+    let (start, end) = item_span(&lines, raw_id)?;
+    latest_stage_block(&lines[start..end], "확인", raw_id)
+        .into_iter()
+        .find_map(|line| line.strip_prefix("- 가능 : ").map(str::trim).filter(|value| !value.is_empty()).map(str::to_string))
 }
 
 pub fn project_version(project_dir: &Path) -> Option<String> {
@@ -1268,8 +1316,12 @@ pub fn apply_row(project_dir: &Path, raw_id: i64, fields: &Map<String, Value>) -
         }
         let info = item_info(project_dir, raw_id);
         if let Some(info) = info {
-            if info.kind == NEW_FEATURE && add_feature(project_dir, &info.title)? {
-                done.push("📍 추가".to_string());
+            if info.kind == NEW_FEATURE {
+                if let Some(capability) = confirmed_capability(project_dir, raw_id) {
+                    if add_feature(project_dir, &capability)? {
+                        done.push("📍 추가".to_string());
+                    }
+                }
             }
         }
     }
@@ -1369,7 +1421,7 @@ pub fn request_block(text: &str) -> Option<Vec<String>> {
         let Some(item) = trimmed.strip_prefix("- ").map(util::strip).filter(|t| !t.is_empty()) else { continue };
         match part {
             "ask" => asks.push(item.to_string()),
-            "detail" => details.push(format!("- {item}")),
+            "detail" => details.push(format!("- {}", normalize_detail_title(item))),
             _ => {}
         }
     }
@@ -1446,6 +1498,9 @@ pub fn request_record(project_arg: &str, input_file: &str, title: &str, summary:
 }
 
 fn task_add_fields(mut fields: Map<String, Value>) -> Map<String, Value> {
+    if let Some(title) = fields.get("B").and_then(Value::as_str) {
+        fields.insert("B".to_string(), Value::String(normalize_detail_title(title)));
+    }
     fields.entry("E".to_string()).or_insert_with(|| Value::from(util::today_epoch()));
     fields
 }
@@ -1486,9 +1541,11 @@ pub fn register_session_row(raw_id: i64) -> R<()> {
     register_session_row_at(&session_rows_path(&thread), raw_id)
 }
 
-fn register_claude_session_row_at(state: &Path, project: &Path, raw_id: i64, codex_thread: Option<&str>) -> R<()> {
+fn register_claude_session_row_at(state: &Path, project: &Path, raw_id: i64, codex_thread: Option<&str>, claude_session: Option<&str>) -> R<()> {
     if codex_thread.is_some_and(|id| !id.is_empty()) { return Ok(()); }
-    if let Some(session_id) = claude_session_id_at(state, project) {
+    // 세션을 연 폴더와 --project가 다를 수 있으므로 Claude가 넘긴 세션 ID를 폴더 포인터보다 먼저 쓴다.
+    let env_session = claude_session.filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).map(str::to_string);
+    if let Some(session_id) = env_session.or_else(|| claude_session_id_at(state, project)) {
         register_session_row_at(&state.join("session_rows").join(format!("{}.json", util::sanitize_key(&session_id))), raw_id)?;
     }
     Ok(())
@@ -1496,7 +1553,8 @@ fn register_claude_session_row_at(state: &Path, project: &Path, raw_id: i64, cod
 
 fn register_claude_session_row(project: &Path, raw_id: i64) -> R<()> {
     let codex_thread = std::env::var("CODEX_THREAD_ID").ok();
-    register_claude_session_row_at(&state_dir(), project, raw_id, codex_thread.as_deref())
+    let claude_session = std::env::var("CLAUDE_CODE_SESSION_ID").ok();
+    register_claude_session_row_at(&state_dir(), project, raw_id, codex_thread.as_deref(), claude_session.as_deref())
 }
 
 pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind: Option<&str>, judge: &str) -> R<Value> {
@@ -1624,6 +1682,8 @@ fn upsert_step(lines: &mut Vec<String>, raw_id: i64, step: &str, clean: &str, go
 }
 
 pub fn task_step(project_arg: &str, raw_id: i64, step: &str, text: &str, goal: usize) -> R<Value> {
+    let verifier = crate::gate::actor().0 == "verifier";
+    if verifier { crate::gate::require_row("task-step", raw_id)?; }
     if matches!(step, "○" | "●") {
         return api::fail("validation", "○ and ● are recorded only by `task-confirm`; task-step takes ▷ or ▶");
     }
@@ -1656,13 +1716,17 @@ pub fn task_step(project_arg: &str, raw_id: i64, step: &str, text: &str, goal: u
     let k = goal_k_line(&bodies[goal - 1]);
     let mut fields = Map::new();
     fields.insert(api::GOAL_FIELD.into(), Value::String(k.clone()));
-    api::update(TASK_TABLE, raw_id, &fields)?;
+    if !verifier { api::update(TASK_TABLE, raw_id, &fields)?; }
+    if verifier {
+        state.insert("verifier_recorded".into(), json!(true));
+        crate::gate::gate_save(&project_dir, raw_id, &state)?;
+    }
     Ok(json!({"id": raw_id, "step": step, "line": new_line, "K": k}))
 }
 
 /// Per-goal evidence: non-empty lines `N. <근거>` numbered 1..=expected in order.
 pub fn parse_evidence(text: &str, expected: usize) -> Result<Vec<String>, String> {
-    let need = || format!("evidence needs {expected} lines `N. <근거>` (N = 1..{expected}), one per goal line");
+    let need = || format!("evidence needs {expected} lines; {EVIDENCE_FORMAT}");
     let mut out = Vec::new();
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         let Some((number, body)) = line.split_once(". ") else { return Err(need()) };
@@ -1676,7 +1740,13 @@ pub fn parse_evidence(text: &str, expected: usize) -> Result<Vec<String>, String
 
 /// Records `- [○] <check>`, `- [●] 사용자 검토 대기` and the `#### 확인` block in one pass; idempotent for the step lines.
 /// The evidence is validated against the goal line count before anything is written.
-fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str) -> R<usize> {
+fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str, can: Option<&str>) -> R<usize> {
+    let capability = can.map(str::trim);
+    if item_info(project_dir, raw_id).is_some_and(|info| info.kind == NEW_FEATURE)
+        && !capability.is_some_and(|value| value.contains("수 있") && !value.contains(['\n', '\r']))
+    {
+        return api::fail("validation", format!("#{raw_id} task-confirm --can: {CAN_FORMAT}"));
+    }
     let Some(goal) = changes_goal(project_dir, raw_id) else {
         return api::fail("validation", format!("goal missing (#{raw_id}); evidence needs one line per goal"));
     };
@@ -1684,6 +1754,10 @@ fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &st
         Ok(lines) => lines,
         Err(e) => return api::fail("validation", format!("#{raw_id} {e}")),
     };
+    let confirmation = confirm_block(raw_id, summary, check, detail, &evidence, capability);
+    if let Some(marker) = crate::task::runtime_evidence_marker(project_dir, raw_id, &confirmation) {
+        return api::fail("validation", format!("#{raw_id} runtime confirmation contains unverified evidence: {marker}"));
+    }
     let steps = edit_item(project_dir, raw_id, |lines| {
         upsert_step(lines, raw_id, "○", check, None);
         upsert_step(lines, raw_id, "●", "사용자 검토 대기", None);
@@ -1691,17 +1765,17 @@ fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &st
     if steps.is_none() {
         return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
     }
-    let block = confirm_block(raw_id, summary, check, detail, &evidence);
-    append_item(project_dir, raw_id, &block)?;
+    append_item(project_dir, raw_id, &confirmation)?;
     Ok(evidence.len())
 }
 
-fn confirm_block(raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &[String]) -> String {
+fn confirm_block(raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &[String], can: Option<&str>) -> String {
     let lines: String = evidence.iter().enumerate().map(|(n, e)| format!("- 근거 {} : {e}\n", n + 1)).collect();
-    format!("\n#### 확인 (#{raw_id})\n- 요약 : {summary}\n- [x] {check}\n  결과 : 성공\n  상세 : {detail}\n{lines}")
+    let capability = can.map(|value| format!("- 가능 : {value}\n")).unwrap_or_default();
+    format!("\n#### 확인 (#{raw_id})\n- 요약 : {summary}\n{capability}- [x] {check}\n  결과 : 성공\n  상세 : {detail}\n{lines}")
 }
 
-pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str) -> R<Value> {
+pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str, can: Option<&str>) -> R<Value> {
     let summary_clean = util::strip(summary).replace('\n', " ");
     let check_clean = util::strip(check).replace('\n', " ");
     let detail_clean = util::strip(detail).replace('\n', " ");
@@ -1709,7 +1783,7 @@ pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, 
         return api::fail("validation", "summary, check, and detail must not be empty");
     }
     let (project_dir, _, _) = owned(project_arg, raw_id)?;
-    let count = confirm_in_project(&project_dir, raw_id, &summary_clean, &check_clean, &detail_clean, evidence)?;
+    let count = confirm_in_project(&project_dir, raw_id, &summary_clean, &check_clean, &detail_clean, evidence, can)?;
     Ok(json!({"id": raw_id, "summary": summary_clean, "check": check_clean, "evidence": count}))
 }
 
@@ -1793,6 +1867,24 @@ mod tests {
         assert_eq!(super::last_request_in(&text).unwrap(), "## 둘째\n- [🚿] 필터");
         assert!(super::last_request_in("# 작업\n").is_none());
     }
+
+    #[test]
+    fn detail_symbols_are_normalized_at_request_and_task_add_inputs() {
+        for symbol in ["📐", "✒️", "⌨️", "🚿", "✏️", "🌍"] {
+            let plain = format!("{symbol} 요약");
+            let bracketed = format!("[{symbol}] 요약");
+            let input = format!("# 요구 사항\n- 요청\n# 세부 사항\n- {plain}\n- {bracketed}\n- 기호 없는 줄\n");
+            assert_eq!(super::request_block(&input).unwrap()[1..], [
+                format!("- {bracketed}"), format!("- {bracketed}"), "- 기호 없는 줄".to_string()
+            ]);
+            for (title, expected) in [(&plain, &bracketed), (&bracketed, &bracketed)] {
+                let fields = task_add_fields(serde_json::json!({"B": title}).as_object().unwrap().clone());
+                assert_eq!(fields["B"], *expected);
+            }
+        }
+        let fields = task_add_fields(serde_json::json!({"B": "기호 없는 줄"}).as_object().unwrap().clone());
+        assert_eq!(fields["B"], "기호 없는 줄");
+    }
     use serde_json::{Map, Value};
 
     #[test]
@@ -1832,12 +1924,16 @@ mod tests {
         std::fs::write(&pointer, serde_json::json!({"cwd": project, "session_id": "claude-123"}).to_string()).unwrap();
         assert_eq!(super::claude_session_id_at(&dir, &project).as_deref(), Some("claude-123"));
         let row_path = dir.join("session_rows/claude-123.json");
-        super::register_claude_session_row_at(&dir, &project, 410, None).unwrap();
+        super::register_claude_session_row_at(&dir, &project, 410, None, None).unwrap();
         let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(row_path).unwrap()).unwrap();
         assert_eq!(rows, vec![410]);
-        super::register_claude_session_row_at(&dir, &project, 411, Some("codex-1")).unwrap();
+        super::register_claude_session_row_at(&dir, &project, 411, Some("codex-1"), Some("claude-env")).unwrap();
         let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_rows/claude-123.json")).unwrap()).unwrap();
         assert_eq!(rows, vec![410]);
+        // 다른 폴더에서 연 세션: 포인터가 없어도 환경 세션 ID로 등록한다.
+        super::register_claude_session_row_at(&dir, &dir.join("other"), 412, None, Some("claude-env")).unwrap();
+        let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_rows/claude-env.json")).unwrap()).unwrap();
+        assert_eq!(rows, vec![412]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1872,7 +1968,28 @@ mod tests {
         let text = std::fs::read_to_string(&rec).unwrap();
         assert!(text.contains("## [구현] [✒️] 문서 형식 전환 (#43)\n- 유형 : 개선\n- 판정 : [상태] 형식 전환\n### 목표\n"));
 
+        let rec = register_item(&tmp, 44, "✒️ 새 문서", "개선", "[상태] 형식 전환").unwrap();
+        let text = std::fs::read_to_string(&rec).unwrap();
+        assert!(text.contains("## [구현] [✒️] 새 문서 (#44)"));
+        assert!(text.contains("3. [✒️] 새 문서 (#44)"));
+
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn updating_b_rewrites_only_its_own_heading_and_list_entry() {
+        let project = std::env::temp_dir().join(format!("grist-title-update-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        let record = changes.join("260101.작업.md");
+        std::fs::write(&record, "# 작업\n1. ✒️ 옛 제목 (#1)\n2. [📐] 다른 제목 (#2)\n# 완료\n# 진행\n## [구현] ✒️ 옛 제목 (#1)\n### 목표\n- 보존\n## [구현] [📐] 다른 제목 (#2)\n").unwrap();
+        assert!(super::update_item_title(&project, 1, "✒️ 새 제목").unwrap());
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert!(text.contains("1. [✒️] 새 제목 (#1)"));
+        assert!(text.contains("## [구현] [✒️] 새 제목 (#1)\n### 목표\n- 보존"));
+        assert!(text.contains("2. [📐] 다른 제목 (#2)"));
+        assert!(text.contains("## [구현] [📐] 다른 제목 (#2)"));
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
@@ -1973,20 +2090,20 @@ mod tests {
 
         let skill_dir = crate::util::home().join("ai/skills/manage-project");
         let skill_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-        assert!(skill_md.contains("판정 : [값|상태]"));
-        assert!(skill_md.contains("references/start.md"));
-        assert!(skill_md.contains("references/work.md"));
-        assert!(skill_md.contains("references/verify.md"));
-        assert!(skill_md.lines().count() <= 115);
+        let start_md = std::fs::read_to_string(skill_dir.join("references/stage-start.md")).unwrap();
+        assert!(start_md.contains("--judge \"[값|상태]"));
+        assert!(skill_md.contains("references/stage-start.md"));
+        assert!(skill_md.contains("references/stage-work.md"));
+        assert!(skill_md.contains("references/stage-verify.md"));
 
-        for rel in ["references/start.md", "references/work.md", "references/verify.md", "references/plan.md", "references/initialize.md"] {
+        for rel in ["references/stage-start.md", "references/stage-work.md", "references/stage-verify.md", "references/plan.md", "references/initialize.md"] {
             assert!(skill_dir.join(rel).is_file(), "missing {rel}");
         }
-        let work_md = std::fs::read_to_string(skill_dir.join("references/work.md")).unwrap();
+        let work_md = std::fs::read_to_string(skill_dir.join("references/stage-work.md")).unwrap();
         assert!(work_md.contains("task-red"));
         assert!(work_md.contains("task-ready"));
         assert!(skill_dir.parent().unwrap().join("Complete_task/SKILL.md").is_file());
-        assert!(skill_md.contains("red test용 실패 초안 구현"));
+        assert!(work_md.contains("task-submit"));
     }
 
     #[test]
@@ -2003,7 +2120,11 @@ mod tests {
         assert!(root_agents.contains("ID : 1198"));
         assert!(root_agents.contains("### obsidian"));
         assert!(root_agents.contains("문서 : 구현/업무/261008.작업관리기/일지/작업관리기-개발.md"));
-        assert!(root_agents.contains("구현/업무/261008.작업관리기/형식/"));
+        let delegator_doc = std::fs::read_to_string(
+            crate::util::home().join("ai/skills/role-delegator/references/extensions.md"),
+        )
+        .unwrap();
+        assert!(delegator_doc.contains("구현/업무/261008.작업관리기/형식/"));
         let init_skill = std::fs::read_to_string(
             crate::util::home().join("ai/skills/manage-project/references/initialize.md"),
         )
@@ -2024,13 +2145,13 @@ mod tests {
         let global = std::fs::read_to_string(crate::util::home().join("ai/rules/Agents.md")).unwrap();
         assert!(global.contains("grist task-show --section"));
         assert!(!global.contains("약 300줄이 넘으면"));
-        let start_md = std::fs::read_to_string(crate::util::home().join("ai/skills/manage-project/references/start.md")).unwrap();
+        let start_md = std::fs::read_to_string(crate::util::home().join("ai/skills/manage-project/references/stage-start.md")).unwrap();
         assert!(!start_md.contains("단일 소규모 행은 메인 세션이 직접"));
         assert!(!start_md.contains("끝까지 읽고"));
         println!("task_show_extracts_only_requested_section_without_full_block ▷ 필요한 줄·필드만 발췌해 읽고 출력하며 구형 경로·전체 덤프·불필요한 해시 검증 0건");
     }
 
-    const GOAL_ITEM: &str = "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n- 유형 : 기능 추가\n### 목표\n1. [기능] 첫째\n2. [수정] 둘째\n\n### 메모\n- 메모 줄\n### 구현\n- [▶] 구현 줄\n#### 검증 (#7)\n- 검증\n";
+    const GOAL_ITEM: &str = "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n- 유형 : 개선\n### 목표\n1. [기능] 첫째\n2. [수정] 둘째\n\n### 메모\n- 메모 줄\n### 구현\n- [▶] 구현 줄\n#### 검증 (#7)\n- 검증\n";
 
     fn temp_project(name: &str, text: &str) -> std::path::PathBuf {
         let project = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
@@ -2081,7 +2202,7 @@ mod tests {
     fn confirm_records_circle_steps_once_and_flow_evidence_passes() {
         let project = temp_project("grist-confirm", GOAL_ITEM);
         for _ in 0..2 {
-            super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "충돌 없음 확인", "충돌 검사 완료", "1. 첫째 값\n2. 둘째 값\n").unwrap();
+            super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "충돌 없음 확인", "충돌 검사 완료", "1. 첫째 값\n2. 둘째 값\n", None).unwrap();
         }
         let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
         assert_eq!(text.matches("- [○] 충돌 없음 확인").count(), 1);
@@ -2093,16 +2214,95 @@ mod tests {
     }
 
     #[test]
+    fn feature_confirmation_requires_one_capability_line() {
+        let feature = GOAL_ITEM.replace("- 유형 : 개선", "- 유형 : 기능 추가");
+        let project = temp_project("grist-feature-confirm", &feature);
+        let evidence = "1. 첫째 값\n2. 둘째 값";
+        for can in [None, Some("사용자가 목록을 본다"), Some("사용자가 목록을 볼 수 있다\n다음 줄")] {
+            let err = super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "검사", "성공", evidence, can).unwrap_err();
+            assert!(format!("{err:?}").contains("--can"));
+        }
+        let record = project.join(".ai/changes/260101.작업.md");
+        assert!(!std::fs::read_to_string(&record).unwrap().contains("#### 확인 (#7)"));
+        super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "검사", "성공", evidence, Some(" 사용자가 목록을 볼 수 있다 ")).unwrap();
+        let text = std::fs::read_to_string(&record).unwrap();
+        assert!(text.contains("#### 확인 (#7)\n- 요약 : 입력 ⇒ 결과\n- 가능 : 사용자가 목록을 볼 수 있다\n"));
+        assert_eq!(super::confirmed_capability(&project, 7).as_deref(), Some("사용자가 목록을 볼 수 있다"));
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn done_sync_writes_only_confirmed_capability_to_obsidian_copy() {
+        let project = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test/tmp").join(format!("feature-sync-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join(".ai/changes")).unwrap();
+        let record = project.join(".ai/changes/260101.작업.md");
+        let note = project.join("obsidian-copy.md");
+        let original_note = "# 📍\n\n# 📆\n- 오늘 구현 요약\n";
+        std::fs::write(&note, original_note).unwrap();
+        std::env::set_var("GRIST_OBSIDIAN_FILE", &note);
+        let feature = GOAL_ITEM.replace("- 유형 : 개선", "- 유형 : 기능 추가");
+        std::fs::write(&record, &feature).unwrap();
+        let fields = serde_json::json!({"H": "완료"}).as_object().unwrap().clone();
+        assert_eq!(super::apply_row(&project, 7, &fields).unwrap(), vec!["# 완료 이동"]);
+        assert_eq!(std::fs::read_to_string(&note).unwrap(), original_note);
+
+        let confirmed = feature.replace("- 검증\n", "- 검증\n#### 확인 (#7)\n- 가능 : 사용자가 목록을 볼 수 있다\n");
+        std::fs::write(&record, confirmed).unwrap();
+        assert_eq!(super::apply_row(&project, 7, &fields).unwrap(), vec!["# 완료 이동", "📍 추가"]);
+        assert!(super::apply_row(&project, 7, &fields).unwrap().is_empty());
+        let note_text = std::fs::read_to_string(&note).unwrap();
+        assert_eq!(note_text.matches("- 사용자가 목록을 볼 수 있다").count(), 1);
+        assert!(!note_text.contains("[✒️] 작업") && !note_text.contains("- 가능 :"));
+        std::env::remove_var("GRIST_OBSIDIAN_FILE");
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn confirm_rejects_evidence_count_mismatch_before_writing() {
         let project = temp_project("grist-confirm-mismatch", GOAL_ITEM);
         for bad in ["1. 하나만", "1. a\n3. b", "1. a\n2. ", "", "1. a\n2. b\n3. c"] {
-            let err = super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "검사", "값", bad).unwrap_err();
+            let err = super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "검사", "값", bad, None).unwrap_err();
             assert!(format!("{err:?}").contains("evidence needs 2 lines"), "{bad}");
         }
         let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
         assert!(!text.contains("#### 확인 (#7)") && !text.contains("- [○]"));
         assert_eq!(super::parse_evidence("\n1. a\n\n2. b\n", 2).unwrap(), vec!["a", "b"]);
         std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn confirm_rejects_unverified_runtime_code_before_writing() {
+        let code_item = GOAL_ITEM.replace("[✒️]", "[📐]");
+        let project = temp_project("grist-runtime-confirm", &code_item);
+        std::fs::write(project.join("AGENTS.md"), "### 실행\nruntime : 확장 브라우저\n").unwrap();
+        for marker in ["단위 테스트", "경계·통합 테스트", "통합 테스트만", "로그인 필요", "로그인이 필요", "검증 중단", "확인하지 못", "미검증", "Mock"] {
+            let evidence = format!("1. {marker}\n2. 실제 값");
+            let err = super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "소비자 확인", "실제 값", &evidence, None).unwrap_err();
+            assert!(format!("{err:?}").contains("validation"), "{marker}");
+        }
+        for (summary, check, detail) in [("단위 테스트 ⇒ 결과", "소비자 확인", "실제 값"), ("입력 ⇒ 결과", "소비자 확인", "로그인 필요"), ("입력 ⇒ 결과", "미검증", "실제 값")] {
+            assert!(super::confirm_in_project(&project, 7, summary, check, detail, "1. 실제 값\n2. 소비 결과", None).is_err());
+        }
+        let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
+        assert!(!text.contains("#### 확인 (#7)") && !text.contains("- [○]"));
+        super::confirm_in_project(&project, 7, "입력 ⇒ 결과", "소비자 확인", "다운로드 파일 확인", "1. 실제 파일\n2. 소비 결과", None).unwrap();
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn confirm_keeps_document_and_no_runtime_exceptions() {
+        let document = temp_project("grist-document-confirm", &GOAL_ITEM.replace("#### 검증 (#7)\n- 검증\n", ""));
+        std::fs::write(document.join("AGENTS.md"), "runtime : 확장 브라우저\n").unwrap();
+        super::confirm_in_project(&document, 7, "입력 ⇒ 결과", "충돌 검사", "단위 테스트", "1. 규칙 확인\n2. 문서 확인", None).unwrap();
+        std::fs::remove_dir_all(document).unwrap();
+
+        let code_item = GOAL_ITEM.replace("[✒️]", "[📐]");
+        let cli = temp_project("grist-cli-confirm", &code_item);
+        std::fs::write(cli.join("AGENTS.md"), "runtime : 없음(로컬 CLI)\n").unwrap();
+        super::confirm_in_project(&cli, 7, "입력 ⇒ 결과", "검사", "단위 테스트", "1. CLI 확인\n2. 결과 확인", None).unwrap();
+        std::fs::remove_dir_all(cli).unwrap();
     }
 
     #[test]
@@ -2130,7 +2330,7 @@ mod tests {
 
     #[test]
     fn symbol_lines_and_d_single_line() {
-        for ok in ["[⭕️] a", "[⭕] a", "1. [🛣] b", "[🗝\u{FE0F}] c", "2. [🅰] d", "[🔳] e"] {
+        for ok in ["[⭕️] a", "[⭕] a", "1. [🛣] b", "[🗝\u{FE0F}] c", "2. [🅰] d", "[🔳] e", "[🕧] 순서"] {
             assert!(super::valid_symbol_line(ok), "{ok}");
         }
         for bad in ["[유실] a", "1. [유실] a", "[❌]", "[❌] ", "[❌]x", "❌ a", "b"] {
@@ -2140,6 +2340,9 @@ mod tests {
         assert!(super::check_symbol_fields(&f("J", "1. [⭕️] a\n2. [🛣] b")).is_ok());
         assert!(super::check_symbol_fields(&f("J", "1. [⭕️] a\n2. b")).is_err());
         assert!(super::check_symbol_fields(&f("D", "[🚥] 점검")).is_ok());
+        assert!(super::check_symbol_fields(&f("D", "[🕧] 순서 점검")).is_ok());
+        assert!(super::check_symbol_fields(&f("J", "1. [🕧] 재시도 순서")).is_ok());
+        assert!(super::check_symbol_fields(&f("J", "[미등록] 거부")).is_err());
         assert!(super::check_symbol_fields(&f("D", "[🚥] a\n[🚥] b")).is_err());
         assert!(super::check_symbol_fields(&f("D", "메모")).is_err());
         assert!(super::check_symbol_fields(&f("I", "자유")).is_ok());

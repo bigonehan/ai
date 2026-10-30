@@ -27,7 +27,7 @@ The user owns final `$H=완료`. An agent, the main session, a hook, and `task-c
 
 - Run the focused and final consumer checks required by `verify-work`; keep their actual outputs in the existing row records. The main performs the whole flow after agent submission; `flow-wait` records its evidence while the row stays at `검증`. Do not treat a build or an ACK alone as completion evidence.
 - Stop/SubagentStop calls `task-complete` directly with the hook event JSON. It reads the owning project's `# 상태` and current `.ai/changes` rows, performs the applicable state checks, and emits the hook decision. The main Stop path uses Jev J2 to distinguish a finished response from a progress report or an unsupported request for user action. A pending user reply or subagent wait result alone does not finish the work.
-- A main final response or user-facing question requires the work check to pass. Only the main sends `nf -m "<구체적 결과>"` once just before that response; subagents and the hook never send it. If the command returns a running session, wait on that same process.
+- A main final response or user-facing question requires the work check to pass.
 - If a required check fails, record the actual failure in `$I`, the identified cause in `$J`, use that update's `row` line, and continue the bounded repair. A user's stated cause is the repair target; do not rediscover it through unrelated product checks.
 
 ## Interfaces
