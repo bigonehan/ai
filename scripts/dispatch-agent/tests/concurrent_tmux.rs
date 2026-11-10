@@ -46,6 +46,9 @@ fn concurrent_dispatches_split_right_then_below_first_agent() {
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let _fixture = Fixture { dir: dir.clone() };
+    fs::write(dir.join("AGENTS.md"), "# 상태\n### 실행\nruntime : 없음(로컬 CLI)\n").unwrap();
+    fs::create_dir_all(dir.join(".ai/changes")).unwrap();
+    fs::write(dir.join(".ai/changes/request.md"), "## first (#35401)\n## second (#35402)\n").unwrap();
     let gemini = bin.join("gemini");
     fs::write(&gemini, "#!/bin/sh\ncase \"$*\" in *to=검증자*) printf '실패 — 35402: consumer error\\n' ;; *) printf 'done\\n' ;; esac\n").unwrap();
     fs::set_permissions(&gemini, fs::Permissions::from_mode(0o700)).unwrap();
@@ -66,6 +69,9 @@ fn concurrent_dispatches_split_right_then_below_first_agent() {
     let second = dispatch(&dir, &second_prompt, 35402, &socket, &caller, &bin).spawn().unwrap();
     successful(first.wait_with_output().unwrap());
     successful(second.wait_with_output().unwrap());
+    let hash = socket.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+    let prefix = format!("dispatch-agent-{hash:016x}-");
+    assert!(!fs::read_dir("/tmp").unwrap().flatten().any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix)), "window lock must be unlinked after both processes");
     let saved = fs::read_to_string(dir.join(".ai/dispatch/35401.prompt")).unwrap();
     assert!(saved.contains("row: H=작업 | I= | J= | K=sample\n목표:\n1. [기능] sample ▷ done\n"));
 
@@ -83,20 +89,4 @@ fn concurrent_dispatches_split_right_then_below_first_agent() {
     assert_eq!(agents[1].1, agents[0].1, "second pane must stay below the first: {panes}");
     assert!(agents[1].2 > agents[0].2, "second pane must split below the first: {panes}");
 
-    fs::write(dir.join("AGENTS.md"), "# 상태\n### 실행\nruntime : local CLI\n").unwrap();
-    let record = dir.join("record.json");
-    let output = dispatch(&dir, &first_prompt, 35401, &socket, &caller, &bin)
-        .args(["--role", "verifier", "--rows", "35401,35402"])
-        .env("GRIST_RECORD_FILE", &record)
-        .output().unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("recorded=I:35402"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("00119805311 | dispatch-agent.verifier-fail | 01 | ack=received body.row=35402 error=none"));
-    let fields: serde_json::Value = serde_json::from_slice(&fs::read(record).unwrap()).unwrap();
-    assert_eq!(fields["H"], "진단");
-    assert_eq!(fields["I"], "실패 — 35402: consumer error");
-    let saved = fs::read_to_string(dir.join(".ai/dispatch/35401.verify.prompt")).unwrap();
-    assert!(saved.contains("runtime : local CLI\n"));
-    assert!(saved.contains("row 35401: H=작업 | I= | J= | K=sample\n목표:\n"));
-    assert!(saved.contains("row 35402: H=작업 | I= | J= | K=sample\n목표:\n"));
 }

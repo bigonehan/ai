@@ -29,6 +29,7 @@ The user owns final `$H=완료`. An agent, the main session, a hook, and `task-c
 - Stop/SubagentStop calls `task-complete` directly with the hook event JSON. It reads the owning project's `# 상태` and current `.ai/changes` rows, performs the applicable state checks, and emits the hook decision. The main Stop path uses Jev J2 to distinguish a finished response from a progress report or an unsupported request for user action. A pending user reply or subagent wait result alone does not finish the work.
 - A main final response or user-facing question requires the work check to pass.
 - If a required check fails, record the actual failure in `$I`, the identified cause in `$J`, use that update's `row` line, and continue the bounded repair. A user's stated cause is the repair target; do not rediscover it through unrelated product checks.
+- Before a row can complete, run `improve_process`: record repeated failures and misconceptions with `grist improve-note`, apply the process fix, and record `grist improve-done <id>`. `task-complete` rejects a non-`완료` row without `- 처리 : [#<id>]` under the changes `## 개선 요구`.
 
 ## Interfaces
 

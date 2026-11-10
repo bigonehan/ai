@@ -15,6 +15,8 @@ metadata:
 | `~/ai/scripts/bin/task-complete` | `match --goal-file G --output-file O` | **J1** the actual output satisfies each `[연결]`/`[기능]`/`[수정]` line; `Complete_task` alone owns the completion judgment |
 | `~/ai/scripts/bin/task-complete` (main Stop) | `stop --message-file M` | **J2** final message is 완료 보고 / 사용자 질문 / 실패를 결론으로 종료 / 진행 보고 / 질문 답변 / 대기 보고, and, only for 사용자 질문, whether it asks for one of the four allowed actions, a `.py` consent naming path and reason, or a choice between concrete interpretations before editing |
 
+Doc-only rows are decided in code, not by the model: a J1 goal line, or a J3 request whose goal lines all name a doc·rule target (`AGENTS.md`·`CLAUDE.md`·`SKILL.md`·`.ai/docs`·`Skill`·전역 규칙/설정), gets an instruction without the product-runtime clause (`doc_rule_marker` in `jev/src/main.rs`). Mixed or product goals keep it.
+
 Do not run `jev` as part of project work and do not paste its output into Grist; the gates record a one-line summary in `.ai/changes`.
 
 ## Configuration
@@ -22,9 +24,9 @@ Do not run `jev` as part of project work and do not paste its output into Grist;
 `.env` in this skill directory (mode 600, excluded from Git; template `.env.example`):
 
 - `TYPESAFE_API_KEY` — entered by the user; never ask for it, print it, or put it in commands, logs or records.
-- `JEV_MODEL` (`jev-latest`), `JEV_MODE` (`shadow` | `enforce`), `JEV_PASS` (0.8), `JEV_FLOOR` (0.5).
+- `JEV_MODEL` (`jev-latest`), `JEV_PASS` (0.8), `JEV_FLOOR` (0.5).
 
-A Noul value or Choice confidence `>= JEV_PASS` is `pass`, `< JEV_FLOOR` is `fail`, otherwise `uncertain`. In `shadow` (default) callers only log; in `enforce` they reject on `fail`.
+A Noul value or Choice confidence `>= JEV_PASS` is `pass`, `< JEV_FLOOR` is `fail`, otherwise `uncertain`. `jev` always runs in `enforce` mode: J3 rejects on `fail`, J1 requires every goal/request item to be `pass`, and J2 blocks progress/waiting reports and disallowed user questions.
 
 ## Output and failures
 
@@ -32,6 +34,6 @@ stdout: `{"ok": true, "mode", "verdict": "pass|uncertain|fail", "command", "item
 
 Errors go to stderr as JSON with a `boundary` (`config`, `connection`, `http_<code>`, `arguments`) and exit 2. Callers treat any failure as "judgment skipped" (fail-open) and continue.
 
-States are masked (`Bearer …`, `*_KEY=…`, home path → `~`) and cut to 12,000 characters before sending. Every judgment is appended to `~/.codex/tmp/jev/judgments.jsonl` with the state's byte length (never the text) for threshold tuning during shadow mode.
+States are masked (`Bearer …`, `*_KEY=…`, home path → `~`) and cut to 12,000 characters before sending. Every judgment is appended to `~/.codex/tmp/jev/judgments.jsonl` with the state's byte length (never the text).
 
 `JEV_FAKE_RESPONSE=<json file>` replaces the API call with a canned response; use it only in tests.

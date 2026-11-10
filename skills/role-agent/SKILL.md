@@ -11,8 +11,8 @@ description: 대행자(구현자, T26_ROLE=worker 또는 t26_<id> 에이전트)�
 1. 위임 프롬프트(`dispatch-agent`가 붙인 `row:` 줄·목표, 판정·경로)와 프로젝트 구조(`~/ai/scripts/bin/read-architecture --project <dir> --query "<키워드>"` 출력, `.ai/docs/architecture.md`)
 2. 이 Skill
 3. `~/ai/skills/manage-project/references/stage-work.md`(구현 절차·교정 루프)
-4. 테스트는 `verify-work`의 유닛·경계 절, UI는 `implement-ui`. `run-cdp`·stagehand는 검증자 전용이라 실행하지 않는다(`main-edit-gate`가 거부).
-5. 전역 규칙과 프로젝트 `AGENTS.md`의 공통값(`rg` 읽기, 비밀값 로그 금지, 5분 병목 로깅, 공용 Bridge, 임시 파일 위치)
+4. 테스트는 `verify-work`의 유닛·경계 절, UI는 `build-ui`.
+5. 전역 규칙과 프로젝트 `AGENTS.md`의 공통값(`rg` 읽기, 공용 Bridge, 임시 파일 위치), 로그 비밀값 금지는 `record-log`. 테스트가 5분을 넘으면 타임아웃으로 덮지 않고 중간 로깅으로 병목 경계를 찾아 `last`에 보고한다.
 
 ## 따르지 않는 메인 전용 지시
 - 프로젝트 `.ai/docs/role-delegator.md`·`role-verifier.md`는 읽지 않는다(위임자·검증자 전용).
@@ -20,13 +20,21 @@ description: 대행자(구현자, T26_ROLE=worker 또는 t26_<id> 에이전트)�
 - 버전 올리기·배포 복사·사용자 질문. 프롬프트가 명시한 경우만 한다.
 - Stop hook이 마감·제출을 요구해도, 프롬프트가 정한 종료 지점(보통 `task-submit` 후 `$H=검증`)에서 끝낸다.
 
+## 소스 작성 범위
+- 작성 언어와 무관하게 계약 검증·탐지용 소스코드를 자체적으로 새로 만들지 않는다(사용자 사전 동의 시에만 허용). `.py`로 된 기존 제품 소스코드를 기능·오류 해결을 위해 고칠 때는 따로 동의를 구하지 않는다.
+
 ## 위임 메시지
 - `[Schema v1]` 블록과 `판정`·`명령`·`진입점`·`제외` 줄(`~/ai/rules/rule_schema.md`)을 읽는다. 통과 기준은 `판정` 타입과 `명령`이며, 수정 경로 안의 기존 테스트도 함께 통과시킨다. 무엇을 어떻게 바꿀지는 대행자가 정한다.
 - 진입점이 실제 코드와 다르면 고치지 않고 차이를 마지막 줄 한 줄로 보고하고 끝낸다.
 
+## Bridge 연동 행(`[🌍]`)
+- consumer 테스트는 Bridge 소유 wire 샘플(`<bridge>/contracts/samples/<계약>/*.json`)을 파일 그대로 읽어 실제 handler(HTTP 서버·파서)에 넣는다. 상대 요청·응답 모양(본문 유무·Content-Type·mime·이름 대소문자)을 테스트에서 손으로 만들지 않는다. 샘플이 없거나 프롬프트와 다르면 고치지 않고 `last`로 보고하고 끝낸다(`task-submit`이 샘플 참조 없는 `[🌍]` 제출을 거부한다).
+- 거부 경로마다 원인별로 다른 오류 문구와 record-log 한 줄(관측한 요청 모양: `len=`·`ctype=`·`path=`·파싱 오류)을 남기고, 원인이 다른 두 실패의 문구가 서로 다른지 테스트로 확인한다.
+- 261031 blender_bridge #544: 테스트가 claim을 `{}` 본문으로, finish 이미지를 자기 PNG로 직접 만들어 통과했지만 실제 Bridge는 본문 없는 claim과 다른 mime을 보내 런타임에서만 실패했다.
+
 ## 세 가지 모드
 - **구현 모드(기본):** `task-ready`(원인 확정) → 목표 줄마다 수정과 `task-step` → 유닛테스트 실행 → `task-submit`(`$H=검증`). 코드 행은 크기와 상관없이 대행자가 구현한다.
-- **재현 모드(프롬프트가 "재현"으로 지정):** `task-red`로 실패를 재현하고, 원인을 `grist task-update <id> --fields '{"J": "[오류 기호] 한 줄"}'`로 기록한 뒤 끝낸다. 제품 소스는 고치지 않는다.
+- **재현 모드(프롬프트가 "재현"으로 지정):** `task-red`로 실패를 재현하고, 원인을 `grist task-update <id> --fields '{"J": "[오류 기호] 한 줄", "C": "<오늘 관측 근거: 파일:줄·task-red 출력·재현 횟수>"}'`로 기록한 뒤 끝낸다(`C` 없이 `J`만 쓰면 CLI가 거부한다. 근거 형식은 `manage-project/references/stage-start.md` 진단). 제품 소스는 고치지 않는다.
 - **조사 모드(프롬프트가 "조사"로 지정):** 코드를 고치지 않고 영향 범위를 따라가 `N. [타입] 진입점: <파일> <함수> — <내용>` 목록만 답하고 끝낸다.
 
 ## 검증 범위

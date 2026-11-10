@@ -1,6 +1,6 @@
 ---
 name: manage-project
-description: Route /home/tree/extensions project requests by role and Table26 stage. Use for project work and initialization; skip explanation-only questions with no file or Grist change.
+description: Route /home/tree/extensions and /home/tree/project project requests by role and Table26 stage. Use for project work and initialization; skip explanation-only questions with no file or Grist change.
 metadata:
   short-description: Initialize, plan, delegate and close project work
 allowed-tools: Bash(~/ai/scripts/bin/read-architecture:*)
@@ -10,8 +10,9 @@ allowed-tools: Bash(~/ai/scripts/bin/read-architecture:*)
 
 ## 역할·입구
 
+- 메인 세션(위임자, `T26_ROLE` 없음)은 `role-delegator`를 함께 따른다. 대행자·검증자 역할은 `dispatch-agent`가 붙이는 `[Role] from=… to=… skill=…` 머리줄로 정해진다.
 - `T26_ROLE=worker` 또는 `t26_<id>` 에이전트는 구현자다. 자기 행(`T26_ROW` 또는 `<id>`)만 다루고 `references/stage-work.md`만 따른다. 요청·목표 작성, 다른 에이전트 호출, 마감 명령은 맡지 않는다. 나머지 메인 세션은 오케스트레이터다.
-- 메인 세션은 첫 `/home/tree/extensions` 작업이나 다른 프로젝트로 옮길 때 `initial-task/SKILL.md`를 함께 읽어 소유 프로젝트·순수 질문·기존 행을 판정한다. 프로젝트 `AGENTS.md`의 `# 상태`에 Grist ID·Obsidian 문서가 없으면 `references/initialize.md`로 초기화한다.
+- 메인 세션은 첫 `/home/tree/extensions`·`/home/tree/project` 작업이나 다른 프로젝트로 옮길 때 `initial-task/SKILL.md`를 함께 읽어 소유 프로젝트·순수 질문·기존 행을 판정한다. 프로젝트 `AGENTS.md`의 `# 상태`에 Grist ID·Obsidian 문서가 없으면 `references/initialize.md`로 초기화한다.
 - 사용자 지적의 원인 경계와 이미 확인한 `row` 줄을 우선 사용한다. Legacy·레거시·구형 제거 또는 새 형식 갱신은 `remove-legacy`를 함께 적용한다.
 
 ## 하위 진입 표
@@ -24,6 +25,7 @@ allowed-tools: Bash(~/ai/scripts/bin/read-architecture:*)
 | `작업`·`교정` | `references/stage-work.md` |
 | `검증` → `확인` | `references/stage-verify.md` |
 | 위임·요청 대조 | `references/plan.md` |
+| 위임 결과 줄에 `case=` | 그 경로 하나만 (`references/cases/*.md`) |
 
 각 단계 명령 출력의 `next`가 다음 카드 경로를 알려준다(행 500).
 

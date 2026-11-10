@@ -14,7 +14,7 @@ pub const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "get", required: "TABLE", optional: "--id INT (반복 가능), --filter JSON 객체, --fields 쉼표 구분 필드", example: "grist get Table26 --id 518 --fields H,K" },
     CommandHelp { name: "add", required: "TABLE --fields JSON 객체", optional: "없음", example: "grist add Table7 --fields '{\"C\":\"예시\"}'" },
     CommandHelp { name: "update", required: "TABLE --id INT --fields JSON 객체", optional: "없음", example: "grist update Table7 --id 1 --fields '{\"C\":\"예시\"}'" },
-    CommandHelp { name: "delete", required: "TABLE --id INT", optional: "없음", example: "grist delete Table7 --id 1" },
+    CommandHelp { name: "delete", required: "TABLE --id INT", optional: "--project DIR (Table26 행이면 그 프로젝트 changes의 행 줄·블록도 지움)", example: "grist delete Table26 --id 690 --project ." },
     CommandHelp { name: "column-update", required: "TABLE COLUMN --fields JSON 객체", optional: "없음", example: "grist column-update Table7 C --fields '{\"label\":\"이름\"}'" },
     CommandHelp { name: "project", required: "ROW_ID (정수)", optional: "없음", example: "grist project 1198" },
     CommandHelp { name: "task", required: "ROW_ID (정수)", optional: "--project DIR, --cached (값 없음)", example: "grist task 518 --project /home/tree/extensions" },
@@ -31,9 +31,11 @@ pub const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "task-submit", required: "ROW_ID (정수) --project DIR", optional: "없음", example: "grist task-submit 518 --project ." },
     CommandHelp { name: "flow-wait", required: "--project DIR", optional: "없음", example: "grist flow-wait --project ." },
     CommandHelp { name: "task-show", required: "ROW_ID (정수) --project DIR", optional: "--section SECTION", example: "grist task-show 518 --project . --section 목표" },
+    CommandHelp { name: "improve-note", required: "ROW_ID (정수) --project DIR --text 한 줄", optional: "없음", example: "grist improve-note 712 --project . --text '[2회 실패] 원인 — 착각'" },
+    CommandHelp { name: "improve-done", required: "ROW_ID (정수) --project DIR --text 한 줄", optional: "없음", example: "grist improve-done 712 --project . --text 'main-edit-gate 버전 흐름 검사 추가'" },
     CommandHelp { name: "task-memo", required: "ROW_ID (정수) --project DIR --line 한 줄", optional: "없음", example: "grist task-memo 518 --project . --line '점검 기록'" },
     CommandHelp { name: "task-step", required: "ROW_ID (정수) --project DIR --step ▷|▶ --text 한 줄 --goal 목표 줄 번호", optional: "없음", example: "grist task-step 518 --project . --step ▶ --text '구현 확인' --goal 1" },
-    CommandHelp { name: "task-confirm", required: "ROW_ID (정수) --project DIR --summary 한 줄 --check 한 줄 --detail 한 줄 --evidence FILE", optional: "--can 한 줄", example: "grist task-confirm 518 --project . --summary '입력 ⇒ 결과' --check 확인 --detail 성공 --evidence evidence.txt" },
+    CommandHelp { name: "task-confirm", required: "ROW_ID (정수) --project DIR --summary 한 줄 --check 한 줄 --detail 한 줄 --evidence FILE", optional: "--can 한 줄, --partial --reason 사유, --docs 쉼표 구분 .md 경로", example: "grist task-confirm 518 --project . --summary '[✒️] 입력 ⇒ 결과' --check 확인 --detail 성공 --evidence evidence.txt" },
     CommandHelp { name: "request-record", required: "--project DIR --input-file FILE --title 제목 --summary 한 줄", optional: "없음", example: "grist request-record --project . --input-file request.txt --title 도움말 --summary '요청 요약'" },
     CommandHelp { name: "sync", required: "없음", optional: "--project DIR, --cwd DIR", example: "grist sync --project ." },
 ];
@@ -51,7 +53,11 @@ pub fn render(command: Option<&str>) -> Result<String, String> {
         format!("선택: {}", spec.optional),
     ];
     match command {
-        "task-update" => lines.push(format!("값 형식: $D/$J: {}; $I: 한 줄; $H: 초안|진단|작업|교정|검증|확인|완료", records::error_line_format())),
+        "task-update" => {
+            lines.push(format!("값 형식: $D/$J: {} 또는 $J: [추정] <한 줄>; $I: 한 줄; $H: 초안|진단|작업|교정|검증|확인|완료", records::error_line_format()));
+            lines.push("규칙: J(원인)를 기록할 때 같은 --fields에 비어 있지 않은 C(근거)가 필요".into());
+        }
+        "task-add" => lines.push("규칙: J(원인)를 기록할 때 같은 --fields에 비어 있지 않은 C(근거)가 필요".into()),
         "task-confirm" => {
             lines.push(format!("--can: {}", records::CAN_FORMAT));
             lines.push(format!("--evidence: {}", records::EVIDENCE_FORMAT));
@@ -59,6 +65,7 @@ pub fn render(command: Option<&str>) -> Result<String, String> {
         "flow-wait" => lines.push("조건: 각 검증 행에 task-hidden 뒤 최신 task-confirm 필요".into()),
         "task-red" | "task-ready" => lines.push(format!("값 형식: --purpose {}; --tests 쉼표 구분 파일; --paths {}", gate::PURPOSE_FORMAT, gate::PATHS_FORMAT)),
         "task-hidden" => lines.push(format!("값 형식: --purpose {}", gate::PURPOSE_FORMAT)),
+        "task-submit" => lines.push("[🌍] Bridge 연동 소스 변경 시 테스트에서 <bridge>/contracts/samples/<계약>/NN-<설명>.json 참조 필요".into()),
         "task-step" => lines.push("값 형식: --step ▷|▶, --goal 1..목표 줄 수".into()),
         _ => {}
     }

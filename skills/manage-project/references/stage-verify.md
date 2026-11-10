@@ -1,6 +1,6 @@
 # 검증→확인 단계 (`manage-project` — Verify & Complete, 위임자)
 
-흐름의 모든 행이 `$H=검증`이면 위임자는 아래 순서만 실행한다. 흐름 실행·숨긴 사례 기록·CDP·병목 로깅은 검증자(`role-verifier`) 몫이며 이 카드에 없다. 규칙·Skill 문서만 바꾼 행은 검증자 없이 `manage-global-rules` §4 예외로 마감한다.
+흐름의 모든 행이 `$H=검증`이면 위임자는 아래 순서만 실행한다. 흐름 실행·숨긴 사례 기록·CDP·병목 로깅은 검증자(`role-verifier`) 몫이며 이 카드에 없다. 규칙·Skill 문서만 바꾼 행은 검증자 없이 `manage-global-rules` §4 예외로 마감하며, 그 `task-confirm`의 `--check` 또는 `--detail`에 하위 `AGENTS.md` `충돌` 검사 결과(예: `충돌 0건`)를 넣는다(없으면 `task-complete`가 "conflict inspection"으로 거부).
 
 ## 마감 명령 순서 (필수 인자 포함)
 
@@ -23,10 +23,11 @@
 
 - 모든 행이 `$H=검증`이 된 뒤 검증자 호출 전에 한 번만 한다.
 - 제품 동작이 바뀌면 patch를 `0.0.1` 올리고 버전 파일(`package.json`, `manifest.json`, `public/manifest.json`, `runtime-contract.js`, `Cargo.toml` 등)과 빌드 산출물 버전을 맞춘다.
-- 실행 가능한 산출물을 `/mnt/h/code/<프로젝트 디렉터리명>`(Obsidian 플러그인은 `.obsidian/plugins/<프로젝트명>`)에 복사한다. 공용 CDP에 새 빌드를 올리는 `run_cdp --replace`는 검증자의 시작 단계다.
+- 실행 가능한 산출물을 `/mnt/h/code/<프로젝트 디렉터리명>`(Obsidian 플러그인은 `.obsidian/plugins/<프로젝트명>`)에 복사한다. 공용 CDP의 새 빌드 적재는 검증자의 `openStagehand({ extensions })`가 버전 비교로 한다.
 
 ## 2. 완료 판정 (`Complete_task`)
 
 - 전역 규칙·Skill 절차 텍스트 행의 제출 예외는 `manage-global-rules` §4를 따른다.
 - `task-complete`가 목표와 결과를 대조해 `### 구현`에서 실제 작업만 추린 `#### 완료 (#<id>)` 목록을 만들고 `# 완료`로 옮긴다. 완료 기호는 구조 `🏗️`, 기능 `✨`, 외부 연결 `🌍`, 누락 수정 `⭕️`, 속도·흐름 `🚀`, 오류 수정은 `~/ai/rules/rule_schema.md` 5절의 원인 기호다.
 - 메인 세션은 현재 작업의 모든 행이 `# 완료`에 있고 `$H=확인`(또는 사용자 설정 `완료`)일 때 종료한다. 사용자의 "완료" 답변에 `task-complete`를 다시 돌려 `$H=완료`로 바꾸지 않는다.
+- 검증 도구 실패(Stagehand·CDP 기동 등)로 `$H=진단`이 된 행은 제품 수정 없이 `구현자 --resume`(같은 테스트 재실행·`task-submit`) → `검증자 --resume`(도구 우회 재검증·`task-hidden`) → `task-confirm` 순서로 한 번에 되돌린다. 위임자는 `task-update`로 `$H=검증`을 쓸 수 없다(261107 #755 재위임 3회).

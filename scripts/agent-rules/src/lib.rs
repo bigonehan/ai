@@ -285,7 +285,7 @@ pub fn sync(p: &Paths, only: Option<&str>, force: bool) -> Result<Vec<Report>> {
         let path = p.target(t);
         let (state, want) = inspect(p, &source, t);
         let mut backup = None;
-        if state == State::Drift {
+        if state != State::Missing && state != State::Synced {
             backup = Some(back_up(p, t, &path)?);
         }
         let write = state != State::Synced && (state != State::Drift || force);
@@ -309,8 +309,8 @@ pub fn sync(p: &Paths, only: Option<&str>, force: bool) -> Result<Vec<Report>> {
 fn back_up(p: &Paths, t: &Target, path: &Path) -> Result<PathBuf> {
     let dir = p.state.join("backup");
     io(&dir, fs::create_dir_all(&dir))?;
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let file = dir.join(format!("{}-{secs}.md", t.name));
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let file = dir.join(format!("{}-{stamp}.md", t.name));
     io(&file, fs::copy(path, &file))?;
     Ok(file)
 }

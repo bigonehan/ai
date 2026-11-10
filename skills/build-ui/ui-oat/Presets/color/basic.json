@@ -1,0 +1,21 @@
+{
+  "name": "basic",
+  "theme": "basic.theme.css",
+  "base": "https://github.com/knadh/oat/blob/master/src/css/01-theme.css",
+  "light": {
+    "--background": "#eeeeee",
+    "--foreground": "#2e3440",
+    "--muted-foreground": "#4c566a",
+    "--faint-foreground": "#7c8cad",
+    "--selected": "#8fbcbb",
+    "--selected-foreground": "#2e3440"
+  },
+  "dark": {
+    "--background": "#2e3440",
+    "--foreground": "#e5e9f0",
+    "--muted-foreground": "#7c8cad",
+    "--faint-foreground": "#4c566a",
+    "--selected": "#8fbcbb",
+    "--selected-foreground": "#2e3440"
+  }
+}

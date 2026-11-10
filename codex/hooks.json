@@ -1,48 +1,54 @@
 {
-  "description": "Complete_task owns Stop and SubagentStop decisions. The main session ends when every current Table26 row has completion evidence and is 확인 or user-set 완료; a t26_<RawID> agent ends after its row reaches 검증. A main session with no registered rows is blocked once when files changed since its SessionStart snapshot.",
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/tree/ai/scripts/bin/main-edit-gate",
-            "timeout": 20,
-            "statusMessage": "셸 명령 확인"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/home/tree/ai/scripts/bin/architecture-context",
-            "timeout": 20,
-            "statusMessage": "Skill 구조 확인"
-          }
-        ]
-      }
-    ],
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "/home/tree/ai/scripts/bin/architecture-context",
-            "timeout": 20,
-            "statusMessage": "프로젝트 구조 확인"
-          },
-          {
-            "type": "command",
-            "command": "/home/tree/ai/scripts/bin/task-complete --session-start",
-            "timeout": 20,
-            "statusMessage": "세션 시작 스냅샷"
+            "command": "~/ai/scripts/bin/agent-rules ensure",
+            "timeout": 120
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/architecture-context",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/task-complete --session-start",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/main-edit-gate",
+            "timeout": 20
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Read|Bash|Agent|Task|exec_command|apply_patch|functions.exec_command|functions.apply_patch"
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/ask-notify",
+            "timeout": 45
+          }
+        ],
+        "matcher": "AskUserQuestion|ExitPlanMode"
       }
     ],
     "UserPromptSubmit": [
@@ -50,9 +56,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/tree/ai/scripts/bin/architecture-context",
-            "timeout": 20,
-            "statusMessage": "요청 대상 구조 확인"
+            "command": "~/ai/scripts/bin/architecture-context",
+            "timeout": 20
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/task-complete --session-touch",
+            "timeout": 20
           }
         ]
       }
@@ -62,23 +76,49 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/tree/ai/scripts/bin/task-complete",
-            "timeout": 60,
-            "statusMessage": "Grist 종료 조건 확인"
+            "command": "~/ai/scripts/bin/grist sync --cwd \"$PWD\" >/dev/null 2>&1 || true",
+            "timeout": 60
           }
         ]
-      }
-    ],
-    "SubagentStop": [
+      },
       {
         "hooks": [
           {
             "type": "command",
-            "command": "/home/tree/ai/scripts/bin/task-complete",
-            "timeout": 60,
-            "statusMessage": "Grist 담당 작업 제출 확인"
+            "command": "~/ai/scripts/bin/initialization-gate",
+            "timeout": 60
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/task-complete",
+            "timeout": 90
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/ask-notify",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/ai/scripts/bin/architecture-context",
+            "timeout": 20
+          }
+        ],
+        "matcher": "Skill|Bash"
       }
     ]
   }

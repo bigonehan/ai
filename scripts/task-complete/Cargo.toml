@@ -1,7 +1,8 @@
 [package]
 name = "task-complete"
-version = "0.0.23"
+version = "0.0.26"
 edition = "2021"
 
 [dependencies]
 grist = { path = "../grist" }
+read-architecture = { path = "../read-architecture" }

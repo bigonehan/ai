@@ -1,0 +1,41 @@
+{
+  "name": "basic",
+  "source": {
+    "library": "lucide",
+    "url": "https://lucide.dev",
+    "license": "ISC",
+    "delivery": "no-build 화면은 필요한 Lucide SVG만 프로젝트에 둔다(인라인 또는 작은 모듈), 런타임 CDN 금지"
+  },
+  "svg": {
+    "stroke": "currentColor",
+    "fill": "none",
+    "strokeWidth": 2,
+    "strokeLinecap": "round",
+    "strokeLinejoin": "round",
+    "viewBox": "0 0 24 24"
+  },
+  "button": {
+    "iconOnly": true,
+    "label": "기능 이름을 aria-label과 title에 넣는다",
+    "variant": "배경색 또는 외곽선으로 배경과 구분(Oat 기본·outline·data-variant, ghost 단독 금지)"
+  },
+  "actions": {
+    "refresh": "refresh-cw",
+    "create": "plus",
+    "confirm": "check",
+    "cancel": "circle-x",
+    "close": "x",
+    "open": "folder-open",
+    "save": "save"
+  },
+  "modalClose": {
+    "icon": "x",
+    "ariaLabel": "닫기",
+    "position": "모달 오른쪽 위 고정(sticky 또는 absolute)"
+  },
+  "menu": {
+    "iconOnly": true,
+    "align": "right",
+    "selected": "aria-selected=\"true\" 또는 aria-current=\"page\""
+  }
+}

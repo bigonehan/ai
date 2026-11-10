@@ -5,6 +5,8 @@ description: Give external API calls a traceable project/row/agent ID and emit a
 
 # Record Log
 
+Never write tokens, `Authorization` values, raw request/response payloads, or full personal paths into any log line.
+
 An external API log line has five fields: `HH:MM:SS | ID | calling function | attempt | result` (Asia/Seoul). Add the time at the `append` or product recording boundary, not in caller code; `log-line` validates the four-field body. Use a two-digit attempt (`01`, `02`, …). The ID has 11 characters: six decimal project digits, four decimal Table26 row digits, and one agent character from `0-9A-HJ-NP-Z` (no `I` or `O`). A result is one line of at most 120 characters. Do not include a JSON object/array, token, Authorization header, original payload, or private full path. Keep those values out of the calling function field as well.
 
 For an external API integration, put `ack=<received|rejected|expired|not_observed|not_sent|not_applicable>`, the body fields needed to identify the result (for example `body.status=failed` or `body.code=invalid_request`), and `error=<sanitized error message|none>` in `result`. Record `body=none` when no response body arrived. Preserve the meaningful error message after masking credentials and private paths; do not replace it with only a generic success/failure label. Never log the whole JSON body, a serialized request/response object, or raw body text. `ack=not_observed` means the ACK was not seen and does not claim that the receiver rejected or missed the request.
@@ -12,6 +14,8 @@ For an external API integration, put `ack=<received|rejected|expired|not_observe
 Fill `ack`, `body.*` and `stage` only from the value actually observed at that call; never write them as a constant string in the logger (for example a hard-coded `ack=not_observed body=none`). When the caller fails before sending, record `ack=not_sent`. Put `stage=<local_validate|send|receiver_reject|response_validate>` in every failure `result` to name where it failed: `local_validate` for the caller's own check before sending, `send` for a transport or timeout failure, `receiver_reject` for an error returned by the receiver, `response_validate` for the caller rejecting the received response.
 
 A receiver on the other side of the boundary (for example a Web Prompt Bridge handler) logs each handled request in its own internal log, success and failure alike, with its own calling function name, `body.status=<ok|failed>`, the failing `stage` and `error=`. A receiver that only returns the error to the caller without logging it does not meet this rule.
+
+A rejection names the observed shape that failed the check, not only a label: the request `path`, `len=<Content-Length>`, `ctype=<Content-Type|none>` and the parse error (for example `body.status=invalid_body len=0 ctype=none error=Expecting value stage=local_validate`). An unknown-route response and its log carry the requested path and the receiver's own version (`error=route_not_found path=/queries/conti-folder version=0.0.34`), so a stale installed Bridge shows in one line. Two different causes never share one error string, and every local validation that rejects a received value logs one line (261031 blender_bridge: `invalid_body` hid a body-less claim, `요청 경로를 찾지 못했습니다` hid a stale Eagle plugin, and `생성 이미지 형식 오류` had no log line).
 
 ## Commands
 

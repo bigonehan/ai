@@ -32,21 +32,29 @@ fn resolved(path: &Path) -> PathBuf {
     result
 }
 
+/// 위임 흐름 루트들. `T26_WORKFLOW_ROOTS`(':' 구분)가 없으면 ROOT와 `/home/tree/project`.
+fn workflow_roots() -> Vec<String> {
+    match env::var("T26_WORKFLOW_ROOTS") {
+        Ok(v) if !v.trim().is_empty() => v.split(':').filter(|r| !r.is_empty()).map(str::to_owned).collect(),
+        _ => vec![ROOT.to_owned(), "/home/tree/project".to_owned()],
+    }
+}
+
 fn project_from(path: &str) -> Option<String> {
     let absolute = resolved(Path::new(path));
     if absolute == Path::new(ROOT) {
         return Some(ROOT.to_owned());
     }
     let abs_str = absolute.to_string_lossy();
-    let prefix = format!("{ROOT}/");
-    if !abs_str.starts_with(&prefix) {
-        return None;
-    }
-    let name = abs_str[prefix.len()..].split('/').next().unwrap_or("");
+    let (root, rest) = workflow_roots().into_iter().find_map(|root| {
+        let rest = abs_str.strip_prefix(&format!("{root}/"))?.to_owned();
+        Some((root, rest))
+    })?;
+    let name = rest.split('/').next().unwrap_or("");
     if name.is_empty() || name == "." || name == ".." {
         return None;
     }
-    let project = Path::new(ROOT).join(name);
+    let project = Path::new(&root).join(name);
     if project.join("AGENTS.md").exists() {
         Some(project.to_string_lossy().into_owned())
     } else {
@@ -76,6 +84,8 @@ mod tests {
         let read = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"sed -n 1,5p ~/.codex/skills/manage-project/SKILL.md"}});
         let mention = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"printf manage-project/SKILL.md"}});
         assert!(reads_manage_skill(&read));
+        let agy = serde_json::json!({"tool_name":"view_file","tool_input":{"AbsolutePath":"/home/tree/ai/skills/manage-project/SKILL.md"}});
+        assert!(reads_manage_skill(&agy));
         assert!(!reads_manage_skill(&mention));
         assert!(notification("<task-notification>done"));
         assert!(notification("[SYSTEM NOTIFICATION: done"));
@@ -92,6 +102,12 @@ mod tests {
         assert!(!first_in_session_at(&event, ROOT, &dir));
         assert!(first_in_session_at(&event, "/home/tree/extensions/eagle_move", &dir));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unwritable_session_marker_does_not_suppress_context() {
+        let event = serde_json::json!({"session_id":"agy-read-only"});
+        assert!(first_in_session_at(&event, ROOT, Path::new("/proc")));
     }
 
     #[test]
@@ -252,6 +268,11 @@ fn shell_words(input: &str) -> Vec<String> {
 
 fn reads_manage_skill(event: &Value) -> bool {
     let name = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    if ["Read", "read_file", "view_file"].contains(&name) {
+        return event.get("tool_input")
+            .and_then(|input| input.get("file_path").or_else(|| input.get("Path")).or_else(|| input.get("AbsolutePath")))
+            .and_then(Value::as_str).is_some_and(|path| path.contains("manage-project/SKILL.md"));
+    }
     if !["Bash", "bash", "shell", "exec_command", "run_command"].contains(&name) { return false; }
     let command = event.get("tool_input").and_then(|v| v.get("command"))
         .or_else(|| event.get("tool_input").and_then(|v| v.get("cmd")))
@@ -266,7 +287,10 @@ fn first_in_session_at(event: &Value, project: &str, dir: &Path) -> bool {
     if fs::create_dir_all(dir).is_err() { return true; }
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (session, project).hash(&mut hasher);
-    OpenOptions::new().write(true).create_new(true).open(dir.join(format!("{:016x}", hasher.finish()))).is_ok()
+    match OpenOptions::new().write(true).create_new(true).open(dir.join(format!("{:016x}", hasher.finish()))) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+        _ => true,
+    }
 }
 
 fn prompt_hook_suppressed(event: &Value, skip_prompt: bool) -> bool {
@@ -322,7 +346,7 @@ fn main() {
     let cwd_raw = event.get("cwd").and_then(Value::as_str).unwrap_or(".");
     let cwd = resolved(Path::new(cwd_raw)).to_string_lossy().into_owned();
 
-    let explicit_re = Regex::new(r#"/home/tree/extensions/[^\s/`'"<>]+"#).unwrap();
+    let explicit_re = Regex::new(r#"/home/tree/(?:extensions|project)/[^\s/`'"<>]+"#).unwrap();
     let project = skill.as_ref().and_then(|(p, _)| p.as_deref()).and_then(project_from)
         .or_else(|| explicit_re.find(prompt)
         .and_then(|m| project_from(m.as_str()))

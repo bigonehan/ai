@@ -29,13 +29,13 @@ fn message(event: &Value) -> Option<String> {
     }
 }
 
-/// Stop: the last assistant reply summed up in one line, `[요청] ` when it asks the user for something.
+/// Stop: the last assistant reply summed up in one line, `[요청] ` when it asks the user for something, `[완료] ` otherwise.
 fn stop_message(folder: &str, reply: &str) -> Option<String> {
     let line = reply.lines().map(|line| line.trim().trim_start_matches(['#', '-', '*', '>', ' ']).replace(['*', '`'], ""))
         .find(|line| !line.trim().is_empty())?;
     let tail: String = reply.chars().rev().take(300).collect::<String>().chars().rev().collect();
     let asks = ["주세요", "할까요", "될까요", "괜찮을까요", "알려 주", "부탁"].iter().any(|word| tail.contains(word)) || tail.trim_end().ends_with('?');
-    Some(format!("{}{folder} {}", if asks { "[요청] " } else { "" }, line.trim().chars().take(80).collect::<String>()))
+    Some(format!("{}{folder} {}", if asks { "[요청] " } else { "[완료] " }, line.trim().chars().take(80).collect::<String>()))
 }
 
 fn last_reply(transcript: &str) -> Option<String> {
@@ -56,6 +56,11 @@ fn last_reply(transcript: &str) -> Option<String> {
     })
 }
 
+/// 02:00–09:00 Asia/Seoul is unattended time: the agent decides with the safe default instead of asking.
+fn quiet_hour(epoch: u64) -> bool {
+    (2..9).contains(&((epoch + 9 * 3600) / 3600 % 24))
+}
+
 fn main() {
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
@@ -65,6 +70,12 @@ fn main() {
         return;
     };
     let stop = event.get("hook_event_name").and_then(Value::as_str) == Some("Stop");
+    let asks = matches!(event.get("tool_name").and_then(Value::as_str), Some("AskUserQuestion" | "ask_question"));
+    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if !stop && asks && quiet_hour(epoch) {
+        eprintln!("새벽 2시~9시(KST)에는 사용자에게 묻지 않습니다: 되돌릴 수 있는 안전한 기본값(사용자 데이터 보존·비파괴)을 골라 진행하고, 사용자만 할 수 있는 동작(로그인·결제·비가역 외부 전송·OS 앱 조작)만 행 $D에 [🏷] 사용자 대기로 기록하세요.");
+        std::process::exit(2);
+    }
     if stop && event.get("stop_hook_active").and_then(Value::as_bool) == Some(true) { return; }
     let text = if stop {
         let folder = event.get("cwd").and_then(Value::as_str).and_then(|cwd| Path::new(cwd).file_name()?.to_str().map(str::to_owned)).unwrap_or_default();
@@ -99,20 +110,41 @@ fn main() {
             "/home/tree/.local/share/nvm/v25.8.1/bin:/mnt/c/Windows/System32/WindowsPowerShell/v1.0:/mnt/c/Windows/System32:/usr/local/bin:/usr/bin:/bin:{}",
             std::env::var("PATH").unwrap_or_default()
         );
-        let status = Command::new("/home/tree/.local/bin/nf")
-            .args(["-m", &text])
-            .env("PATH", path)
+        // 모바일·데스크톱을 따로 보내야 데스크톱 성공(30초 뒤 자동 닫힘)에 모바일 실패가 가려지지 않는다.
+        let send = |channel: &str| Command::new("/home/tree/.local/bin/nf")
+            .args([channel, "-m", &text])
+            .env("PATH", &path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .status()
+            .map(|code| code.code().unwrap_or(-1).to_string())
+            .unwrap_or_else(|_| "spawn".into());
+        let mobile = send("--mobile-only");
+        // 데스크톱 알림은 창이 닫힐 때까지(~30초) 끝나지 않아 hook 제한(20초)에 잘리므로, 자기 프로세스 그룹으로 띄우고 기다리지 않는다.
+        let desktop = {
+            use std::os::unix::process::CommandExt;
+            // 끝난 뒤 exit를 같은 로그에 남겨, 백그라운드 데스크톱 전송의 실제 결과를 확인할 수 있게 한다.
+            let log = std::env::var("HOME").map(|h| format!("{h}/.local/state/ask-notify.log")).unwrap_or_default();
+            Command::new("/bin/sh")
+                .args(["-c", "/home/tree/.local/bin/nf --desktop-only -m \"$1\"; echo \"$(date +%s) desktop_done exit=$?\" >> \"$2\"", "sh", &text, &log])
+                .env("PATH", &path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0)
+                .spawn()
+                .map(|_| "bg".to_string())
+                .unwrap_or_else(|_| "spawn".into())
+        };
         let tool = if stop { "Stop" } else { event.get("tool_name").and_then(Value::as_str).unwrap_or("-") };
-        let result = status.map(|code| code.code().unwrap_or(-1).to_string()).unwrap_or_else(|_| "spawn".into());
+        let result = if mobile != "0" { mobile.clone() } else if desktop == "bg" { "0".to_string() } else { desktop.clone() };
         if let Some(log) = log_path {
             let _ = std::fs::create_dir_all(log.parent().unwrap());
             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
                 use std::io::Write;
-                let _ = writeln!(file, "{now} {tool} nf_exit={result}");
+                let tag = if text.starts_with("[완료] ") { " [완료]" } else if text.starts_with("[요청] ") { " [요청]" } else { "" };
+                let _ = writeln!(file, "{now} {tool} nf_exit={result} mobile_exit={mobile} desktop_exit={desktop}{tag}");
             }
         }
         // A question or approval request never goes out without its notification.
@@ -125,11 +157,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{message, stop_message};
+    use super::{message, quiet_hour, stop_message};
+
+    #[test]
+    fn quiet_hours_are_two_to_nine_kst() {
+        // 2026-11-06 17:00 UTC = 11-07 02:00 KST.
+        let two_am = 1_793_984_400;
+        assert!(!quiet_hour(two_am - 1));
+        assert!(quiet_hour(two_am));
+        assert!(quiet_hour(two_am + 7 * 3600 - 1));
+        assert!(!quiet_hour(two_am + 7 * 3600));
+    }
 
     #[test]
     fn stop_reply_marks_requests() {
-        assert_eq!(stop_message("cartoon", "## 결과\n저장했어요.").as_deref(), Some("cartoon 결과"));
+        assert_eq!(stop_message("cartoon", "## 결과\n저장했어요.").as_deref(), Some("[완료] cartoon 결과"));
         assert_eq!(stop_message("cartoon", "Eagle을 다시 켜 주세요.\n이어서 할게요. 다시 켜 주세요.").as_deref(), Some("[요청] cartoon Eagle을 다시 켜 주세요."));
     }
     use serde_json::json;

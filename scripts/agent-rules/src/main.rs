@@ -3,6 +3,7 @@
 use agent_rules::{self as rules, Paths, State, SIZE_LIMIT, TARGETS};
 use std::io::Read;
 use std::process::ExitCode;
+mod deployment;
 
 const USAGE: &str = "사용법: agent-rules <명령>
   path                                원본 경로
@@ -13,8 +14,9 @@ const USAGE: &str = "사용법: agent-rules <명령>
   remove --text <A>                   A를 포함한 유일한 줄 삭제
   write --file <F|->                  원본을 F(또는 표준입력) 내용으로 교체
   sync [--target <이름>] [--force] [--quiet]
-                                      원본을 활성본으로 생성(drift면 백업 후 exit 3)
-  status                              활성본 동기화 상태와 크기
+                                      기존 생성본을 백업하고 원본에서 전부 재생성
+  status                              규칙·Skill·hook·바이너리 어긋남 목록(있으면 exit 3)
+  ensure                              SessionStart에서 어긋나면 sync --force
 수정 명령(add·replace·remove·write)은 끝나면 모든 대상을 sync한다.
 대상: codex(~/.codex/AGENTS.md), claude(~/.claude/CLAUDE.md),
       antigravity(~/.gemini/GEMINI.md), antigravity-cli(~/.gemini/antigravity-cli/GEMINI.md)";
@@ -112,22 +114,47 @@ fn run(cmd: &str, mut a: Args) -> rules::Result<()> {
             a.done()?;
             rules::write_source(&p, &new)?;
             println!("원본 갱신: {} ({}바이트)", p.source.display(), new.len());
-            report(&rules::sync(&p, None, false)?, false)?;
+            report(&rules::sync(&p, None, true)?, false)?;
+            deployment::sync(&p)?;
         }
         "sync" => {
             let target = a.value("--target")?;
             let (force, quiet) = (a.flag("--force"), a.flag("--quiet"));
             a.done()?;
-            report(&rules::sync(&p, target.as_deref(), force)?, quiet)?;
+            report(&rules::sync(&p, target.as_deref(), force || target.is_none())?, quiet)?;
+            if target.is_none() {
+                deployment::sync(&p)?;
+                let drift = deployment::inspect(&p)?;
+                if !drift.is_empty() { return Err(rules::Error { code: 3, msg: drift.join("\n") }); }
+            }
         }
         "status" => {
             a.done()?;
             let text = rules::read_source(&p)?;
             println!("{:<16} {:<12} {:>6}B  {}", "원본", "", text.len(), p.source.display());
+            let mut drift = Vec::new();
             for t in &TARGETS {
                 let (state, _) = rules::inspect(&p, &text, t);
                 let size = std::fs::metadata(p.target(t)).map(|m| format!("{}B", m.len())).unwrap_or_else(|_| "-".into());
                 println!("{:<16} {:<12} {:>7}  {}", t.name, state.label(), size, p.target(t).display());
+                if state != State::Synced { drift.push(format!("규칙 {}: {}", t.name, state.label())); }
+            }
+            drift.extend(deployment::inspect(&p)?);
+            for line in deployment::unsupported(&p)? { println!("{line}"); }
+            for item in &drift { println!("어긋남: {item}"); }
+            if !drift.is_empty() { return Err(rules::Error { code: 3, msg: format!("어긋남 {}건", drift.len()) }); }
+        }
+        "ensure" => {
+            a.done()?;
+            let text = rules::read_source(&p)?;
+            let rules_drift = TARGETS.iter().any(|t| rules::inspect(&p, &text, t).0 != State::Synced);
+            if rules_drift || !deployment::inspect(&p)?.is_empty() {
+                report(&rules::sync(&p, None, true)?, true)?;
+                deployment::sync(&p)?;
+            }
+            let text = rules::read_source(&p)?;
+            if TARGETS.iter().any(|t| rules::inspect(&p, &text, t).0 != State::Synced) || !deployment::inspect(&p)?.is_empty() {
+                return Err(rules::Error { code: 3, msg: "sync 후에도 어긋남이 남았다".into() });
             }
         }
         _ => return Err(usage(&format!("알 수 없는 명령 `{cmd}`"))),
@@ -151,7 +178,7 @@ fn report(reports: &[rules::Report], quiet: bool) -> rules::Result<()> {
     for r in reports {
         let what = match (&r.state, r.written) {
             (State::Drift, false) => "건너뜀(활성본 직접 수정됨)",
-            (State::Drift, true) => "덮어씀(--force)",
+            (State::Drift, true) => "백업 후 재생성",
             (State::Synced, _) => "변경 없음",
             (_, _) => "생성",
         };

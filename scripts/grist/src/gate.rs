@@ -8,7 +8,7 @@ use crate::task;
 use crate::testrun;
 use regex::{Regex, RegexBuilder};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -20,6 +20,11 @@ pub const ALWAYS_EDITABLE: [&str; 3] = [".ai", "AGENTS.md", "test/tmp"];
 pub const OUTPUT_TAIL: usize = 4000;
 pub const PURPOSE_FORMAT: &str = "80자 이하의 결과 한 줄 (명령, 백틱, --옵션 제외)";
 pub const PATHS_FORMAT: &str = "프로젝트 기준 최상위 경로 쉼표 구분 (`.` 제외)";
+const BRIDGE_MARKERS: [&str; 7] = [
+    "/api/bridge/", "localhost:41600", "127.0.0.1:41600", "/queries/",
+    "/commands/", "eagle-data-bridge", "web_prompt_bridge",
+];
+const BRIDGE_SAMPLE_PATH: &str = "<bridge>/contracts/samples/<계약>/NN-<설명>.json";
 
 fn confirmation_note(summary: &str) -> String {
     util::head(summary, 300)
@@ -35,7 +40,7 @@ pub fn confirmed_fields(stage: &str, summary: Option<&str>) -> Map<String, Value
     fields
 }
 
-fn flow_summary_from_text(text: &str, raw_id: i64) -> Option<String> {
+pub(crate) fn flow_summary_from_text(text: &str, raw_id: i64) -> Option<String> {
     let submitted = format!("#### 검증 (#{raw_id})");
     let confirmed = format!("#### 확인 (#{raw_id})");
     let mut in_confirmed = false;
@@ -81,6 +86,7 @@ pub fn flow_summary(project_dir: &Path, raw_id: i64) -> Option<String> {
 #[derive(Clone, Debug)]
 pub struct Row {
     pub id: i64,
+    pub b: Value,
     pub h: Value,
     pub d: Value,
     pub i: Value,
@@ -140,15 +146,20 @@ fn verifier_row_from(role: Option<&str>, row: Option<&str>) -> Option<i64> {
 
 fn main_code_file(path: &str) -> bool {
     let path = Path::new(path);
-    if matches!(path.file_name().and_then(|name| name.to_str()), Some("Cargo.toml" | "package.json" | "manifest.json" | "runtime-contract.js")) {
+    if release_artifact(path) { return false; }
+    if matches!(path.file_name().and_then(|name| name.to_str()), Some("Cargo.toml" | "package.json" | "manifest.json" | "blender_manifest.toml" | "runtime-contract.js" | "tauri.conf.json")) {
         return false;
     }
-    let extension_source = !path.is_absolute() || path.starts_with("/home/tree/extensions");
+    let extension_source = !path.is_absolute() || records::workflow_root_of(path).is_some();
     let script_source = path.starts_with("/home/tree/ai/scripts");
     script_source || (extension_source
         && !path.components().any(|part| part.as_os_str() == ".ai")
         && path.file_name().and_then(|name| name.to_str()) != Some("AGENTS.md")
         && path.extension().and_then(|ext| ext.to_str()) != Some("md"))
+}
+
+fn release_artifact(path: &Path) -> bool {
+    path == Path::new("main.js") || path.starts_with("dist/")
 }
 
 fn delegate_boundary(role: Option<&str>, raw_id: i64, files: &[String]) -> Option<Value> {
@@ -270,13 +281,13 @@ fn row_command_allowed(role: &str, row: Option<i64>, rows: Option<&str>, command
 
 pub fn worker_update_allowed(role: Option<&str>, row: Option<i64>, raw_id: i64, fields: &Map<String, Value>) -> bool {
     role != Some("worker") || (row == Some(raw_id) && fields.keys().all(|key| {
-        matches!(key.as_str(), "D" | "I" | "J")
+        matches!(key.as_str(), "C" | "D" | "I" | "J")
             || (key == "H" && matches!(fields.get(key).and_then(Value::as_str), Some("진단" | "교정")))
     }))
 }
 
 pub fn rows(ids: &[i64]) -> R<Vec<Row>> {
-    let fields = vec!["H".into(), "D".into(), "I".into(), "J".into(), GOAL_FIELD.into()];
+    let fields = vec!["B".into(), "H".into(), "D".into(), "I".into(), "J".into(), GOAL_FIELD.into()];
     let raw = api::get(TASK_TABLE, Some(ids), None, Some(&fields))?;
     let map: HashMap<i64, Map<String, Value>> = api::rows_by_id(&raw).into_iter().collect();
     let missing: Vec<i64> = ids.iter().copied().filter(|i| !map.contains_key(i)).collect();
@@ -295,6 +306,7 @@ pub fn rows(ids: &[i64]) -> R<Vec<Row>> {
                 .unwrap_or_default();
             Row {
                 id: i,
+                b: f.get("B").cloned().unwrap_or(Value::Null),
                 h: f.get("H").cloned().unwrap_or(Value::Null),
                 d: f.get("D").cloned().unwrap_or(Value::Null),
                 i: f.get("I").cloned().unwrap_or(Value::Null),
@@ -322,13 +334,14 @@ pub fn git(project_dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 pub fn uninitialized(start: &Path) -> Option<PathBuf> {
-    let ext = util::resolve(&records::extensions_root());
+    let root = records::workflow_root_of(&util::resolve(start)).unwrap_or_else(records::extensions_root);
+    let ext = util::resolve(&root);
     let rel = start.strip_prefix(&ext).ok()?;
     let first = rel.components().next()?.as_os_str().to_string_lossy().into_owned();
     if first.is_empty() || first.starts_with('.') || first == "node_modules" || first == "test" {
         return None;
     }
-    let project_dir = records::extensions_root().join(&first);
+    let project_dir = root.join(&first);
     let agents = project_dir.join("AGENTS.md");
     if !project_dir.is_dir() {
         return None;
@@ -582,7 +595,10 @@ fn run_jev_process(bin: &Path, command: &str, row: Option<i64>, file_args: &[(St
     if let Some(r) = row {
         cmd.arg("--row").arg(r.to_string());
     }
-    let out = cmd.output().ok()?;
+    let started = std::time::Instant::now();
+    let output = cmd.output();
+    crate::timing::jev_call(started.elapsed());
+    let out = output.ok()?;
     Some((
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -680,32 +696,62 @@ fn generated(path: &str) -> bool {
         .is_match(path)
 }
 
-/// The working tree (tracked and untracked, ignore rules applied) as one git tree hash. A copy of
-/// the real index keeps `git add -A` stat-based, and the real index is never touched.
+/// The working tree (tracked and untracked, ignore rules applied) as path, mode and blob IDs.
+/// Objects written by `git add` live only in a temporary store, never in the real repository.
 pub fn snapshot(project_dir: &Path) -> Option<String> {
     let index = git(project_dir, &["rev-parse", "--git-path", "index"])?;
     let index = project_dir.join(util::strip(&index));
+    let repo_objects = git(project_dir, &["rev-parse", "--git-path", "objects"])?;
+    let repo_objects = project_dir.join(util::strip(&repo_objects));
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let tmp = std::env::temp_dir().join(format!("grist-snapshot-{}-{nanos}.idx", std::process::id()));
-    if index.is_file() && std::fs::copy(&index, &tmp).is_err() {
-        return None;
-    }
+    let objects = std::env::temp_dir().join(format!("grist-snapshot-{}-{nanos}", std::process::id()));
+    std::fs::create_dir(&objects).ok()?;
+    let tmp = objects.join("index");
     let run = |args: &[&str]| {
         Command::new("git").arg("-C").arg(project_dir).args(args).env("GIT_INDEX_FILE", &tmp)
+            .env("GIT_OBJECT_DIRECTORY", &objects).env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &repo_objects)
             .stdin(std::process::Stdio::null()).output().ok().filter(|o| o.status.success())
     };
-    let tree = run(&["add", "-A", "."]).and_then(|_| run(&["write-tree"]))
-        .map(|o| util::strip(&String::from_utf8_lossy(&o.stdout)).to_string());
-    let _ = std::fs::remove_file(&tmp);
-    tree.filter(|t| !t.is_empty())
+    let result = (|| {
+        if index.is_file() { std::fs::copy(&index, &tmp).ok()?; }
+        run(&["add", "-A", "."])?;
+        let listing = run(&["ls-files", "--stage", "-z", "--", "."])?;
+        let mut files = BTreeMap::new();
+        for entry in listing.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+            let line = String::from_utf8_lossy(entry);
+            let (meta, path) = line.split_once('\t')?;
+            files.insert(path.to_string(), meta.to_string());
+        }
+        serde_json::to_string(&files).ok()
+    })();
+    let _ = std::fs::remove_dir_all(&objects);
+    result
 }
 
 /// Files (relative to the repo at `project_dir`) that differ between the preparation snapshot and now;
 /// `external_changed` reuses it for packages outside the project.
+/// Compares serialized index entries; temporary objects are gone before this returns.
 pub fn changed_since(project_dir: &Path, prepared: &str) -> BTreeSet<String> {
-    let Some(now) = snapshot(project_dir) else { return BTreeSet::new() };
-    let names = git(project_dir, &["diff", "--name-only", "--relative", prepared, &now]).unwrap_or_default();
-    util::splitlines(&names).into_iter().filter(|l| !l.is_empty() && !generated(l)).collect()
+    let before: BTreeMap<String, String> = if prepared.starts_with('{') {
+        serde_json::from_str(prepared).unwrap_or_default()
+    } else {
+        // Snapshots prepared by the previous binary remain readable during an in-flight task.
+        let prefix = git(project_dir, &["rev-parse", "--show-prefix"]).unwrap_or_default();
+        let Some(output) = Command::new("git").arg("-C").arg(project_dir)
+            .args(["ls-tree", "-r", "-z", "--full-tree", prepared])
+            .output().ok().filter(|o| o.status.success()) else { return BTreeSet::new() };
+        output.stdout.split(|byte| *byte == 0).filter_map(|entry| {
+            let line = String::from_utf8_lossy(entry);
+            let (meta, path) = line.split_once('\t')?;
+            let (mode, rest) = meta.split_once(' ')?;
+            let (_, oid) = rest.split_once(' ')?;
+            let path = path.strip_prefix(util::strip(&prefix))?;
+            Some((path.to_string(), format!("{mode} {oid} 0")))
+        }).collect()
+    };
+    let Some(now) = snapshot(project_dir).and_then(|value| serde_json::from_str::<BTreeMap<String, String>>(&value).ok()) else { return BTreeSet::new() };
+    before.keys().chain(now.keys()).filter(|path| before.get(*path) != now.get(*path) && !generated(path))
+        .cloned().collect()
 }
 
 /// Packages outside the project that hold the row's test files, as (git repo root, package path relative to it).
@@ -749,6 +795,58 @@ fn external_changed_files(prepared: &Map<String, Value>) -> Vec<String> {
     }).collect()
 }
 
+fn is_test_file(path: &str) -> bool {
+    let path = path.replace('\\', "/");
+    let name = path.rsplit('/').next().unwrap_or("");
+    path.split('/').any(|part| matches!(part, "test" | "tests" | "__tests__"))
+        || name.starts_with("test_")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+        || name.ends_with("_test.rs")
+        || name.ends_with("_test.py")
+}
+
+fn bridge_sample_boundary<'a>(
+    row_label: &str,
+    changed_sources: impl IntoIterator<Item = (&'a str, &'a str)>,
+    test_contents: impl IntoIterator<Item = &'a str>,
+) -> Option<Value> {
+    if !row_label.starts_with("[🌍]") { return None; }
+    let detected = changed_sources.into_iter().find_map(|(file, contents)| {
+        BRIDGE_MARKERS.iter().find(|marker| contents.contains(**marker))
+            .map(|marker| (file, *marker))
+    });
+    let (file, marker) = detected?;
+    if test_contents.into_iter().any(|contents| contents.contains("contracts/samples/")) {
+        return None;
+    }
+    Some(json!({
+        "boundary": "submit",
+        "reason": format!("Bridge consumer/producer 테스트가 {BRIDGE_SAMPLE_PATH} 파일을 읽어야 합니다. 샘플이 없으면 Bridge 프로젝트 행에서 producer 테스트와 함께 먼저 만든다"),
+        "marker": marker,
+        "file": file
+    }))
+}
+
+fn bridge_sample_files(project_dir: &Path, row_label: &str, files: &[String], prepared: &Map<String, Value>) -> Option<Value> {
+    if !row_label.starts_with("[🌍]") { return None; }
+    let source_contents: Vec<(String, String)> = files.iter().filter(|path| !is_test_file(path))
+        .filter_map(|path| {
+            let file = if Path::new(path).is_absolute() { PathBuf::from(path) } else { project_dir.join(path) };
+            std::fs::read_to_string(file).ok().map(|contents| (path.clone(), contents))
+        }).collect();
+    let mut test_paths: BTreeSet<String> = prepared.get("tests").and_then(Value::as_array)
+        .into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+    test_paths.extend(files.iter().filter(|path| is_test_file(path)).cloned());
+    let test_contents: Vec<String> = test_paths.iter().filter_map(|path| {
+        let file = if Path::new(path).is_absolute() { PathBuf::from(path) } else { project_dir.join(path) };
+        std::fs::read_to_string(file).ok()
+    }).collect();
+    bridge_sample_boundary(row_label,
+        source_contents.iter().map(|(path, contents)| (path.as_str(), contents.as_str())),
+        test_contents.iter().map(String::as_str))
+}
+
 pub fn external_changed(prepared: &Map<String, Value>) -> usize {
     external_changed_files(prepared).len()
 }
@@ -783,7 +881,14 @@ pub fn task_goal(raw_id: i64, project_arg: &str, goal_file: &str, summary: &str)
             format!("Table26 #{raw_id} $H={}; $K is written only while $H=초안", util::val_str(&row.h)),
         );
     }
-    let (goal, summary) = check_goal(&project_dir, Some(raw_id), goal_file, summary)?;
+    let item_title = records::item_file(&project_dir, raw_id)
+        .and_then(|f| std::fs::read_to_string(f).ok())
+        .and_then(|t| records::item_title_in(&t, raw_id))
+        .or_else(|| {
+            let b = util::val_str(&row.b);
+            (!b.is_empty()).then_some(b)
+        });
+    let (goal, summary) = check_goal_for_title(&project_dir, Some(raw_id), item_title.as_deref(), goal_file, summary)?;
     let mut out = store_goal(&project_dir, raw_id, &goal, &summary)?;
     records::attach_warnings(&mut out, records::goal_conjunction_warnings(&goal));
     Ok(out)
@@ -801,6 +906,16 @@ pub fn goal_summary(summary: &str) -> Result<String, String> {
 /// Validates the goal before any Grist write: summary shape, goal format, J3 scope judgment.
 /// Returns the canonical goal and the one-line summary.
 pub fn check_goal(project_dir: &Path, raw_id: Option<i64>, goal_file: &str, summary: &str) -> R<(String, String)> {
+    check_goal_for_title(project_dir, raw_id, None, goal_file, summary)
+}
+
+pub fn check_goal_for_title(
+    project_dir: &Path,
+    raw_id: Option<i64>,
+    item_title: Option<&str>,
+    goal_file: &str,
+    summary: &str,
+) -> R<(String, String)> {
     let summary = match goal_summary(summary) {
         Ok(s) => s,
         Err(e) => return api::fail("goal", e),
@@ -811,7 +926,7 @@ pub fn check_goal(project_dir: &Path, raw_id: Option<i64>, goal_file: &str, summ
     if !errors.is_empty() {
         return gate_err(json!({"boundary": "goal", "raw_id": raw_id, "errors": errors}));
     }
-    let req = latest_request(project_dir);
+    let req = records::scope_request_block(&latest_request(project_dir), item_title);
     let judgment = jev("scope", raw_id, &[("request", &req), ("goal", &goal)]);
     if jev_blocks(&judgment) {
         return gate_err(json!({
@@ -933,6 +1048,8 @@ fn record_agent_origin(project_arg: &str, project_dir: &Path, raw_id: i64, agent
     // A stale built binary can lack `start`; always refresh it first (no-op when current).
     match Command::new("cargo").args(["build", "--release", "--quiet", "--manifest-path", &manifest]).output() {
         Ok(b) if b.status.success() => {}
+        // Read-only sandboxes (Codex worker) cannot rebuild; the existing binary still records.
+        Ok(_) if Path::new(&built).is_file() => {}
         Ok(b) => return eprintln!(
             "warning: record-log build failed for #{raw_id}; agent origin not recorded: {}",
             String::from_utf8_lossy(&b.stderr).trim()
@@ -1162,7 +1279,12 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
         }
         let mut all_allowed = allowed.clone();
         all_allowed.extend(test_files);
-        let outside: Vec<String> = changed.iter().filter(|f| !inside(f, &all_allowed)).cloned().collect();
+        let outside: Vec<String> = changed.iter().filter(|f| {
+            !inside(f, &all_allowed)
+                // 릴리스가 만든 루트 dist/와 main.js는 재제출 때 행별 수정 범위를 막지 않는다.
+                && !release_artifact(Path::new(f))
+                && !matches!(Path::new(f).file_name().and_then(|n| n.to_str()), Some("Cargo.toml" | "package.json" | "manifest.json" | "blender_manifest.toml" | "runtime-contract.js" | "tauri.conf.json" | "main.js"))
+        }).cloned().collect();
         if !outside.is_empty() {
             return gate_err(json!({
                 "boundary": "submit",
@@ -1175,6 +1297,9 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
 
     let mut files: Vec<String> = changed.iter().cloned().collect();
     files.extend(external_changed_files(&prepared));
+    if let Some(boundary) = bridge_sample_files(&project_dir, row.b.as_str().unwrap_or(""), &files, &prepared) {
+        return gate_err(boundary);
+    }
     let changed_count = files.len();
     if let Some(boundary) = delegate_boundary(std::env::var("T26_ROLE").ok().as_deref(), raw_id, &files) {
         return gate_err(boundary);
@@ -1284,56 +1409,14 @@ pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str,
     Ok(json!({"id": raw_id, "hidden": purpose, "result": "성공"}))
 }
 
-fn flow_judged(project_dir: &Path, ids: &[i64]) -> Vec<(String, Option<String>)> {
-    let id_pat = ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("|");
-    let submit_re = Regex::new(&format!(r"^#+\s*검증\s+\(#({id_pat})\)\s*$")).unwrap();
-    let flow_re = Regex::new(&format!(r"^#+\s*확인\s+\(#({id_pat})\)\s*$")).unwrap();
-    let mut blocks: Vec<Vec<String>> = Vec::new();
-    for record in util::glob(&project_dir.join(".ai").join("changes"), "", ".md") {
-        let Ok(text) = std::fs::read_to_string(&record) else {
-            continue;
-        };
-        let lines = util::splitlines(&text);
-        for (index, line) in lines.iter().enumerate() {
-            if !line.starts_with('#') {
-                continue;
-            }
-            if submit_re.is_match(line) {
-                blocks.clear();
-            } else if flow_re.is_match(line) {
-                let mut body = Vec::new();
-                for rest in &lines[(index + 1)..] {
-                    if rest.starts_with('#') {
-                        break;
-                    }
-                    body.push(rest.clone());
-                }
-                blocks.push(body);
-            }
-        }
-    }
-    let check_re = check_item_re();
-    let mut judged: Vec<(String, Option<String>)> = Vec::new();
-    for lines in &blocks {
-        for (index, line) in lines.iter().enumerate() {
-            if let Some(caps) = check_re.captures(line) {
-                if &caps[1] == "x" || &caps[1] == "X" {
-                    let key = caps[2].to_string();
-                    let ev = evidence(lines, index);
-                    if let Some(existing) = judged.iter_mut().find(|(k, _)| k == &key) {
-                        existing.1 = ev;
-                    } else {
-                        judged.push((key, ev));
-                    }
-                }
-            }
-        }
-    }
-    judged
-}
-
 fn flow_submitted_ids(rows: &[Row]) -> Vec<i64> {
     rows.iter().filter(|row| row.h_str() == SUBMITTED_STAGE).map(|row| row.id).collect()
+}
+
+fn flow_skipped(rows: &[Row]) -> Vec<Value> {
+    let allowed_flow = [SUBMITTED_STAGE, WAITING_STAGE, DONE_STAGE];
+    rows.iter().filter(|row| !allowed_flow.contains(&row.h_str()))
+        .map(|row| json!({"id": row.id, "H": row.h})).collect()
 }
 
 pub fn flow_wait(project_arg: &str) -> R<Value> {
@@ -1341,14 +1424,9 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
     let (project_dir, _, ids) = records::project(project_arg)?;
     let fetched = rows(&ids)?;
     let submitted_ids = flow_submitted_ids(&fetched);
-    let allowed_flow = [SUBMITTED_STAGE, WAITING_STAGE, DONE_STAGE];
-    let open_rows: Vec<Value> = fetched
-        .iter()
-        .filter(|r| !allowed_flow.contains(&r.h_str()))
-        .map(|r| json!({"id": r.id, "H": r.h}))
-        .collect();
-    if !open_rows.is_empty() {
-        return gate_err(json!({"boundary": "flow", "reason": "rows not submitted", "rows": open_rows}));
+    let skipped = flow_skipped(&fetched);
+    if submitted_ids.is_empty() {
+        return gate_err(json!({"boundary": "flow", "reason": "no submitted rows", "skipped": skipped}));
     }
 
     let mut failed = Vec::new();
@@ -1405,7 +1483,8 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
         return gate_err(json!({
             "boundary": "flow",
             "reason": "each 검증 row needs a hidden case after its latest `#### 검증 (#id)`: `task-hidden N --purpose LABEL --test CMD`",
-            "rows": missing_hidden
+            "rows": missing_hidden,
+            "skipped": skipped
         }));
     }
     if !failed.is_empty() {
@@ -1413,58 +1492,146 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
             "boundary": "flow",
             "reason": format!("submitted or hidden tests failed; rows set to {ERROR_STAGE}"),
             "next": task::STAGE_START_CARD,
-            "rows": failed
-        }));
-    }
-
-    if submitted_ids.is_empty() {
-        return Ok(Value::Array(Vec::new()));
-    }
-    let flow = flow_judged(&project_dir, &submitted_ids);
-    if flow.is_empty() || flow.iter().any(|(_, v)| v.is_none()) {
-        let missing_ev: Vec<String> = flow
-            .iter()
-            .filter(|(_, v)| v.is_none())
-            .map(|(k, _)| k.clone())
-            .collect();
-        return gate_err(json!({
-            "boundary": "flow",
-            "reason": "a `#### 확인 (#id)` written after the latest `#### 검증 (#id)` needs `- [x] <목적>` items each followed by `결과 : 성공` and `상세 : <actual value>`; record it with `grist task-confirm` (do not edit .ai/changes) and check it with `grist task-show <id> --section 확인`",
-            "missing_evidence": missing_ev
-        }));
-    }
-
-    let summaries: Vec<(i64, String)> = fetched
-        .iter()
-        .filter(|row| row.h_str() == SUBMITTED_STAGE)
-        .filter_map(|row| flow_summary(&project_dir, row.id).map(|summary| (row.id, summary)))
-        .collect();
-    if summaries.len() != fetched.iter().filter(|row| row.h_str() == SUBMITTED_STAGE).count() {
-        return gate_err(json!({
-            "boundary": "flow",
-            "reason": "each 검증 row needs `- 요약 : [표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>` in its latest `#### 확인 (#id)`; record it with `grist task-confirm --summary` (do not edit .ai/changes)"
+            "rows": failed,
+            "skipped": skipped
         }));
     }
 
     let mut result = Vec::new();
-    for row in &fetched {
-        if row.h_str() == SUBMITTED_STAGE {
-            result.push(json!({"id": row.id, "flow_wait": true}));
-            let mut state = gate_load(&project_dir, row.id);
+    let mut missing = Vec::new();
+    for id in submitted_ids {
+        if let Some(item) = flow_wait_missing(&project_dir, id) {
+            missing.push(json!({"id": id, "missing": item}));
+        } else {
+            result.push(json!({"id": id, "flow_wait": true}));
+            let mut state = gate_load(&project_dir, id);
             state.insert("flow_wait".into(), Value::Bool(true));
-            gate_save(&project_dir, row.id, &state)?;
+            gate_save(&project_dir, id, &state)?;
         }
     }
     if !result.is_empty() {
         records::refresh_day_version(&project_dir)?;
     }
-    Ok(Value::Array(result))
+    if !missing.is_empty() {
+        return gate_err(json!({"boundary": "flow", "passed": result.iter().filter_map(|v| v["id"].as_i64()).collect::<Vec<_>>(), "missing": missing, "skipped": skipped}));
+    }
+    Ok(json!({"passed": result.iter().filter_map(|v| v["id"].as_i64()).collect::<Vec<_>>(), "skipped": skipped}))
+}
+
+pub(crate) fn flow_wait_missing(project_dir: &Path, raw_id: i64) -> Option<&'static str> {
+    let has_block = util::glob(&project_dir.join(".ai").join("changes"), "", ".md")
+        .into_iter().filter_map(|path| std::fs::read_to_string(path).ok())
+        .any(|text| {
+            let verification = format!("#### 검증 (#{raw_id})");
+            let confirmation = format!("#### 확인 (#{raw_id})");
+            text.find(&verification).and_then(|start| text[start..].find(&confirmation)).is_some()
+        });
+    if !has_block { return Some("확인 블록"); }
+    if flow_summary(project_dir, raw_id).is_none() { return Some("요약"); }
+    let confirmation = util::glob(&project_dir.join(".ai").join("changes"), "", ".md")
+        .into_iter()
+        .filter_map(|path| std::fs::read_to_string(path).ok())
+        .filter_map(|text| task::flow_confirmation_in_text(&text, raw_id).ok().flatten())
+        .last();
+    let Some(confirmation) = confirmation else { return Some("근거"); };
+    if !confirmation.lines().any(|line| line.starts_with("- 근거 ")) { return Some("근거"); }
+    if !task::partial_confirmation(&confirmation)
+        && task::runtime_evidence_marker(project_dir, raw_id, &confirmation).is_some() {
+        return Some("근거");
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = std::process::Command::new("chmod").args(["-R", "u+w"]).arg(&self.0).output(); let _ = std::fs::remove_dir_all(&self.0); } }
     #[test]
-    fn submit_delegates_main_one_code_file_but_allows_documents_and_worker() {
+    fn changed_since_reports_changes_when_git_objects_are_read_only() {
+        use std::process::Command;
+        let repo = std::env::temp_dir().join(format!("grist-ro-{}", std::process::id()));
+        let _cleanup = Cleanup(repo.clone());
+        std::fs::create_dir_all(&repo).unwrap();
+        Command::new("git").arg("-C").arg(&repo).args(["init", "-q"]).output().unwrap();
+        std::fs::write(repo.join("a.txt"), "1").unwrap();
+        let prepared = super::snapshot(&repo).unwrap();
+        std::fs::write(repo.join("a.txt"), "2").unwrap();
+        let chmod = |mode: &str| { Command::new("chmod").args(["-R", mode]).arg(repo.join(".git")).output().unwrap(); };
+        chmod("a-w");
+        let plain = super::snapshot(&repo);
+        let changed: Vec<String> = super::changed_since(&repo, &prepared).into_iter().collect();
+        chmod("u+w");
+        std::fs::remove_dir_all(&repo).unwrap();
+        assert!(plain.is_some());
+        assert_eq!(changed, ["a.txt"]);
+    }
+
+    #[test]
+    fn bridge_sample_rejects_marked_world_row_without_sample_reference() {
+        let error = super::bridge_sample_boundary(
+            "[🌍] Bridge 연동", [("src/consumer.rs", "fetch('/api/bridge/claim')")],
+            ["assert_eq!(status, 200);"],
+        ).unwrap();
+        assert_eq!(error["marker"], "/api/bridge/");
+        assert_eq!(error["file"], "src/consumer.rs");
+        let reason = error["reason"].as_str().unwrap();
+        assert!(reason.contains("<bridge>/contracts/samples/<계약>/NN-<설명>.json"));
+        assert!(reason.contains("샘플이 없으면 Bridge 프로젝트 행에서 producer 테스트와 함께 먼저 만든다"));
+    }
+
+    #[test]
+    fn bridge_sample_accepts_marked_world_row_with_sample_reference() {
+        assert!(super::bridge_sample_boundary(
+            "[🌍] Bridge 연동", [("src/consumer.rs", "web_prompt_bridge")],
+            ["std::fs::read_to_string(\"web_prompt_bridge/contracts/samples/claim/01-request.json\")"],
+        ).is_none());
+    }
+
+    #[test]
+    fn bridge_sample_skips_other_rows_or_sources_without_bridge_marker() {
+        assert!(super::bridge_sample_boundary(
+            "[🏗️] 일반", [("src/consumer.rs", "/commands/")], ["no sample"]
+        ).is_none());
+        assert!(super::bridge_sample_boundary(
+            "[🌍] Bridge 연동", [("src/consumer.rs", "ordinary handler")], ["no sample"]
+        ).is_none());
+    }
+
+    #[test]
+    fn flow_wait_missing_is_scoped_to_each_row_and_names_item() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test/tmp").join(format!("flow-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".ai/changes")).unwrap();
+        let record = dir.join(".ai/changes/261031.flow.md");
+        std::fs::write(&record, "#### 검증 (#10)\n#### 확인 (#10)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 실제 값\n#### 검증 (#11)\n").unwrap();
+        assert_eq!(super::flow_wait_missing(&dir, 10), None);
+        assert_eq!(super::flow_wait_missing(&dir, 11), Some("확인 블록"));
+        std::fs::write(&record, "#### 검증 (#11)\n#### 확인 (#11)\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 실제 값\n").unwrap();
+        assert_eq!(super::flow_wait_missing(&dir, 11), Some("요약"));
+        std::fs::write(&record, "#### 검증 (#11)\n#### 확인 (#11)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n").unwrap();
+        assert_eq!(super::flow_wait_missing(&dir, 11), Some("근거"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn partial_confirm_flow_wait_accepts_marked_stop_only() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test/tmp").join(format!("partial-flow-wait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".ai/changes")).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "runtime : 브라우저 확장\n").unwrap();
+        let record = dir.join(".ai/changes/261031.flow.md");
+        let base = "#### 검증 (#10)\n#### 확인 (#10)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 검증 중단\n";
+        std::fs::write(&record, base).unwrap();
+        assert_eq!(super::flow_wait_missing(&dir, 10), Some("근거"));
+        std::fs::write(&record, base.replace("- [x]", "- 부분 확인 : 사용자 지시로 검증 중단\n- [x]")).unwrap();
+        assert_eq!(super::flow_wait_missing(&dir, 10), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn version_files_allow_main_but_other_code_delegates_to_worker() {
         let files = vec!["src/main.rs".into()];
         let denied = super::delegate_boundary(None, 375, &files).unwrap();
         assert_eq!(denied["boundary"], "delegate");
@@ -1472,10 +1639,10 @@ mod tests {
         assert_eq!(denied["changed"], 1);
         assert_eq!(denied["files"], serde_json::json!(files));
         assert!(denied["reason"].as_str().unwrap().contains("dispatch-agent"));
-        for file in ["README.md", "AGENTS.md", ".ai/docs/a.json", "Cargo.toml", "app/package.json", "app/manifest.json", "app/public/manifest.json", "app/runtime-contract.js", "/home/tree/ai/scripts/grist/Cargo.toml", "/home/tree/ai/skills/a/SKILL.md", "/home/tree/ai/rules/settings.json"] {
+        for file in ["README.md", "AGENTS.md", ".ai/docs/a.json", "Cargo.toml", "app/package.json", "app/manifest.json", "app/public/manifest.json", "app/runtime-contract.js", "main.js", "dist/content.js", "/home/tree/ai/scripts/grist/Cargo.toml", "/home/tree/ai/skills/a/SKILL.md", "/home/tree/ai/rules/settings.json"] {
             assert!(super::delegate_boundary(None, 375, &[file.into()]).is_none(), "{file}");
         }
-        for file in ["app/package-lock.json", "app/runtime-contract.test.js"] {
+        for file in ["app/package-lock.json", "app/runtime-contract.test.js", "app/scripts/check.cjs", "src/main.js", "app/dist/content.js"] {
             assert!(super::delegate_boundary(None, 375, &[file.into()]).is_some(), "{file}");
         }
         assert!(super::delegate_boundary(None, 375, &["README.md".into(), "src/main.rs".into()]).is_some());
@@ -1491,7 +1658,7 @@ mod tests {
     }
     #[test]
     fn worker_task_update_only_own_diagnosis_fields() {
-        let allowed = serde_json::json!({"H":"진단", "I":"오류", "D":"[🛣] 점검", "J":"[🛣] 원인"}).as_object().unwrap().clone();
+        let allowed = serde_json::json!({"H":"진단", "I":"오류", "D":"[🛣] 점검", "J":"[🛣] 원인", "C":"src/records.rs:77"}).as_object().unwrap().clone();
         assert!(super::worker_update_allowed(Some("worker"), Some(507), 507, &allowed));
         assert!(!super::worker_update_allowed(Some("worker"), Some(507), 508, &allowed));
         for fields in [serde_json::json!({"K":"목표"}), serde_json::json!({"H":"검증"})] {
@@ -1548,9 +1715,17 @@ mod tests {
 
     #[test]
     fn flow_wait_selects_only_submitted_row_from_completed_list() {
-        let row = |id, stage| Row { id, h: json!(stage), d: Value::Null, i: Value::Null, j: Value::Null, k: String::new() };
+        let row = |id, stage| Row { id, b: Value::Null, h: json!(stage), d: Value::Null, i: Value::Null, j: Value::Null, k: String::new() };
         let rows = vec![row(234, "완료"), row(269, "확인"), row(276, "검증")];
         assert_eq!(flow_submitted_ids(&rows), vec![276]);
+    }
+
+    #[test]
+    fn flow_wait_skips_unsubmitted_rows_without_hiding_submitted_ids() {
+        let row = |id, stage| Row { id, b: Value::Null, h: json!(stage), d: Value::Null, i: Value::Null, j: Value::Null, k: String::new() };
+        let rows = vec![row(548, "초안"), row(551, "검증"), row(552, "작업"), row(553, "검증")];
+        assert_eq!(flow_submitted_ids(&rows), vec![551, 553]);
+        assert_eq!(super::flow_skipped(&rows), vec![json!({"id":548,"H":"초안"}), json!({"id":552,"H":"작업"})]);
     }
 
     #[test]
@@ -1622,10 +1797,11 @@ mod tests {
         std::fs::write(dir.join("sub/keep.txt"), "k").unwrap();
         git(&["add", "-A"]);
         git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"]);
+        let objects_before = std::process::Command::new("git").arg("-C").arg(&dir).args(["count-objects", "-v"]).output().unwrap().stdout;
         std::fs::write(dir.join("sub/keep.txt"), "dirty before").unwrap();
         let project = dir.join("sub");
         let prepared = super::snapshot(&project).unwrap();
-        assert_eq!(prepared.len(), 40);
+        assert!(prepared.contains("keep.txt"));
         assert!(super::changed_since(&project, &prepared).is_empty());
         std::fs::write(project.join("a.txt"), "changed").unwrap();
         std::fs::write(project.join("new.txt"), "n").unwrap();
@@ -1636,6 +1812,8 @@ mod tests {
         let index = std::fs::read(dir.join(".git/index")).unwrap();
         let _ = super::snapshot(&project);
         assert_eq!(std::fs::read(dir.join(".git/index")).unwrap(), index, "the real index stays untouched");
+        let objects_after = std::process::Command::new("git").arg("-C").arg(&dir).args(["count-objects", "-v"]).output().unwrap().stdout;
+        assert_eq!(objects_after, objects_before, "snapshot leaves no objects in the repository");
         let _ = std::fs::remove_dir_all(dir);
     }
 

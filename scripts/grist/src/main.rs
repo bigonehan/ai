@@ -1,9 +1,14 @@
 use grist::api::{self, Exit, R, PROJECT_TABLE, TASK_TABLE};
-use grist::{gate, records, task, util};
+use grist::{gate, records, task, timing, util};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 mod help;
+
+fn timed_exit(code: i32) -> ! {
+    timing::finish(code);
+    std::process::exit(code)
+}
 
 struct ParsedArgs {
     command: String,
@@ -21,14 +26,14 @@ fn help_hint(command: Option<&str>) -> String {
 fn usage_error<T>(msg: &str) -> R<T> {
     let command = std::env::args().nth(1).unwrap_or_default();
     eprintln!("error: {msg}{}", help_hint(Some(&command)));
-    std::process::exit(2);
+    timed_exit(2);
 }
 
 fn parse_cli(argv: &[String]) -> R<ParsedArgs> {
     if argv.is_empty() || argv.iter().any(|a| a == "-h" || a == "--help") {
         if argv.iter().any(|a| a == "-h" || a == "--help") {
             match help::render(argv.first().filter(|s| !s.starts_with('-')).map(String::as_str)) {
-                Ok(output) => { println!("{output}"); std::process::exit(0); }
+                Ok(output) => { println!("{output}"); timed_exit(0); }
                 Err(message) => return usage_error(&message),
             }
         }
@@ -41,7 +46,7 @@ fn parse_cli(argv: &[String]) -> R<ParsedArgs> {
     while i < argv.len() {
         let arg = &argv[i];
         if let Some(rest) = arg.strip_prefix("--") {
-            if command == "task" && rest == "cached" {
+            if (command == "task" && rest == "cached") || (command == "task-confirm" && rest == "partial") {
                 flags.entry(rest.to_string()).or_default();
                 i += 1;
                 continue;
@@ -71,7 +76,7 @@ impl ParsedArgs {
             .map(|s| s.as_str())
             .ok_or_else(|| {
                 eprintln!("error: the following arguments are required: {name}");
-                std::process::exit(2);
+                timed_exit(2);
             })
     }
 
@@ -79,7 +84,7 @@ impl ParsedArgs {
         let s = self.pos_str(idx, name)?;
         s.parse::<i64>().map_err(|_| {
             eprintln!("error: argument {name}: invalid int value: '{s}'");
-            std::process::exit(2);
+            timed_exit(2);
         })
     }
 
@@ -90,7 +95,7 @@ impl ParsedArgs {
     fn flag_req(&self, name: &str) -> R<&str> {
         self.flag_opt(name).ok_or_else(|| {
             eprintln!("error: the following arguments are required: --{name}");
-            std::process::exit(2);
+            timed_exit(2);
         })
     }
 
@@ -98,7 +103,7 @@ impl ParsedArgs {
         let s = self.flag_req(name)?;
         s.parse::<i64>().map_err(|_| {
             eprintln!("error: argument --{name}: invalid int value: '{s}'");
-            std::process::exit(2);
+            timed_exit(2);
         })
     }
 
@@ -108,7 +113,7 @@ impl ParsedArgs {
         };
         let n = s.parse::<i64>().map_err(|_| {
             eprintln!("error: argument --{name}: invalid int value: '{s}'");
-            std::process::exit(2);
+            timed_exit(2);
         })?;
         Ok(Some(n))
     }
@@ -121,7 +126,7 @@ impl ParsedArgs {
         for s in list {
             let n = s.parse::<i64>().map_err(|_| {
                 eprintln!("error: argument --{name}: invalid int value: '{s}'");
-                std::process::exit(2);
+                timed_exit(2);
             })?;
             out.push(n);
         }
@@ -193,7 +198,15 @@ fn run(argv: &[String]) -> R<Value> {
         "delete" => {
             let table = args.pos_str(0, "table")?;
             let row_id = args.flag_i64_req("id")?;
-            api::delete(table, row_id)
+            let project = match (table, args.flag_opt("project")) {
+                (TASK_TABLE, Some(project)) => Some(records::owned(project, row_id)?.0),
+                _ => None,
+            };
+            let mut result = api::delete(table, row_id)?;
+            if let (Some(project_dir), Value::Object(map)) = (project, &mut result) {
+                map.insert("changes".into(), serde_json::json!(records::remove_task_from_changes(&project_dir, row_id)?));
+            }
+            Ok(result)
         }
         "column-update" => {
             let table = args.pos_str(0, "table")?;
@@ -212,7 +225,7 @@ fn run(argv: &[String]) -> R<Value> {
             if args.flags.contains_key("cached") {
                 if let Some(line) = cached_row_output(&project, row_id)? {
                     println!("{line}");
-                    std::process::exit(0);
+                    timed_exit(0);
                 }
             }
             let recs = api::get(TASK_TABLE, Some(&[row_id]), None, None)?;
@@ -221,7 +234,7 @@ fn run(argv: &[String]) -> R<Value> {
                 write_row_cache(&project, row_id, &line)?;
                 if args.flags.contains_key("cached") {
                     println!("{line}");
-                    std::process::exit(0);
+                    timed_exit(0);
                 }
             }
             Ok(Value::Array(recs))
@@ -234,9 +247,10 @@ fn run(argv: &[String]) -> R<Value> {
             if !gate::worker_update_allowed(
                 std::env::var("T26_ROLE").ok().as_deref(), gate::worker_row(), row_id, &fields
             ) {
-                return api::fail("actor", "worker task-update may write only D, I, J and H=진단/교정 on its own row");
+                return api::fail("actor", "worker task-update may write only C, D, I, J and H=진단/교정 on its own row");
             }
             records::single_line_cells(&mut fields)?;
+            records::check_cause_evidence(&fields)?;
             records::check_symbol_fields(&fields)?;
             records::check_diagnosis_fields(&fields)?;
             let title_project = if fields.contains_key("B") {
@@ -260,6 +274,8 @@ fn run(argv: &[String]) -> R<Value> {
         "task-add" => {
             let fields = parse_fields_obj(args.flag_req("fields")?, "--fields")?;
             api::validate_task_fields(&fields)?;
+            records::check_cause_evidence(&fields)?;
+            records::check_symbol_fields(&fields)?;
             let project = args.flag_opt("project");
             let kind = args.flag_opt("type");
             if let Some(k) = kind {
@@ -274,7 +290,8 @@ fn run(argv: &[String]) -> R<Value> {
             };
             let checked = match (project, goal_args) {
                 (Some(p), Some((file, summary))) => {
-                    Some(gate::check_goal(&util::resolve(std::path::Path::new(p)), None, file, summary)?)
+                    let title = fields.get("B").and_then(Value::as_str);
+                    Some(gate::check_goal_for_title(&util::resolve(std::path::Path::new(p)), None, title, file, summary)?)
                 }
                 _ => None,
             };
@@ -310,7 +327,7 @@ fn run(argv: &[String]) -> R<Value> {
                 return api::fail("records", "no `# 작업`/`# 완료` list in .ai/changes");
             }
             println!("{lists}");
-            std::process::exit(0);
+            timed_exit(0);
         }
         "request" => {
             let project = args.flag_req("project")?;
@@ -319,13 +336,13 @@ fn run(argv: &[String]) -> R<Value> {
                 return api::fail("records", "no `# 요청` block in .ai/changes; record the request with request-record");
             }
             println!("{block}");
-            std::process::exit(0);
+            timed_exit(0);
         }
         "goal" => {
             let row_id = args.pos_i64(0, "row_id")?;
             let project = args.flag_req("project")?;
             println!("{}", records::goal_text(project, row_id)?);
-            std::process::exit(0);
+            timed_exit(0);
         }
         "task-goal" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -384,6 +401,18 @@ fn run(argv: &[String]) -> R<Value> {
             let line = args.flag_req("line")?;
             records::task_memo(project, row_id, line)
         }
+        "improve-note" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            let text = args.flag_req("text")?;
+            records::improve_record(project, row_id, "note", text)
+        }
+        "improve-done" => {
+            let row_id = args.pos_i64(0, "row_id")?;
+            let project = args.flag_req("project")?;
+            let text = args.flag_req("text")?;
+            records::improve_record(project, row_id, "done", text)
+        }
         "task-step" => {
             let row_id = args.pos_i64(0, "row_id")?;
             let project = args.flag_req("project")?;
@@ -402,12 +431,15 @@ fn run(argv: &[String]) -> R<Value> {
             let check = args.flag_req("check")?;
             let detail = args.flag_req("detail")?;
             let can = args.flag_opt("can");
+            let docs = args.flag_opt("docs");
+            let partial = args.flags.contains_key("partial");
+            let reason = args.flag_opt("reason");
             let evidence_file = args.flag_req("evidence")?;
             let evidence = match std::fs::read_to_string(evidence_file) {
                 Ok(text) => text,
                 Err(e) => return api::fail("validation", format!("--evidence {evidence_file}: {e}")),
             };
-            records::task_confirm(project, row_id, summary, check, detail, &evidence, can)
+            records::task_confirm(project, row_id, summary, check, detail, &evidence, can, partial, reason, docs)
         }
         "request-record" => {
             let project = args.flag_req("project")?;
@@ -488,14 +520,17 @@ fn with_row_state(mut record: Value, project: Option<&str>) -> R<Value> {
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    let known: Vec<&str> = help::COMMANDS.iter().map(|item| item.name).collect();
+    timing::start(argv.first().map(String::as_str), &known);
     let hint = help_hint(argv.first().map(String::as_str));
     match run(&argv) {
         Ok(value) => {
             println!("{}", util::pretty(&value));
+            timing::finish(0);
         }
         Err(Exit::Fail(boundary, message)) => {
             eprintln!("{}", api::fail_line(&boundary, &format!("{message}{hint}")));
-            std::process::exit(2);
+            timed_exit(2);
         }
         Err(Exit::Gate(payload)) => {
             let mut payload = payload;
@@ -505,11 +540,11 @@ fn main() {
                 obj.insert(key.into(), Value::String(format!("{prior}{hint}")));
             }
             eprintln!("{}", util::pretty(&payload));
-            std::process::exit(2);
+            timed_exit(2);
         }
         Err(Exit::Other(err)) => {
             eprintln!("{err}{hint}");
-            std::process::exit(1);
+            timed_exit(1);
         }
     }
 }
@@ -538,6 +573,8 @@ mod tests {
     fn help_uses_validation_formats() {
         let update = super::help::render(Some("task-update")).unwrap();
         assert!(update.contains(&super::records::error_line_format()));
+        assert!(update.contains("J(원인)를 기록할 때 같은 --fields에 비어 있지 않은 C(근거)가 필요"));
+        assert!(super::help::render(Some("task-add")).unwrap().contains("C(근거)가 필요"));
         let confirm = super::help::render(Some("task-confirm")).unwrap();
         assert!(confirm.contains(super::records::EVIDENCE_FORMAT));
         assert!(confirm.contains(super::records::CAN_FORMAT));

@@ -13,6 +13,8 @@ pub const CONFIRMED_STAGE: &str = "확인";
 pub const STAGE_START_CARD: &str = "~/ai/skills/manage-project/references/stage-start.md";
 pub const STAGE_WORK_CARD: &str = "~/ai/skills/manage-project/references/stage-work.md";
 pub const STAGE_VERIFY_CARD: &str = "~/ai/skills/manage-project/references/stage-verify.md";
+/// `task-confirm` 뒤 다음 카드: 행 확인마다 `improve_process`로 `## 개선 요구`를 처리한다.
+pub const IMPROVE_PROCESS_CARD: &str = "~/ai/skills/improve_process/SKILL.md";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -224,7 +226,10 @@ impl TaskStore for GristStore {
             return Ok(());
         }
         let summary = ctx.project_dir.as_deref().and_then(|dir| gate::flow_summary(dir, ctx.raw_id));
-        api::update(TASK_TABLE, ctx.raw_id, &gate::confirmed_fields(CONFIRMED_STAGE, summary.as_deref()))?;
+        let partial = ctx.project_dir.as_deref().and_then(|dir|
+            flow_confirmation_in_text(&changes_text(dir), ctx.raw_id).ok().flatten()
+        ).is_some_and(|text| partial_confirmation(&text));
+        api::update(TASK_TABLE, ctx.raw_id, &gate::confirmed_fields(CONFIRMED_STAGE, if partial { None } else { summary.as_deref() }))?;
         ctx.result = json!({"id": ctx.raw_id, "H": CONFIRMED_STAGE});
         Ok(())
     }
@@ -264,6 +269,14 @@ pub fn check(project_dir: &Path, raw_id: i64) -> R<CheckOutcome> {
     let goal_count = match_goal_count(&goal);
     let judgment = gate::jev("match", Some(raw_id), &[("goal", &goal), ("output", &output)]);
     require_j1_pass(&judgment, goal_count).map_err(|e| Exit::Fail("COMPLETE_TASK".into(), format!("#{raw_id} {e}")))?;
+    // manage-project references/plan.md §3「마감 (요청 대조)」의 기계 강제(261110 #813에서 이 절차를 건너뛰고
+    // 목표만 맞춘 채 `확인`): 같은 근거를 changes `# 요청` 블록과도 J1로 대조한다.
+    if let Some(request_goal) = request_as_goal(project_dir, raw_id) {
+        let count = match_goal_count(&request_goal);
+        let judgment = gate::jev("match", Some(raw_id), &[("goal", &request_goal), ("output", &output)]);
+        require_j1_pass(&judgment, count).map_err(|e| Exit::Fail("COMPLETE_TASK".into(),
+            format!("#{raw_id} 요청 목적 미충족({e}) — changes `# 요청`의 요구가 실제 결과 근거로 확인되지 않았어요")))?;
+    }
     let mut ctx = TaskCtx { project_dir: Some(project_dir.to_path_buf()), raw_id, stage, ..Default::default() };
     TaskChain::standard(Step::Check).run(Step::Check, &mut ctx)?;
     Ok(CheckOutcome::Completed)
@@ -275,7 +288,10 @@ fn code_evidence(project_dir: &Path, raw_id: i64, stage: &str, state: &Map<Strin
     }
     let light_row = matches!(state.get("submit").and_then(|s| s.get("changed")).and_then(Value::as_u64), Some(1 | 2));
     if !light_row && !util::truthy(state.get("flow_wait")) {
-        return api::fail("TEST", format!("#{raw_id} flow-wait evidence missing"));
+        let reason = gate::flow_wait_missing(project_dir, raw_id)
+            .map(|item| format!("{item} 없음 — grist flow-wait 출력의 missing 참조"))
+            .unwrap_or_else(|| "flow-wait 미실행 또는 저장 안 됨 — grist flow-wait --project <dir> 실행".to_string());
+        return api::fail("TEST", format!("#{raw_id} flow-wait evidence missing: {reason}"));
     }
     state
         .get("submit")
@@ -288,10 +304,14 @@ fn code_evidence(project_dir: &Path, raw_id: i64, stage: &str, state: &Map<Strin
         .ok_or_else(|| Exit::Fail("TEST".into(), format!("#{raw_id} missing flow confirmation after latest verification")))?;
     let (evidence, rest) = split_goal_evidence(flow.lines())
         .ok_or_else(|| Exit::Fail("TEST".into(), format!("#{raw_id} {EVIDENCE_MISSING}")))?;
-    if let Some(marker) = runtime_evidence_marker(project_dir, raw_id, &flow) {
+    if !partial_confirmation(&flow) { if let Some(marker) = runtime_evidence_marker(project_dir, raw_id, &flow) {
         return api::fail("TEST", format!("#{raw_id} runtime confirmation contains unverified evidence: {marker}"));
-    }
+    } }
     Ok(format!("# 목표별 근거\n{evidence}\n# 전체 흐름 확인 증거\n{rest}"))
+}
+
+pub(crate) fn partial_confirmation(evidence: &str) -> bool {
+    evidence.lines().any(|line| line.starts_with("- 부분 확인 : ") && !line["- 부분 확인 : ".len()..].trim().is_empty())
 }
 
 /// Reject incomplete runtime checks only for submitted code rows in projects with a runtime.
@@ -361,9 +381,18 @@ pub fn lists_text(project_dir: &Path) -> String {
     lists_in_text(&latest_listing(project_dir))
 }
 
-/// `# 완료` IDs of the latest changes record that lists any work.
+/// `# 완료` IDs across every changes record, so rows finished in an earlier daily file still count after midnight.
 pub fn completed_ids(project_dir: &Path) -> Vec<i64> {
-    section_ids_in_text(&latest_listing(project_dir), "# 완료")
+    let mut ids = Vec::new();
+    for record in util::glob(&project_dir.join(".ai").join("changes"), "", ".md").into_iter().rev() {
+        let text = std::fs::read_to_string(&record).unwrap_or_default();
+        for id in section_ids_in_text(&text, "# 완료") {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
 }
 
 /// `# 작업` (still open) IDs of the latest changes record that lists any work.
@@ -396,7 +425,45 @@ pub fn section_ids_in_text(text: &str, section: &str) -> Vec<i64> {
 
 /// A `[✒️]` rule/Skill-text row that never reached `task-submit`.
 fn text_only_row(project_dir: &Path, raw_id: i64) -> bool {
-    text_only_in(&changes_text(project_dir), raw_id)
+    if gate::preparation_of(&gate::gate_load(project_dir, raw_id)).is_some() { return false; }
+    let text = changes_text(project_dir);
+    text_only_in(&text, raw_id) || documented_text_only_in(project_dir, &text, raw_id)
+}
+
+pub(crate) fn validated_docs(project_dir: &Path, docs: &str) -> Result<Vec<String>, String> {
+    let root = project_dir.canonicalize().map_err(|_| "project directory missing".to_string())?;
+    let external_roots = ["/home/tree/ai/skills", "/home/tree/ai/rules"]
+        .map(|path| Path::new(path).canonicalize().map_err(|_| format!("--docs allowed root missing: {path}")))
+        .into_iter().collect::<Result<Vec<_>, _>>()?;
+    let paths: Vec<_> = docs.split(',').map(str::trim).collect();
+    if paths.is_empty() || paths.iter().any(|path| path.is_empty()) { return Err("--docs needs existing .md paths".into()); }
+    for path in &paths {
+        let candidate = Path::new(path);
+        if candidate.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            return Err(format!("--docs requires an existing .md file: {path}"));
+        }
+        let allowed_external = ["/home/tree/ai/skills", "/home/tree/ai/rules"]
+            .iter().any(|allowed| candidate.starts_with(allowed));
+        if candidate.is_absolute() && !allowed_external {
+            return Err(format!("--docs absolute path outside allowed roots: {path}"));
+        }
+        let resolved = if candidate.is_absolute() { candidate.to_path_buf() } else { project_dir.join(candidate) }
+            .canonicalize().map_err(|_| format!("--docs file missing: {path}"))?;
+        let within_allowed = if candidate.is_absolute() {
+            external_roots.iter().any(|allowed| resolved.starts_with(allowed))
+        } else { resolved.starts_with(&root) };
+        if !within_allowed || !resolved.is_file() {
+            return Err(format!("--docs file outside project or not a file: {path}"));
+        }
+    }
+    Ok(paths.into_iter().map(str::to_string).collect())
+}
+
+fn documented_text_only_in(project_dir: &Path, text: &str, raw_id: i64) -> bool {
+    if text.lines().any(|line| line.trim() == format!("#### 검증 (#{raw_id})")) { return false; }
+    latest_block(text, &format!("#### 확인 (#{raw_id})"), None)
+        .and_then(|lines| lines.into_iter().find_map(|line| line.strip_prefix("- 문서 : ").map(str::to_string)))
+        .is_some_and(|docs| validated_docs(project_dir, &docs).is_ok())
 }
 
 fn text_only_in(text: &str, raw_id: i64) -> bool {
@@ -456,9 +523,10 @@ pub fn confirmation_output_in_text(text: &str, raw_id: i64) -> Result<Option<Str
     let success = lines.iter().any(|line| line == "결과 : 성공");
     let detail = lines.iter().find_map(|line| line.strip_prefix("상세 :").map(str::trim))
         .filter(|line| !line.is_empty() && *line != "-");
+    let docs = lines.iter().find_map(|line| line.strip_prefix("- 문서 : ").map(str::trim));
     match (summary, check, success, detail) {
-        (Some(summary), Some(check), true, Some(detail)) if check.contains("충돌") || detail.contains("충돌") => {
-            Ok(Some(format!("# 목표별 근거\n{evidence}\n# 확인 증거\n요약 : {summary}\n검사 : {check}\n결과 : 성공\n상세 : {detail}")))
+        (Some(summary), Some(check), true, Some(detail)) if check.contains("충돌") || detail.contains("충돌") || docs.is_some() => {
+            Ok(Some(format!("# 목표별 근거\n{evidence}\n# 확인 증거\n요약 : {summary}\n검사 : {check}\n결과 : 성공\n상세 : {detail}\n문서 : {}", docs.unwrap_or(""))))
         }
         _ => Err("confirmation evidence needs summary, successful check, detail, and conflict inspection".into()),
     }
@@ -493,9 +561,8 @@ pub fn require_j1_pass(judgment: &Value, goal_count: usize) -> Result<(), String
     let mode = judgment.get("mode").and_then(Value::as_str);
     let valid_shape = judgment.get("ok") == Some(&Value::Bool(true))
         && judgment.get("command").and_then(Value::as_str) == Some("match")
-        && matches!(mode, Some("shadow" | "enforce"));
+        && mode == Some("enforce");
     if !valid_shape { return Err("invalid J1 response".into()); }
-    if mode == Some("shadow") { return Ok(()); }
     let Some(items) = judgment.get("items").and_then(Value::as_array) else { return Err("invalid J1 response".into()) };
     if items.len() != goal_count { return Err("invalid J1 response".into()); }
     if judgment.get("verdict").and_then(Value::as_str) != Some("pass") {
@@ -635,13 +702,13 @@ mod tests {
     }
 
     #[test]
-    fn completed_ids_use_last_record_that_lists_work() {
+    fn completed_ids_include_earlier_daily_records() {
         let dir = tmp_project("done");
         std::fs::write(dir.join(".ai/changes/261022.a.md"), "# 작업\n\n# 완료\n1. [✒️] a (#5)\n\n# 진행\n").unwrap();
         std::fs::write(dir.join(".ai/changes/261023.b.md"), "# 작업\n1. [📐] b (#6)\n\n# 완료\n1. [✒️] c (#7)\n\n# 진행\n").unwrap();
-        assert_eq!(completed_ids(&dir), vec![7]);
+        assert_eq!(completed_ids(&dir), vec![7, 5]);
         std::fs::write(dir.join(".ai/changes/261024.c.md"), "# 작업\n\n# 완료\n\n# 진행\n").unwrap();
-        assert_eq!(completed_ids(&dir), vec![7]);
+        assert_eq!(completed_ids(&dir), vec![7, 5]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -669,6 +736,54 @@ mod tests {
         assert!(text_only_in(doc, 9));
         assert!(!text_only_in(&format!("{doc}#### 검증 (#9)\n"), 9));
         assert!(!text_only_in("## [구현] [📐] 체인 (#9)\n", 9));
+    }
+
+    #[test]
+    fn text_only_docs_need_existing_md_files_without_preparation_or_verification() {
+        let dir = tmp_project("text-only-docs");
+        std::fs::write(dir.join("guide.md"), "# guide\n").unwrap();
+        std::fs::write(dir.join("other.txt"), "text\n").unwrap();
+        let body = "## [구현] [🚥] Skill 문서 (#9)\n#### 확인 (#9)\n- 요약 : [🏗️] 입력 ⇒ 문서\n- 문서 : guide.md\n- [x] 확인\n  결과 : 성공\n  상세 : 문서 값\n- 근거 1 : 실제 문서\n";
+        assert!(super::documented_text_only_in(&dir, body, 9));
+        assert!(super::confirmation_output_in_text(body, 9).unwrap().unwrap().contains("문서 : guide.md"));
+        assert!(!super::documented_text_only_in(&dir, &body.replace("guide.md", "other.txt"), 9));
+        assert!(!super::documented_text_only_in(&dir, &body.replace("guide.md", "missing.md"), 9));
+        assert!(!super::documented_text_only_in(&dir, &format!("{body}#### 검증 (#9)\n"), 9));
+        assert_eq!(super::validated_docs(&dir, "guide.md,missing.md").unwrap_err(), "--docs file missing: missing.md");
+        std::fs::write(dir.join(".ai/changes/261023.light.md"), body).unwrap();
+        assert!(super::text_only_row(&dir, 9));
+        let state = serde_json::json!({"ready": {"test": "cargo test"}}).as_object().unwrap().clone();
+        crate::gate::gate_save(&dir, 9, &state).unwrap();
+        assert!(!super::text_only_row(&dir, 9));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn text_only_docs_allow_skill_and_rule_sources_but_reject_other_absolute_paths() {
+        let dir = tmp_project("text-only-external-docs");
+        let skill = "/home/tree/ai/skills/role-delegator/SKILL.md";
+        let rule = "/home/tree/ai/rules/Agents.md";
+        assert_eq!(super::validated_docs(&dir, &format!("{skill},{rule}")).unwrap(), vec![skill, rule]);
+        let body = format!("## [구현] [🚥] Skill 문서 (#9)\n#### 확인 (#9)\n- 문서 : {skill},{rule}\n");
+        assert!(super::documented_text_only_in(&dir, &body, 9));
+        let other_absolute = dir.join("other.md");
+        std::fs::write(&other_absolute, "# other\n").unwrap();
+        assert!(super::validated_docs(&dir, other_absolute.to_str().unwrap()).unwrap_err().contains("outside allowed roots"));
+        assert!(super::validated_docs(&dir, "/home/tree/ai/skills/role-delegator/SKILL.txt").unwrap_err().contains(".md"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flow_wait_message_distinguishes_missing_record_from_unsaved_gate() {
+        let dir = tmp_project("flow-wait-message-state");
+        let path = dir.join(".ai/changes/261023.light.md");
+        let state = code_state(Some(3));
+        let without = exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &state).unwrap_err());
+        assert!(without.contains("확인 블록 없음"));
+        std::fs::write(&path, "#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 값\n- 근거 1 : 값\n").unwrap();
+        let unsaved = exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &state).unwrap_err());
+        assert!(unsaved.contains("flow-wait 미실행 또는 저장 안 됨") && !unsaved.contains("누락"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -739,6 +854,28 @@ mod tests {
     }
 
     #[test]
+    fn partial_confirm_check_accepts_marked_stop_and_rejects_unmarked_stop() {
+        let dir = tmp_project("partial-confirm-check");
+        std::fs::write(dir.join("AGENTS.md"), "runtime : 브라우저 확장\n").unwrap();
+        let path = dir.join(".ai/changes/261023.light.md");
+        let base = "#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 일부 결과 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 검증 중단\n";
+        std::fs::write(&path, base).unwrap();
+        assert!(exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err()).contains("unverified evidence"));
+        std::fs::write(&path, base.replace("- [x]", "- 부분 확인 : 사용자 지시로 검증 중단\n- [x]")).unwrap();
+        assert!(code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn flow_wait_missing_check_message_names_lookup() {
+        let dir = tmp_project("flow-wait-message");
+        let err = code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(3))).unwrap_err();
+        let message = exit_message(&err);
+        assert!(message.contains("#303") && message.contains("missing 참조") && message.contains("확인 블록"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn zero_files_uses_normal_path() {
         let dir = tmp_project("zero-files");
         for count in [Some(0), None] {
@@ -761,15 +898,60 @@ mod tests {
     }
 
     #[test]
-    fn j1_shadow_passes_and_enforce_requires_each_goal_pass() {
+    fn j1_enforce_requires_each_goal_pass() {
         assert_eq!(match_goal_count("- [기능] a\n2. [수정] b\n- 메모\n3. [연결]"), 2);
         let base = |mode: &str, verdict: &str, items: Value| json!({"ok": true, "command": "match", "mode": mode, "verdict": verdict, "items": items});
-        assert!(require_j1_pass(&base("shadow", "uncertain", json!([])), 1).is_ok());
         let pass = json!([{"name": "g1", "verdict": "pass"}, {"name": "g2", "verdict": "pass"}]);
-        assert!(require_j1_pass(&base("enforce", "pass", pass), 2).is_ok());
+        assert!(require_j1_pass(&base("enforce", "pass", pass.clone()), 2).is_ok());
+        assert!(require_j1_pass(&base("other", "pass", pass), 2).is_err());
+        let one_uncertain = json!([{"name": "g1", "verdict": "pass"}, {"name": "g2", "verdict": "uncertain"}]);
+        assert!(require_j1_pass(&base("enforce", "uncertain", one_uncertain), 2).is_err());
         let one_fail = json!([{"name": "g1", "verdict": "pass"}, {"name": "g2", "verdict": "fail"}]);
         assert!(require_j1_pass(&base("enforce", "pass", one_fail), 2).is_err());
         assert!(require_j1_pass(&json!({"ok": false, "boundary": "jev-timeout"}), 1).is_err());
         assert!(require_j1_pass(&base("enforce", "pass", json!([])), 0).is_err());
+    }
+}
+
+/// The row's changes `# 요청` block (`## 요구 사항` heading + `- [기호] 세부 사항` lines) as J1 goal lines.
+pub fn request_as_goal(project_dir: &Path, raw_id: i64) -> Option<String> {
+    let record = records::item_file(project_dir, raw_id)?;
+    let text = std::fs::read_to_string(record).ok()?;
+    let title = records::item_title_in(&text, raw_id);
+    let scoped = records::scope_request_block(&records::last_request_in(&text)?, title.as_deref());
+    request_goal_lines(&scoped)
+}
+
+fn request_goal_lines(block: &str) -> Option<String> {
+    let items: Vec<String> = block.lines().filter_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("## ").or_else(|| line.strip_prefix("- ")).map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
+    }).collect();
+    if items.is_empty() { return None; }
+    Some(items.iter().enumerate().map(|(i, t)| format!("{}. [기능] {t}", i + 1)).collect::<Vec<_>>().join("\n"))
+}
+
+#[cfg(test)]
+mod request_goal_tests {
+    #[test]
+    fn request_block_becomes_tagged_goal_lines() {
+        let block = "## n8n 결과를 다이어리에 적용\n- [🚿] 새 파일일 때만 호출\n";
+        let goal = super::request_goal_lines(block).unwrap();
+        assert_eq!(goal, "1. [기능] n8n 결과를 다이어리에 적용\n2. [기능] [🚿] 새 파일일 때만 호출");
+        assert_eq!(super::match_goal_count(&goal), 2);
+        assert!(super::request_goal_lines("").is_none());
+    }
+
+    #[test]
+    fn multi_detail_request_scopes_to_matching_row_title() {
+        let block = "## 전체 요약\n- [✒️] 첫째 세부 작업\n- [🚿] 둘째 세부 작업\n";
+        let scoped = crate::records::scope_request_block(block, Some("[✒️] 첫째 세부 작업"));
+        assert_eq!(scoped, "- [✒️] 첫째 세부 작업");
+        assert_eq!(
+            super::request_goal_lines(&scoped).as_deref(),
+            Some("1. [기능] [✒️] 첫째 세부 작업")
+        );
+        let unsplit = crate::records::scope_request_block("## 단일 요약\n- [✒️] 하나뿐인 세부\n", Some("[✒️] 하나뿐인 세부"));
+        assert!(unsplit.starts_with("## 단일 요약\n"));
     }
 }

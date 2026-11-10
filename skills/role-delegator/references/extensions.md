@@ -24,7 +24,7 @@ runtime : <진입지점 혹은 실행 방법 한줄 요약>
 
 ## 버전·빌드·배포
 
-- 제품 동작이 바뀐 흐름마다 patch를 `0.0.1` 올린다(세그먼트 `0`~`99`, `0.0.99 → 0.1.0`). 버전을 가진 파일(`package.json`, `manifest.json`, `public/manifest.json`, `Cargo.toml` 등)을 같은 버전으로 맞추고, 빌드 산출물 `manifest.json`의 버전도 확인한다. 문서·규칙만 바뀌면 올리지 않는다.
+- 제품 동작이 바뀐 흐름마다 patch를 `0.0.1` 올린다(세그먼트 `0`~`99`, `0.0.99 → 0.1.0`). 버전을 가진 파일(`package.json`, `manifest.json`, `public/manifest.json`, `Cargo.toml` 등)을 같은 버전으로 맞추고, 빌드 산출물 `manifest.json`의 버전도 확인한다. 문서·규칙만 바뀌면 올리지 않는다. 재현·조사·검증 실패 뒤 재배포는 같은 버전으로 하며, 흐름 행이 확인·완료되기 전 두 번째 올리기는 `main-edit-gate`가 거부한다.
 - 빌드 과정이 있으면 빌드 산출물만, 없으면 실행에 필요한 파일만 배포한다. 대상 폴더를 통째로 지우지 않고, 대상의 사용자 설정·런타임 데이터 파일은 덮어쓰거나 지우지 않는다.
 - 실행 중인 데스크톱 앱(Eagle, DaVinci Resolve, Blender 등)에 새 코드를 적재하는 일은 Agent가 PowerShell 등으로 직접 한다. 사용자 작업 중이라 직접 할 수 없을 때만 `$D`에 사유를 쓰고 사용자에게 요청한다. `$H`는 직접 바꾸지 않으며, 사용자가 Grist에서 `$H=완료`로 처리하면 그대로 종료한다.
 
@@ -37,5 +37,5 @@ runtime : <진입지점 혹은 실행 방법 한줄 요약>
 ## tip
 - 문서·규칙 전용 `task-confirm` 행에는 `.ai/gate/<id>.json`이나 `▶`/`○` 구현 단계가 없을 수 있다. `Complete_task`는 최신 성공 `#### 확인`의 실제 요약·상세와 `task-confirm --evidence`의 목표별 `- 근거 N` 줄을 증거와 완료 목록 재료로 사용하며, 근거가 없으면 차단한다.
 - `grist update`·`task-update`는 자동 `$H=완료`를 거부한다. `Complete_task`가 `# 완료` 이동과 `$H=확인`을 검증하고, 사용자 Grist 변경 뒤 `grist sync`가 최종 `$H=완료`를 최우선으로 반영해 항목을 `# 완료`로 옮기고 Obsidian `# 📍`를 기록한다. 테스트는 `GRIST_OBSIDIAN_FILE`로 Obsidian 사본을 대상으로 한다.
-- 여러 하위 프로젝트를 함께 고치는 작업은 코드 묶음마다 프로젝트별 Codex 대행자(`dispatch-agent --agent codex`)로 병렬 위임하고, 규칙·Skill 문서 묶음만 메인이 `rg -n`으로 필요한 줄만 읽어 직접 고친다. `grist` CLI의 필수 인자는 `access-grist` 명령 표를 참조해 재호출 없이 한 번에 실행한다.
-- 메인 세션의 토큰 낭비는 대부분 스크래치패드 `node $S/*.mjs`로 우회한 직접 브라우저 조작·로그 폴링(261030 cartoon_maker 메인 741회 호출)과 스크린샷 반복 Read(46장)에서 났다. main-edit-gate가 이를 막으므로 deny가 나오면 우회하지 말고 실측 조건을 넣어 `dispatch-agent`에 맡긴다.
+- 여러 하위 프로젝트를 함께 고치는 작업은 코드 묶음마다 프로젝트별 Codex 대행자(`dispatch-agent --agent codex`)로 병렬 위임하고, 규칙·Skill·hook·`~/ai/scripts` 작업 도구 묶음만 메인이 `rg -n`으로 필요한 줄만 읽어 직접 고친다. `grist` CLI의 필수 인자는 `access-grist` 명령 표를 참조해 재호출 없이 한 번에 실행한다.
+- 메인 세션의 토큰 낭비는 대부분 스크래치패드 `node $S/*.mjs`로 우회한 직접 브라우저 조작·로그 폴링(261030 cartoon_maker 메인 741회 호출)과 스크린샷 반복 Read(46장)에서 났다. main-edit-gate가 이를 막으므로 deny가 나오면 우회하지 말고 실측 조건을 넣어 `dispatch-agent`에 맡긴다. deny가 gate 자체 결함(작업 도구 수정·조회를 잘못 막음)이면 메인이 gate를 고친 뒤 이어 간다.

@@ -9,27 +9,35 @@ description: 검증자(T26_ROLE=verifier, `dispatch-agent --role verifier`로 �
 
 ## 따르는 순서
 1. 위임 프롬프트(행마다 사용자 입력과 요구 결과, `dispatch-agent`가 붙인 `runtime :`·`row:` 줄)
-2. 이 Skill
-3. 프로젝트 `.ai/docs/role-verifier.md`(위임 프롬프트 `역할 문서:` 줄, 있을 때만). 그 프로젝트의 검증자 전용 절차(실앱 적재·게이트·CDP 주의점)다.
+2. 이 Skill과 위임 프롬프트 `읽을 문서:` 줄의 파일(모드 1개 + 런타임 1개, `dispatch-agent`가 아래 표대로 붙임). 줄이 없으면 아래 표로 고른다
+3. 프로젝트 `.ai/docs/role-verifier.md`(위임 프롬프트 `역할 문서:` 줄, 있을 때만). 그 프로젝트의 검증자 전용 절차다.
 4. `verify-work`(final runtime 단계, 5분 병목 로깅)
-5. 브라우저·위젯·확장은 `run-cdp`(공용 CDP `127.0.0.1:9222`, 배포본 로드 `run_cdp --replace` 포함), 사이트 조작은 `access-stagehand`
 
-## 하는 일
-- 위임자가 배포한 산출물로 시작한다. 실행 중인 런타임 버전이 배포 버전과 같은지 먼저 대조한다.
-- 행마다 사용자 입력(텍스트 입력, 버튼 클릭, 명령 실행 등 실제 시작 동작)을 그대로 수행하고, 화면·반환값·파일·소비자 결과가 요구 결과와 같은지 본다.
-- 결과를 행마다 `grist task-hidden <id> --project <dir> --purpose "<사용자 입력 → 요구 결과 라벨>" --test "<재실행 가능한 확인 명령>"`으로 기록한다.
+## 모드·런타임 라우팅
 
-- 화면 표시(`🔳`)와 사용자 흐름 판정은 검증자 몫이다. 대행자의 `rule_schema` 판정 타입은 다시 확인하지 않는다.
-- 웹·위젯·확장은 실제 배포 런타임(`runtime :`)과 공용 CDP 화면에서 시작 동작부터 화면 렌더링(`img.naturalWidth > 0`, UI 상태)과 최종 소비 결과까지 실행한다. 버전이 있는 런타임은 이번 시작 동작·최종 효과에 참여한 실행 주체의 버전을 한 번 대조하고, 화면이 참여하지 않는 서비스 흐름은 UI를 열지 않는다.
-- 제품 명령(초기화·생성 버튼 등)이 만드는 파일·문서는 미리 Vault·템플릿을 탐색하지 않고 명령을 실행해 생긴 경로를 확인한다. 사용자가 지정한 원인은 다시 입증하지 않는다.
-- Stagehand/CDP 실행은 `STAGEHAND_STEP_LOG=1`로 `[stagehand-step]`·`[stagehand-bottleneck]` 로그를 남긴다. 5분을 넘기면 타임아웃으로 덮지 말고 중간 로그로 병목 경계를 찾아 마지막 줄에 보고한다.
-- 사용자 전용 동작(로그인·결제·비가역 외부 전송·OS 앱 조작)이 필요하면 실행하지 않고 `실패 — <행>: 사용자 동작 필요 <동작>`으로 끝낸다.
-- `task-hidden --test`는 `flow-wait`이 위임자 환경에서 다시 실행한다. 호출자 역할에 따라 결과가 달라지는 사례(권한 거부 등)는 `env T26_ROLE=… T26_ROW=… T26_ROWS=…`를 명령에 명시한다.
+| 조건 | 읽을 파일 |
+|---|---|
+| 프롬프트가 "관측"(오류 지적, 수정 전 1회) | `references/observe.md` |
+| 그 밖(기능 구현 뒤·오류 수정 뒤 확인) | `references/flow.md` |
+| 머리줄이 `skill=resolve-deadlock` | `resolve-deadlock`의 분석 검증자 절차만(모드·런타임 파일, `task-hidden`·readback 줄 대신 프롬프트의 보고서) |
+| `runtime :` web·위젯·확장 | `references/runtime-web.md` + `run-cdp` Skill(공용 CDP 브라우저 확인은 이 경우에만 호출) |
+| `runtime :` app | `references/runtime-app.md` |
+| `runtime :` cli | `references/runtime-cli.md` |
+
+## readback
+- `readback`은 최종 소비자(브라우저 화면·Blender Scene·Resolve·파일 등)에서 직접 읽은 값이다. 메시지·mock 결과로 채우지 않는다.
+- 행마다 `[verify-step] readback consumer=<소비자> value=<직접 읽은 값>` 한 줄을 이번 `<행>.verify.log`에 출력한다. 이 줄이 없으면 `task-complete`가 통과를 거부한다.
+- 사용자 확인으로 넘기는 것은 로그인·결제·비가역 외부 전송·OS 앱 조작뿐이다. 필요하면 실행하지 않고 `실패 — <행>: 사용자 동작 필요 <동작>`으로 끝낸다. 사용자 대기 사유가 `$D`에 `[🏷]`로 기록되면 실행 기록 게이트를 건너뛴다.
+
+## Stop gate
+
+The verifier Stop gate reads the current `<row>.verify.log` according to `AGENTS.md` `# 상태` → `### 실행` → `runtime :`. Web requires the Stagehand CDP attach completion record; app requires the runtime start command, its successful tool output, and one app log line; CLI requires an executed command and successful tool output. Unknown runtime types fail closed. A `[🏷]` user waiting reason in Table26 `$D` bypasses this execution gate.
 
 ## 하지 않는 일
 - 제품 소스·테스트·버전 파일 수정, 빌드·배포(위임자 몫).
 - `$H` 변경, `$I`/`$J` 기록, `task-submit`·`task-confirm`·`flow-wait`·`task-complete`, 요청·목표 작성.
-- Mock·빌드 성공·ACK·로그 존재만으로 통과 판정, 확장 런타임 함수 몽키패치·합성 이벤트로 소비자 우회, sandbox 우회.
+- Mock·빌드 성공·ACK·로그 존재만으로 통과 판정, sandbox 우회.
+- 사용자 시작 동작을 건너뛰고 중간 경계(Webhook·API·n8n)를 curl 등으로 직접 호출해 판정하기. 중간 경계 연결은 구현 직후 제출점검·대행자 몫이고, 검증자는 시작 동작이 낳은 호출만 근거로 쓴다.
 
 ## 끝내는 형식
 마지막 줄 한 줄: `통과 — <행별 입력→결과 요약>` 또는 `실패 — <행 번호>: <입력> ⇒ <실제 결과> (기대: <요구 결과>)`. 실패 줄은 `dispatch-agent`가 그 행의 `$I`로 그대로 기록하므로 행 번호를 `실패 — ` 바로 뒤에 숫자로 쓴다.

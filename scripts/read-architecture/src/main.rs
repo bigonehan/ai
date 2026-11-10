@@ -5,6 +5,7 @@ use std::env;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::{self, Command};
+use read_architecture::{folder_labels, structure_difference, structure_part};
 
 fn resolved(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
@@ -60,74 +61,6 @@ fn empty_template(doc: &str) -> bool {
         line.starts_with('{') && line.ends_with('}')
     });
     brace_line || !doc.lines().any(|line| line.starts_with("- "))
-}
-
-fn structure_part(doc: &str) -> &str {
-    let mut offset = 0;
-    for line in doc.split_inclusive('\n') {
-        if line
-            .trim_end_matches(['\r', '\n'])
-            .trim_end_matches([' ', '\t'])
-            == "# 구조"
-        {
-            return &doc[offset + line.len()..];
-        }
-        offset += line.len();
-    }
-    ""
-}
-
-fn label_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b'-')
-}
-fn preceding_char(c: u8) -> bool {
-    label_char(c) || c == b'/'
-}
-
-fn folder_labels(structure: &str) -> Vec<String> {
-    let bytes = structure.as_bytes();
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
-    for i in 0..bytes.len() {
-        if i > 0 && preceding_char(bytes[i - 1]) {
-            continue;
-        }
-        let mut start = i;
-        if bytes[start] == b'`' {
-            start += 1;
-        }
-        if start >= bytes.len() || !label_char(bytes[start]) {
-            continue;
-        }
-        let mut pos = start;
-        while pos < bytes.len() {
-            while pos < bytes.len() && label_char(bytes[pos]) {
-                pos += 1;
-            }
-            if pos >= bytes.len() || bytes[pos] != b'/' {
-                break;
-            }
-            pos += 1;
-            if pos < bytes.len() && label_char(bytes[pos]) {
-                continue;
-            }
-            let end = pos - 1;
-            if pos < bytes.len() && bytes[pos] == b'`' {
-                pos += 1;
-            }
-            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
-                pos += 1;
-            }
-            if pos < bytes.len() && matches!(bytes[pos], b':' | b',') {
-                let label = &structure[start..end];
-                if seen.insert(label.to_owned()) {
-                    result.push(label.to_owned());
-                }
-            }
-            break;
-        }
-    }
-    result
 }
 
 fn agents_obsidian_doc(agents_text: &str) -> Option<String> {
@@ -265,41 +198,14 @@ fn run() -> Result<(), String> {
         }
     }
 
-    let named = folder_labels(structure_part(&doc));
-    let missing: Vec<&str> = named
-        .iter()
-        .map(String::as_str)
-        .filter(|name| !project.join(name).exists())
-        .collect();
-    let named_top: HashSet<&str> = named
-        .iter()
-        .map(|name| name.split('/').next().unwrap())
-        .collect();
-    let mut unlisted = Vec::new();
-    for entry in fs::read_dir(&project).map_err(|e| format!("project 읽기 실패: {e}"))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.')
-            || matches!(
-                name.as_str(),
-                "node_modules" | "__pycache__" | ".git" | ".venv" | "venv"
-            )
-        {
-            continue;
-        }
-        if entry.file_type().map_err(|e| e.to_string())?.is_dir()
-            && !named_top.contains(name.as_str())
-        {
-            unlisted.push(name);
-        }
-    }
-    if !missing.is_empty() || !unlisted.is_empty() {
+    let difference = structure_difference(&project, &doc)?;
+    if !difference.is_empty() {
         println!("\n# 구조 차이 (작업 범위면 architecture.md도 고친다)");
-        if !missing.is_empty() {
-            println!("- 문서에만 있음: {}", missing.join(", "));
+        if !difference.documented_only.is_empty() {
+            println!("- 문서에만 있음: {}", difference.documented_only.join(", "));
         }
-        if !unlisted.is_empty() {
-            println!("- 문서에 없음: {}", unlisted.join(", "));
+        if !difference.undocumented.is_empty() {
+            println!("- 문서에 없음: {}", difference.undocumented.join(", "));
         }
     }
 
@@ -316,6 +222,7 @@ fn run() -> Result<(), String> {
     }
 
     if !words.is_empty() {
+        let named = folder_labels(structure_part(&doc));
         let mut targets = search_targets(&project, &named);
         let home = PathBuf::from(env::var("HOME").unwrap_or_default());
         let home_prefix = format!("{}/", home.display());

@@ -4,5 +4,6 @@ pub mod api;
 pub mod gate;
 pub mod records;
 pub mod task;
+pub mod timing;
 pub mod testrun;
 pub mod util;

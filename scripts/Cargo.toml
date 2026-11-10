@@ -13,7 +13,9 @@ members = [
     "main-edit-gate",
     "ask-notify",
     "obsidian-scene-block",
+    "win-smoke",
 ]
 
 [profile.release]
-opt-level = 3
+opt-level = 1
+incremental = true

@@ -75,13 +75,24 @@ pub fn check_symbol_fields(fields: &Map<String, Value>) -> R<()> {
         })
     };
     if let Some(j) = lines("J") {
-        if let Some(bad) = j.iter().find(|l| !valid_symbol_line(l)) {
+        if let Some(bad) = j.iter().find(|l| !valid_symbol_line(l) && !l.strip_prefix("[추정] ").is_some_and(|body| !body.trim().is_empty())) {
             return api::fail("validation", format!("$J lines must start with {symbol_format}: `{bad}`"));
         }
     }
     if let Some(d) = lines("D") {
         if d.len() != 1 || !valid_symbol_line(&d[0]) {
             return api::fail("validation", format!("$D must be one check line starting with {symbol_format}"));
+        }
+    }
+    Ok(())
+}
+
+/// A newly supplied cause must carry its own non-empty observation source.
+pub fn check_cause_evidence(fields: &Map<String, Value>) -> R<()> {
+    if fields.contains_key("J") {
+        let evidence = fields.get("C").and_then(Value::as_str).map(str::trim);
+        if !evidence.is_some_and(|value| !value.is_empty() && !value.contains(['\n', '\r'])) {
+            return api::fail("validation", "J(원인)에는 C(근거)가 필요");
         }
     }
     Ok(())
@@ -226,6 +237,20 @@ pub fn change_type_code(kind: &str) -> Option<&'static str> {
     }
 }
 
+/// 위임 흐름이 적용되는 루트들. `T26_WORKFLOW_ROOTS`(':' 구분)가 없으면 extensions 루트와 `/home/tree/project`.
+pub fn workflow_roots() -> Vec<PathBuf> {
+    match std::env::var("T26_WORKFLOW_ROOTS") {
+        Ok(v) if !v.trim().is_empty() => v.split(':').filter(|r| !r.is_empty()).map(PathBuf::from).collect(),
+        _ => vec![extensions_root(), PathBuf::from("/home/tree/project")],
+    }
+}
+
+/// `start`가 속한 위임 흐름 루트.
+pub fn workflow_root_of(start: &Path) -> Option<PathBuf> {
+    let norm = util::normalize(start);
+    workflow_roots().into_iter().find(|root| norm.starts_with(util::normalize(root)))
+}
+
 pub fn extensions_root() -> PathBuf {
     std::env::var_os("GRIST_EXTENSIONS_ROOT")
         .filter(|v| !v.is_empty())
@@ -284,24 +309,72 @@ fn section_ids_in_record(record: &Path, section_name: &str) -> Vec<i64> {
     ids
 }
 
+pub fn strip_task_blocks(text: &str, raw_id: i64) -> String {
+    let tag = format!("(#{raw_id})");
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for line in text.lines() {
+        if skipping {
+            if line.starts_with("# ") || line.starts_with("## ") {
+                skipping = false;
+            } else {
+                continue;
+            }
+        }
+        if line.trim_end().ends_with(&tag) {
+            skipping = line.starts_with("## ");
+            continue;
+        }
+        out.push(line);
+    }
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
+pub fn remove_task_from_changes(project_dir: &Path, raw_id: i64) -> R<Vec<String>> {
+    let mut changed = Vec::new();
+    for record in util::glob(&project_dir.join(".ai").join("changes"), "", ".md") {
+        let text = std::fs::read_to_string(&record).map_err(api::other)?;
+        let next = strip_task_blocks(&text, raw_id);
+        if next != text {
+            std::fs::write(&record, next).map_err(api::other)?;
+            changed.push(record.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        }
+    }
+    Ok(changed)
+}
+
 pub fn changes_task_ids(project_dir: &Path) -> Vec<i64> {
     let changes_dir = project_dir.join(".ai").join("changes");
-    for record in util::glob(&changes_dir, "", ".md").into_iter().rev() {
-        let mut ids = section_ids_in_record(&record, "작업");
+    let mut records = util::glob(&changes_dir, "", ".md").into_iter().rev();
+    let mut ids = Vec::new();
+    for record in records.by_ref() {
+        ids = section_ids_in_record(&record, "작업");
         for id in section_ids_in_record(&record, "완료") {
             if !ids.contains(&id) {
                 ids.push(id);
             }
         }
         if !ids.is_empty() {
-            return ids;
+            break;
         }
     }
-    Vec::new()
+    // Rows still open in an earlier day's `# 작업` stay in scope after a new daily file starts.
+    for record in records {
+        for id in section_ids_in_record(&record, "작업") {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
 }
 
 pub fn find_task_agents(start: &Path) -> Option<(Vec<i64>, PathBuf)> {
-    let ext = util::normalize(&extensions_root());
+    let ext = util::normalize(&workflow_root_of(start).unwrap_or_else(extensions_root));
     let start_norm = util::normalize(start);
     let mut cur = start_norm.clone();
     loop {
@@ -430,22 +503,24 @@ extern "C" {
 }
 
 pub fn with_lock<T, F: FnOnce() -> R<T>>(target: &Path, f: F) -> R<T> {
+    use std::os::unix::fs::MetadataExt;
     let resolved = util::resolve(target);
     let lock_path = std::env::temp_dir().join(format!("grist-record-{}.lock", util::sanitize_key(&util::path_str(&resolved))));
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&lock_path)
-        .map_err(api::other)?;
-    let fd = file.as_raw_fd();
-    unsafe {
-        flock(fd, 2); // LOCK_EX
+    loop {
+        let file = OpenOptions::new().create(true).append(true).open(&lock_path).map_err(api::other)?;
+        let fd = file.as_raw_fd();
+        if unsafe { flock(fd, 2) } != 0 { return Err(api::other(std::io::Error::last_os_error())); }
+        let opened = file.metadata().map_err(api::other)?;
+        let current = std::fs::metadata(&lock_path).ok();
+        if !current.is_some_and(|meta| meta.dev() == opened.dev() && meta.ino() == opened.ino()) {
+            unsafe { flock(fd, 8); }
+            continue;
+        }
+        let res = f();
+        std::fs::remove_file(&lock_path).map_err(api::other)?;
+        if unsafe { flock(fd, 8) } != 0 { return Err(api::other(std::io::Error::last_os_error())); }
+        return res;
     }
-    let res = f();
-    unsafe {
-        flock(fd, 8); // LOCK_UN
-    }
-    res
 }
 
 /// Append a record block to the end of the row's own `### 구현` section, never the file end.
@@ -623,6 +698,21 @@ fn item_heading_parts(line: &str) -> Option<(String, i64)> {
     Some((title, raw_id))
 }
 
+/// Newest changes file: an `## [구현] <title> (#id)` block without `#### 확인 (#id)`.
+fn open_duplicate_item(project_dir: &Path, title: &str) -> Option<i64> {
+    let record = util::glob(&project_dir.join(".ai").join("changes"), "", ".md").into_iter().last()?;
+    let text = std::fs::read_to_string(record).ok()?;
+    open_duplicate_in(&text, title)
+}
+
+fn open_duplicate_in(text: &str, title: &str) -> Option<i64> {
+    text.lines()
+        .filter(|line| line.starts_with("## [구현] "))
+        .filter_map(item_heading_parts)
+        .find(|(t, id)| t == title.trim() && !text.contains(&format!("#### 확인 (#{id})")))
+        .map(|(_, id)| id)
+}
+
 pub fn item_file(project_dir: &Path, raw_id: i64) -> Option<PathBuf> {
     for record in util::glob(&project_dir.join(".ai").join("changes"), "", ".md").into_iter().rev() {
         if let Ok(text) = std::fs::read_to_string(&record) {
@@ -636,6 +726,31 @@ pub fn item_file(project_dir: &Path, raw_id: i64) -> Option<PathBuf> {
         }
     }
     None
+}
+
+pub fn item_title_in(text: &str, raw_id: i64) -> Option<String> {
+    text.lines()
+        .filter_map(item_heading_parts)
+        .find(|(_, id)| *id == raw_id)
+        .map(|(title, _)| normalize_detail_title(&title))
+}
+
+/// When `# 요청` has multiple `- ` detail lines and one matches this row's `$B` / item title,
+/// scope J3/J1 to that single detail line so each split row is judged against its own unit.
+pub fn scope_request_block(block: &str, item_title: Option<&str>) -> String {
+    let details: Vec<String> = block
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- ").map(normalize_detail_title))
+        .filter(|line| !line.is_empty())
+        .collect();
+    if details.len() >= 2 {
+        if let Some(want) = item_title.map(normalize_detail_title).filter(|t| !t.is_empty()) {
+            if details.iter().any(|d| d == &want) {
+                return format!("- {want}");
+            }
+        }
+    }
+    util::strip(block).to_string()
 }
 
 pub fn item_span(lines: &[String], raw_id: i64) -> Option<(usize, usize)> {
@@ -815,6 +930,89 @@ pub fn task_memo(project_arg: &str, raw_id: i64, line: &str) -> R<Value> {
     let (project_dir, _, _) = owned(project_arg, raw_id)?;
     let added = record_agent_memo(&project_dir, raw_id, line)?;
     Ok(json!({ "id": raw_id, "added": added }))
+}
+
+pub const IMPROVE_HEADING: &str = "## 개선 요구";
+
+/// changes 파일의 `## 개선 요구` 절 끝(다음 `#` 헤더 전)에 한 줄을 붙인다(절이 없으면 파일 끝에 만든다).
+/// 절 뒤에 다른 구현 블록이 붙은 파일에서도 줄이 절 안에 들어가야 `improve_lines`가 읽는다.
+pub fn append_improve_line(text: &str, line: &str) -> String {
+    let lines: Vec<&str> = text.trim_end_matches('\n').lines().collect();
+    let Some(head) = lines.iter().position(|l| l.trim() == IMPROVE_HEADING) else {
+        return format!("{}\n\n{IMPROVE_HEADING}\n{line}\n", text.trim_end_matches('\n'));
+    };
+    let end = lines[head + 1..].iter().position(|l| l.starts_with('#')).map_or(lines.len(), |i| head + 1 + i);
+    let mut at = end;
+    while at > head + 1 && lines[at - 1].trim().is_empty() { at -= 1; }
+    let mut out: Vec<&str> = lines[..at].to_vec();
+    out.push(line);
+    if end < lines.len() { out.push(""); }
+    out.extend_from_slice(&lines[end..]);
+    out.join("\n") + "\n"
+}
+
+/// `## 개선 요구` 절의 줄들(헤더 다음부터 다음 `#` 헤더 전까지).
+pub fn improve_lines(text: &str) -> Option<Vec<String>> {
+    let mut lines = text.lines().skip_while(|l| l.trim() != IMPROVE_HEADING);
+    lines.next()?;
+    Some(lines.take_while(|l| !l.starts_with('#')).filter(|l| !l.trim().is_empty()).map(str::to_string).collect())
+}
+
+/// kind: "note" = 2회 이상 실패·구현 착각 기록, "done" = improve_process가 적용한 개선 기록.
+/// 실행 기록(.ai/dispatch/<id>.verify.runs 줄 수, <id>.resumes 값)에 반복이 있으면
+/// '해당 없음'(note)·'개선 불필요'(done, 개선자 기록 없이)로 넘길 수 없다.
+fn dismissal_blocked(project_dir: &std::path::Path, raw_id: i64, kind: &str, text: &str) -> Option<String> {
+    let dismiss = match kind { "note" => text.starts_with("해당 없음"), _ => text.starts_with("개선 불필요") };
+    if !dismiss { return None; }
+    let dir = project_dir.join(".ai/dispatch");
+    let verify_runs = std::fs::read_to_string(dir.join(format!("{raw_id}.verify.runs")))
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count()).unwrap_or(0);
+    let resumes = std::fs::read_to_string(dir.join(format!("{raw_id}.resumes")))
+        .ok().and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
+    if kind != "note" && dir.join(format!("{raw_id}.improve.runs")).exists() { return None; }
+    (verify_runs > 1 || resumes > 0).then(|| format!(
+        "row {raw_id}: 검증자 실행 {verify_runs}회·재위임 {resumes}회 기록이 있어 `해당 없음`/`개선 불필요`로 넘길 수 없어요 — 실패·착각(요구와 무관한 작업 포함)을 적고 개선자(dispatch-agent --role improver)에게 맡기세요"))
+}
+
+pub fn improve_record(project_arg: &str, raw_id: i64, kind: &str, text: &str) -> R<Value> {
+    let (project_dir, _, _) = owned(project_arg, raw_id)?;
+    let text = text.trim();
+    if text.is_empty() || text.contains('\n') { return api::fail("validation", "--text must be one non-empty line"); }
+    // 261110 #813: 검증자 실행 8회·재위임 2회인데 위임자가 '해당 없음'·'개선 불필요'로 자기 보고해 개선자가 실행되지 않음.
+    if let Some(reason) = dismissal_blocked(&project_dir, raw_id, kind, text) { return api::fail("validation", reason); }
+    let Some(record) = item_file(&project_dir, raw_id) else {
+        return api::fail("records", format!("row {raw_id} not found in .ai/changes"));
+    };
+    let line = match kind {
+        "note" => format!("- [#{raw_id}] {text}"),
+        _ => format!("- 처리 : [#{raw_id}] {text}"),
+    };
+    let current = std::fs::read_to_string(&record).map_err(api::other)?;
+    write_atomic(&record, &append_improve_line(&current, &line))?;
+    Ok(json!({ "id": raw_id, "record": record.file_name().map(|n| n.to_string_lossy().to_string()), "line": line }))
+}
+
+#[cfg(test)]
+mod improve_tests {
+    use super::*;
+
+    #[test]
+    fn improve_section_is_created_at_end_and_appended() {
+        let first = append_improve_line("# 요청\n- a\n", "- [#1] x");
+        assert!(first.ends_with("\n\n## 개선 요구\n- [#1] x\n"));
+        let second = append_improve_line(&first, "- 처리 : [#1] y");
+        assert_eq!(second.matches("## 개선 요구").count(), 1);
+        assert_eq!(improve_lines(&second).unwrap(), vec!["- [#1] x", "- 처리 : [#1] y"]);
+        assert!(improve_lines("# 요청\n").is_none());
+    }
+
+    #[test]
+    fn improve_line_goes_into_section_when_blocks_follow_it() {
+        let text = "# 진행\n## 개선 요구\n- 처리 : [#1] a\n\n## [구현] b (#2)\n#### 확인 (#2)\n- x\n";
+        let out = append_improve_line(text, "- 처리 : [#2] c");
+        assert_eq!(improve_lines(&out).unwrap(), vec!["- 처리 : [#1] a", "- 처리 : [#2] c"]);
+        assert!(out.ends_with("## [구현] b (#2)\n#### 확인 (#2)\n- x\n"));
+    }
 }
 
 pub struct ItemInfo {
@@ -1251,9 +1449,8 @@ pub fn hook_project(raw_id: i64) -> Option<PathBuf> {
             break;
         }
     }
-    let ext = extensions_root();
     let mut candidates = Vec::new();
-    if ext.is_dir() {
+    for ext in workflow_roots().into_iter().filter(|root| root.is_dir()) {
         candidates.push(ext.clone());
         if let Ok(entries) = std::fs::read_dir(&ext) {
             let mut subdirs: Vec<PathBuf> = entries
@@ -1298,6 +1495,17 @@ pub fn apply_row(project_dir: &Path, raw_id: i64, fields: &Map<String, Value>) -
                     let (start, end) = subsection(lines, raw_id, name);
                     if add_numbered(lines, start, end, line) {
                         changed = true;
+                    }
+                    if *name == "원인" {
+                        if let Some(evidence) = fields.get("C").and_then(Value::as_str) {
+                            let (start, end) = subsection(lines, raw_id, name);
+                            let evidence_line = format!("근거 : {}", evidence.trim());
+                            if !lines[(start + 1)..end].contains(&evidence_line) {
+                                let at = content_end(lines, start, end);
+                                lines.insert(at, evidence_line);
+                                changed = true;
+                            }
+                        }
                     }
                 }
                 if changed {
@@ -1468,6 +1676,12 @@ pub fn latest_request_block(project_dir: &Path) -> String {
 pub fn request_record(project_arg: &str, input_file: &str, title: &str, summary: &str) -> R<Value> {
     crate::gate::require_main("request-record")?;
     let project_dir = util::resolve(Path::new(project_arg));
+    if !project_dir.join("AGENTS.md").is_file() {
+        return api::fail(
+            "project",
+            &format!("{} has no AGENTS.md; pass the project directory (nothing written)", util::path_str(&project_dir)),
+        );
+    }
     let text = std::fs::read_to_string(input_file).map_err(api::other)?;
     let req_re = Regex::new(r"(?m)^#\s*요구 사항\s*$").unwrap();
     let det_re = Regex::new(r"(?m)^#\s*세부 사항\s*$").unwrap();
@@ -1524,6 +1738,26 @@ fn claude_session_id_at(state: &Path, project: &Path) -> Option<String> {
         .then(|| pointer.get("session_id").unwrap().as_str().unwrap().to_string())
 }
 
+fn session_id_for_project(state: &Path, project: &Path) -> Option<String> {
+    let cwd = std::env::current_dir().ok();
+    let root = workflow_root_of(project).unwrap_or_else(extensions_root);
+    let candidates = [cwd.as_deref(), Some(project), Some(root.as_path())];
+    let found = candidates.into_iter().flatten().find_map(|path| claude_session_id_at(state, path));
+    found
+}
+
+fn register_session_project_at(state: &Path, session_id: &str, raw_id: i64, project: &Path) -> R<()> {
+    let path = state.join("session_projects").join(format!("{}.json", util::sanitize_key(session_id)));
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(api::other)?;
+    let project = std::fs::canonicalize(project).unwrap_or_else(|_| project.to_path_buf());
+    with_lock(&path, || {
+        let mut rows: Map<String, Value> = std::fs::read_to_string(&path).ok()
+            .and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+        rows.insert(raw_id.to_string(), Value::String(project.to_string_lossy().into_owned()));
+        write_atomic(&path, &serde_json::to_string(&rows).map_err(api::other)?)
+    })
+}
+
 fn register_session_row_at(path: &Path, raw_id: i64) -> R<()> {
     std::fs::create_dir_all(path.parent().unwrap()).map_err(api::other)?;
     with_lock(&path, || {
@@ -1545,8 +1779,9 @@ fn register_claude_session_row_at(state: &Path, project: &Path, raw_id: i64, cod
     if codex_thread.is_some_and(|id| !id.is_empty()) { return Ok(()); }
     // 세션을 연 폴더와 --project가 다를 수 있으므로 Claude가 넘긴 세션 ID를 폴더 포인터보다 먼저 쓴다.
     let env_session = claude_session.filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')).map(str::to_string);
-    if let Some(session_id) = env_session.or_else(|| claude_session_id_at(state, project)) {
+    if let Some(session_id) = env_session.or_else(|| session_id_for_project(state, project)) {
         register_session_row_at(&state.join("session_rows").join(format!("{}.json", util::sanitize_key(&session_id))), raw_id)?;
+        register_session_project_at(state, &session_id, raw_id, project)?;
     }
     Ok(())
 }
@@ -1568,6 +1803,11 @@ pub fn task_add(mut fields: Map<String, Value>, project_arg: Option<&str>, kind:
         };
         if !fields.contains_key("G") {
             fields.insert("G".to_string(), Value::String(code.to_string()));
+        }
+    }
+    if let (Some(p), Some(title)) = (project_arg, fields.get("B").and_then(Value::as_str)) {
+        if let Some(id) = open_duplicate_item(&util::resolve(Path::new(p)), title) {
+            return api::fail("duplicate", format!("같은 항목명의 미확인 행 #{id}이 이미 있어요. 경고만 있는 task-add도 행을 만들므로 다시 실행하지 말고 #{id}를 쓰세요(목표 정정은 task-goal)."));
         }
     }
     let mut ctx = crate::task::TaskCtx {
@@ -1740,7 +1980,14 @@ pub fn parse_evidence(text: &str, expected: usize) -> Result<Vec<String>, String
 
 /// Records `- [○] <check>`, `- [●] 사용자 검토 대기` and the `#### 확인` block in one pass; idempotent for the step lines.
 /// The evidence is validated against the goal line count before anything is written.
+#[cfg(test)]
 fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str, can: Option<&str>) -> R<usize> {
+    confirm_in_project_with_partial(project_dir, raw_id, summary, check, detail, evidence, can, None, None)
+}
+
+fn confirm_in_project_with_partial(project_dir: &Path, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str, can: Option<&str>, partial_reason: Option<&str>, docs: Option<&str>) -> R<usize> {
+    let docs = docs.map(|value| crate::task::validated_docs(project_dir, value))
+        .transpose().map_err(|message| api::Exit::Fail("validation".into(), message))?;
     let capability = can.map(str::trim);
     if item_info(project_dir, raw_id).is_some_and(|info| info.kind == NEW_FEATURE)
         && !capability.is_some_and(|value| value.contains("수 있") && !value.contains(['\n', '\r']))
@@ -1754,10 +2001,10 @@ fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &st
         Ok(lines) => lines,
         Err(e) => return api::fail("validation", format!("#{raw_id} {e}")),
     };
-    let confirmation = confirm_block(raw_id, summary, check, detail, &evidence, capability);
-    if let Some(marker) = crate::task::runtime_evidence_marker(project_dir, raw_id, &confirmation) {
+    let confirmation = confirm_block(raw_id, summary, check, detail, &evidence, capability, partial_reason, docs.as_deref());
+    if partial_reason.is_none() { if let Some(marker) = crate::task::runtime_evidence_marker(project_dir, raw_id, &confirmation) {
         return api::fail("validation", format!("#{raw_id} runtime confirmation contains unverified evidence: {marker}"));
-    }
+    } }
     let steps = edit_item(project_dir, raw_id, |lines| {
         upsert_step(lines, raw_id, "○", check, None);
         upsert_step(lines, raw_id, "●", "사용자 검토 대기", None);
@@ -1766,29 +2013,85 @@ fn confirm_in_project(project_dir: &Path, raw_id: i64, summary: &str, check: &st
         return api::fail("records", format!("Table26 #{raw_id} not found in .ai/changes"));
     }
     append_item(project_dir, raw_id, &confirmation)?;
+    if let Some(reason) = partial_reason {
+        let mut fields = serde_json::Map::new();
+        fields.insert("D".into(), serde_json::Value::String(format!("[🏷] 사용자 지시 검증 중단: {reason}")));
+        api::update(api::TASK_TABLE, raw_id, &fields)?;
+    }
     Ok(evidence.len())
 }
 
-fn confirm_block(raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &[String], can: Option<&str>) -> String {
+fn confirm_block(raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &[String], can: Option<&str>, partial_reason: Option<&str>, docs: Option<&[String]>) -> String {
     let lines: String = evidence.iter().enumerate().map(|(n, e)| format!("- 근거 {} : {e}\n", n + 1)).collect();
     let capability = can.map(|value| format!("- 가능 : {value}\n")).unwrap_or_default();
-    format!("\n#### 확인 (#{raw_id})\n- 요약 : {summary}\n{capability}- [x] {check}\n  결과 : 성공\n  상세 : {detail}\n{lines}")
+    let partial = partial_reason.map(|reason| format!("- 부분 확인 : {reason}\n")).unwrap_or_default();
+    let documents = docs.map(|paths| format!("- 문서 : {}\n", paths.join(","))).unwrap_or_default();
+    format!("\n#### 확인 (#{raw_id})\n- 요약 : {summary}\n{capability}{partial}{documents}- [x] {check}\n  결과 : 성공\n  상세 : {detail}\n{lines}")
 }
 
-pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str, can: Option<&str>) -> R<Value> {
+pub fn task_confirm(project_arg: &str, raw_id: i64, summary: &str, check: &str, detail: &str, evidence: &str, can: Option<&str>, partial: bool, reason: Option<&str>, docs: Option<&str>) -> R<Value> {
+    let reason = reason.map(str::trim);
+    if partial && !reason.is_some_and(|value| !value.is_empty() && !value.contains(['\n', '\r'])) {
+        return api::fail("validation", "--partial requires a non-empty, single-line --reason");
+    }
+    if !partial && reason.is_some() { return api::fail("validation", "--reason requires --partial"); }
     let summary_clean = util::strip(summary).replace('\n', " ");
     let check_clean = util::strip(check).replace('\n', " ");
     let detail_clean = util::strip(detail).replace('\n', " ");
     if summary_clean.is_empty() || check_clean.is_empty() || detail_clean.is_empty() {
         return api::fail("validation", "summary, check, and detail must not be empty");
     }
+    if crate::gate::flow_summary_from_text(&format!("#### 확인 (#{raw_id})\n- 요약 : {summary_clean}"), raw_id).is_none() {
+        return api::fail("validation", format!("#{raw_id} --summary needs `[<행 기호>] <입력> ⇒ <결과>` (flow-wait reads it)"));
+    }
     let (project_dir, _, _) = owned(project_arg, raw_id)?;
-    let count = confirm_in_project(&project_dir, raw_id, &summary_clean, &check_clean, &detail_clean, evidence, can)?;
-    Ok(json!({"id": raw_id, "summary": summary_clean, "check": check_clean, "evidence": count}))
+    let count = confirm_in_project_with_partial(&project_dir, raw_id, &summary_clean, &check_clean, &detail_clean, evidence, can, if partial { reason } else { None }, docs)?;
+    Ok(confirm_result(raw_id, &summary_clean, &check_clean, count))
+}
+
+fn confirm_result(raw_id: i64, summary: &str, check: &str, evidence: usize) -> Value {
+    json!({"id": raw_id, "summary": summary, "check": check, "evidence": evidence, "next": crate::task::IMPROVE_PROCESS_CARD})
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn strip_task_blocks_removes_row_lines_and_block() {
+        let text = "# 작업\n4. [📐] a (#688)\n5. [📐] a (#690)\n# 진행\n## [구현] a (#688)\nkeep\n## [구현] a (#690)\n- 판정 : x\n### 목표\n1. y\n";
+        let out = super::strip_task_blocks(text, 690);
+        assert_eq!(out, "# 작업\n4. [📐] a (#688)\n# 진행\n## [구현] a (#688)\nkeep\n");
+    }
+
+    #[test]
+    fn lock_child() {
+        let Ok(target) = std::env::var("GRIST_LOCK_CHILD_TARGET") else { return; };
+        let path = std::path::Path::new(&target);
+        super::with_lock(path, || {
+            use std::io::Write;
+            let mut out = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+            writeln!(out, "start").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            writeln!(out, "end").unwrap();
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
+    fn lock_serializes_two_processes_and_unlinks_file() {
+        let target = std::env::temp_dir().join(format!("grist-lock-child-{}", std::process::id()));
+        let executable = std::env::current_exe().unwrap();
+        let spawn = || std::process::Command::new(&executable).arg("lock_child").env("GRIST_LOCK_CHILD_TARGET", &target).spawn().unwrap();
+        let first = spawn();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let second = spawn();
+        assert!(first.wait_with_output().unwrap().status.success());
+        assert!(second.wait_with_output().unwrap().status.success());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "start\nend\nstart\nend\n");
+        let resolved = crate::util::resolve(&target);
+        let lock = std::env::temp_dir().join(format!("grist-record-{}.lock", crate::util::sanitize_key(&crate::util::path_str(&resolved))));
+        assert!(!lock.exists());
+        let _ = std::fs::remove_file(target);
+    }
     use super::{format_judge, register_item, register_session_row_at, task_add_fields};
 
     #[test]
@@ -1888,6 +2191,14 @@ mod tests {
     use serde_json::{Map, Value};
 
     #[test]
+    fn open_duplicate_skips_confirmed_and_other_titles() {
+        let text = "## [구현] [✒️] 모달 (#1)\n#### 확인 (#1)\n## [구현] [✒️] 모달 (#2)\n## [구현] [✒️] 다른 (#3)\n";
+        assert_eq!(crate::records::open_duplicate_in(text, "[✒️] 모달"), Some(2));
+        assert_eq!(crate::records::open_duplicate_in(text, "[✒️] 없음"), None);
+        assert_eq!(crate::records::open_duplicate_in("## [구현] [✒️] 모달 (#1)\n#### 확인 (#1)\n", "[✒️] 모달"), None);
+    }
+
+    #[test]
     fn task_add_sets_today_in_date_column() {
         let fields = task_add_fields(Map::new());
         println!("task-add E={:?}, expected={}", fields.get("E"), crate::util::today_epoch());
@@ -1927,6 +2238,8 @@ mod tests {
         super::register_claude_session_row_at(&dir, &project, 410, None, None).unwrap();
         let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(row_path).unwrap()).unwrap();
         assert_eq!(rows, vec![410]);
+        let projects: Map<String, Value> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_projects/claude-123.json")).unwrap()).unwrap();
+        assert_eq!(projects.get("410").and_then(Value::as_str), project.to_str());
         super::register_claude_session_row_at(&dir, &project, 411, Some("codex-1"), Some("claude-env")).unwrap();
         let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_rows/claude-123.json")).unwrap()).unwrap();
         assert_eq!(rows, vec![410]);
@@ -2020,6 +2333,17 @@ mod tests {
         assert!(super::apply_row(&project, 7, &fields).unwrap().is_empty());
         let text = std::fs::read_to_string(&record).unwrap();
         assert!(text.contains("# 작업\n# 완료\n1. [✒️] 문서 절차 (#7)"));
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn changes_task_ids_keeps_previous_day_open_rows_after_new_daily_file() {
+        let project = std::env::temp_dir().join(format!("grist-rollover-open-{}", std::process::id()));
+        let changes = project.join(".ai/changes");
+        std::fs::create_dir_all(&changes).unwrap();
+        std::fs::write(changes.join("261106.작업.md"), "# 작업\n1. [📐] 어제 검증 대기 (#697)\n# 완료\n1. [🌍] 어제 완료 (#690)\n# 진행\n").unwrap();
+        std::fs::write(changes.join("261107.작업.md"), "# 작업\n1. [📐] 오늘 행 (#704)\n# 완료\n# 진행\n").unwrap();
+        assert_eq!(super::changes_task_ids(&project), vec![704, 697]);
         std::fs::remove_dir_all(project).unwrap();
     }
 
@@ -2306,6 +2630,53 @@ mod tests {
     }
 
     #[test]
+    fn partial_confirm_block_keeps_unverified_goal_lines_and_reason() {
+        let evidence = vec!["실제 화면 확인".to_string(), "미검증 목표: 사용자 지시로 검증 중단".to_string()];
+        let block = super::confirm_block(7, "[🏗️] 입력 ⇒ 결과", "일부 확인", "첫 목표 확인", &evidence, None, Some("사용자 지시로 검증 중단"), None);
+        assert!(block.contains("- 부분 확인 : 사용자 지시로 검증 중단\n"));
+        assert!(block.contains("- 근거 2 : 미검증 목표: 사용자 지시로 검증 중단\n"));
+        assert!(crate::task::partial_confirmation(&block));
+    }
+
+    #[test]
+    fn confirm_result_points_next_to_improve_process() {
+        let out = super::confirm_result(7, "입력 ⇒ 결과", "검사", 2);
+        assert_eq!(out["next"], "~/ai/skills/improve_process/SKILL.md");
+        assert_eq!(out["evidence"], 2);
+    }
+
+    #[test]
+    fn partial_confirm_requires_reason_before_project_access() {
+        let err = super::task_confirm("/missing", 7, "입력 ⇒ 결과", "검사", "값", "1. 값", None, true, None, None).unwrap_err();
+        assert!(format!("{err:?}").contains("--reason"));
+    }
+
+    #[test]
+    fn text_only_confirm_docs_writes_paths_and_rejects_missing_files() {
+        let project = temp_project("grist-confirm-docs", GOAL_ITEM);
+        std::fs::write(project.join("guide.md"), "# guide\n").unwrap();
+        let evidence = "1. 첫째 값\n2. 둘째 값";
+        let bad = super::confirm_in_project_with_partial(&project, 7, "[🏗️] 입력 ⇒ 문서", "문서 확인", "실제 값", evidence, None, None, Some("guide.md,missing.md")).unwrap_err();
+        assert!(format!("{bad:?}").contains("missing.md"));
+        let bad = super::confirm_in_project_with_partial(&project, 7, "[🏗️] 입력 ⇒ 문서", "문서 확인", "실제 값", evidence, None, None, Some("guide.md,other.txt")).unwrap_err();
+        assert!(format!("{bad:?}").contains(".md"));
+        super::confirm_in_project_with_partial(&project, 7, "[🏗️] 입력 ⇒ 문서", "문서 확인", "실제 값", evidence, None, None, Some("guide.md")).unwrap();
+        let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
+        assert!(text.contains("- 문서 : guide.md\n"));
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn text_only_confirm_docs_records_allowed_absolute_skill_path() {
+        let project = temp_project("grist-confirm-external-docs", GOAL_ITEM);
+        let skill = "/home/tree/ai/skills/role-delegator/SKILL.md";
+        super::confirm_in_project_with_partial(&project, 7, "[🏗️] 입력 ⇒ 문서", "문서 확인", "실제 값", "1. 첫째 값\n2. 둘째 값", None, None, Some(skill)).unwrap();
+        let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
+        assert!(text.contains(&format!("- 문서 : {skill}\n")));
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn goal_k_line_and_number_range() {
         assert_eq!(super::goal_k_line("[수정] task-step --goal N ⇒ 줄이 남는다"), "task-step --goal N ⇒ 줄이 남는다");
         assert_eq!(super::goal_k_line("[기능] a"), "a");
@@ -2346,6 +2717,44 @@ mod tests {
         assert!(super::check_symbol_fields(&f("D", "[🚥] a\n[🚥] b")).is_err());
         assert!(super::check_symbol_fields(&f("D", "메모")).is_err());
         assert!(super::check_symbol_fields(&f("I", "자유")).is_ok());
+        assert!(super::check_symbol_fields(&f("J", "[추정] 오늘 재현하지 못함")).is_ok());
+        assert!(super::check_symbol_fields(&f("J", "[추정] ")).is_err());
+    }
+
+    #[test]
+    fn cause_requires_evidence_in_same_fields_and_other_updates_still_pass() {
+        let fields = |value: serde_json::Value| value.as_object().unwrap().clone();
+        for value in [
+            serde_json::json!({"J": "[🛣] 관측 원인"}),
+            serde_json::json!({"J": "[🛣] 관측 원인", "C": null}),
+            serde_json::json!({"J": "[🛣] 관측 원인", "C": "  "}),
+        ] {
+            let err = super::check_cause_evidence(&fields(value)).unwrap_err();
+            assert!(format!("{err:?}").contains("J(원인)에는 C(근거)가 필요"));
+        }
+        for value in [
+            serde_json::json!({"J": "[추정] 재현 0회", "C": "없음 — 261101:12"}),
+            serde_json::json!({"J": "[🛣] 관측 원인", "C": "src/records.rs:77"}),
+            serde_json::json!({"C": "src/records.rs:77"}),
+            serde_json::json!({"I": "오류만 갱신"}),
+        ] {
+            assert!(super::check_cause_evidence(&fields(value)).is_ok());
+        }
+    }
+
+    #[test]
+    fn cause_evidence_is_written_inside_origin_section() {
+        let project = temp_project("grist-cause-evidence", GOAL_ITEM);
+        let fields = serde_json::json!({"J": "[추정] 재현 0회", "C": "없음 — 261101:12"});
+        let fields = fields.as_object().unwrap();
+        super::check_cause_evidence(fields).unwrap();
+        super::apply_row(&project, 7, fields).unwrap();
+        let text = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
+        assert!(text.contains("### 원인\n1. [추정] 재현 0회\n근거 : 없음 — 261101:12"));
+        super::apply_row(&project, 7, fields).unwrap();
+        let repeated = std::fs::read_to_string(project.join(".ai/changes/260101.작업.md")).unwrap();
+        assert_eq!(repeated.matches("근거 : 없음 — 261101:12").count(), 1);
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
@@ -2354,5 +2763,22 @@ mod tests {
             let err = super::task_step("/nonexistent", 7, step, "x", 1).unwrap_err();
             assert!(format!("{err:?}").contains("task-confirm"));
         }
+    }
+}
+
+#[cfg(test)]
+mod dismissal_tests {
+    #[test]
+    fn dismissal_blocked_when_repeated_runs() {
+        let dir = std::env::temp_dir().join(format!("dismiss-{}", std::process::id()));
+        let d = dir.join(".ai/dispatch"); std::fs::create_dir_all(&d).unwrap();
+        assert!(super::dismissal_blocked(&dir, 9, "note", "해당 없음 — x").is_none());
+        std::fs::write(d.join("9.verify.runs"), "1 2\n3 4\n").unwrap();
+        assert!(super::dismissal_blocked(&dir, 9, "note", "해당 없음 — x").unwrap().contains("검증자 실행 2회"));
+        assert!(super::dismissal_blocked(&dir, 9, "note", "[실패 2회] y").is_none());
+        assert!(super::dismissal_blocked(&dir, 9, "done", "개선 불필요 — z").is_some());
+        std::fs::write(d.join("9.improve.runs"), "1\n").unwrap();
+        assert!(super::dismissal_blocked(&dir, 9, "done", "개선 불필요 — z").is_none());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

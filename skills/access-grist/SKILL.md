@@ -36,4 +36,5 @@ Required arguments, value formats (e.g. `$D` marker, `--can`, evidence lines) an
 | `task-confirm RAW_ID --project DIR --summary S --check L --detail D --evidence F` | Records `- [○] L`, `- [●] 사용자 검토 대기`, `#### 확인` and one `- 근거 N` line per goal line (F: `N. <근거>`) at once |
 | `task-hidden` / `flow-wait --project DIR` | Flow evidence (main) |
 | `gate --cwd DIR [--row N]` / `sync --cwd DIR` | Open rows of a project / replay Grist state (hooks) |
+| `~/ai/skills/access-grist/scripts/bin/open-tasks [--project DIR] [--json]` | Rows of the project (AGENTS.md `### grist` ID) whose `$H` is not `확인`·`완료`: 항목(B)·단계·목표(`grist goal`, fallback K)·메모(D)·오류(I)·원인(J). Source: `scripts/open-tasks` (Rust) |
 | `~/ai/scripts/bin/task-complete --row RAW_ID --project DIR` | `Complete_task` judgment → `$H=확인` |

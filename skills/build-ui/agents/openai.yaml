@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build UI"
+  short_description: "Build new web UI (via ui-oat) and implement/verify UI layouts"
+  default_prompt: "Use $build-ui to build or change this UI."

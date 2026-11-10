@@ -7,3 +7,6 @@ description = "~/ai/rules/Agents.md 단일 원본을 읽고 고치고 Codex·Cla
 [[bin]]
 name = "agent-rules"
 path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"

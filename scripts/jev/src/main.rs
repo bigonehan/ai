@@ -25,8 +25,7 @@ Usage:
   jev stop --message-file M                            # J2: classify the final assistant message
 
 Verdicts: a Noul value (or Choice confidence) >= JEV_PASS is `pass`, < JEV_FLOOR
-is `fail`, anything between is `uncertain`. JEV_MODE=shadow (default) tells the
-caller to log only; `enforce` lets it reject on `fail`.
+is `fail`, anything between is `uncertain`. Judgments always run in `enforce` mode.
 
 positional arguments:
   {scope,match,stop}
@@ -177,7 +176,7 @@ fn load_config() -> Config {
             std::process::exit(1);
         }
     }
-    for key in ["TYPESAFE_API_KEY", "JEV_MODEL", "JEV_MODE", "JEV_PASS", "JEV_FLOOR"] {
+    for key in ["TYPESAFE_API_KEY", "JEV_MODEL", "JEV_PASS", "JEV_FLOOR"] {
         if let Ok(v) = std::env::var(key) {
             if !v.is_empty() {
                 values.insert(key.to_string(), Value::String(v));
@@ -191,7 +190,7 @@ fn load_config() -> Config {
             .unwrap_or(def)
             .to_string()
     };
-    let mode = get_or("JEV_MODE", "shadow");
+    let mode = "enforce".to_string();
     let pass = parse_py_float(&get_or("JEV_PASS", "0.8"));
     let floor = parse_py_float(&get_or("JEV_FLOOR", "0.5"));
     let api_key = get_or("TYPESAFE_API_KEY", "");
@@ -544,6 +543,41 @@ fn goal_lines(goal: &str, filter_types: Option<&[&str]>) -> Vec<(String, String)
     out
 }
 
+// 문서·규칙 대상 표지: 이 표지만 가리키는 목표는 제품 런타임 실행 조건을 묻지 않는다.
+fn doc_rule_marker() -> Regex {
+    Regex::new(r"(?i)(AGENTS\.md|CLAUDE\.md|SKILL\.md|GEMINI\.md|\.ai/docs|\.ai/changes|architecture\.md|performance\.md|role-[a-z]+\.md|\bSkill\b|전역\s*규칙|전역\s*설정)").unwrap()
+}
+
+fn is_doc_rule_text(text: &str) -> bool {
+    doc_rule_marker().is_match(text)
+}
+
+fn is_doc_only_goal(lines: &[(String, String)]) -> bool {
+    !lines.is_empty() && lines.iter().all(|(_, text)| is_doc_rule_text(text))
+}
+
+fn scope_coverage_instruction(request: &str, goal: &str) -> String {
+    if is_doc_rule_text(request) && is_doc_only_goal(&goal_lines(goal, None)) {
+        return format!(
+            "사용자 요청의 모든 요구가 아래 목표 조건들에 빠짐없이 반영되어 있다. 이 요청은 문서·규칙 파일(AGENTS.md·Skill·설계 문서 등) 기록 전용이므로 요구된 문서·규칙 내용이 목표에 있으면 충분하고, 제품 런타임 실행·화면 확인 조건은 요구하지 않는다:\n{goal}"
+        );
+    }
+    format!(
+        "사용자 요청의 모든 요구가 아래 목표 조건들에 빠짐없이 반영되어 있다. 문서·규칙 파일(AGENTS.md·Skill·설계 문서 등) 기록 전용 요청이면 해당 문서·규칙 반영 조건만으로 충분하며, 제품 코드·화면 기능 수정 시에는 정적 상수·문구 표시만 확인하는 데 그치지 않고 실제 기능·화면·퀴즈가 작동해 최종 결과가 성공하는 조건을 포함한다. 외부 연동 요청이면 호출 횟수·HTTP status·ACK·로그와 별도로 응답이 적용된 최종 소비자(문서·화면·DB)의 실제 값이 목표에 있어야 하며 효과가 0건인 경우만 목표로 삼으면 거짓이다:\n{goal}"
+    )
+}
+
+fn match_goal_instruction(label: &str) -> String {
+    if is_doc_rule_text(label) {
+        return format!(
+            "위 실제 출력에 이 목표의 문서·규칙 파일 변경(경로와 반영된 내용)이 기록되어 있어 이 목표 조건을 충족한다. 문서·규칙 기록 전용 목표이므로 제품 런타임 실행·화면 확인은 요구하지 않는다: {label}"
+        );
+    }
+    format!(
+        "위 실제 출력은 이 목표 조건을 충족한다(문서·규칙 파일 기록 전용 목표이면 해당 파일 기록과 충돌 검사 확인으로 충분하며, 제품 코드·화면 기능 목표이면 단순 문구·화면 표시만 부분 확인한 것이 아니라 해당 흐름을 실제로 실행해 정상 작동함을 확인해야 한다): {label}"
+    )
+}
+
 fn run_scope(cfg: &Config, request: &str, goal: &str) -> (String, Vec<Value>, Option<String>, Value) {
     let lines = goal_lines(goal, None);
     let mut names: Vec<(String, String)> = lines
@@ -568,9 +602,7 @@ fn run_scope(cfg: &Config, request: &str, goal: &str) -> (String, Vec<Value>, Op
     cov.insert("type".into(), Value::String("noul".into()));
     cov.insert(
         "instructions".into(),
-        Value::String(format!(
-            "사용자 요청의 모든 요구가 아래 목표 조건들에 빠짐없이 반영되어 있으며, 제품 기능 수정 시 문구·UI 표시만 확인하는 데 그치지 않고 실제 기능이 작동해 최종 결과가 성공하는 조건을 포함한다:\n{goal}"
-        )),
+        Value::String(scope_coverage_instruction(request, goal)),
     );
     questions.insert("coverage".into(), Value::Object(cov));
 
@@ -598,9 +630,7 @@ fn run_match(cfg: &Config, goal: &str, output: &str) -> (String, Vec<Value>, Opt
         q.insert("type".into(), Value::String("noul".into()));
         q.insert(
             "instructions".into(),
-            Value::String(format!(
-                "위 실제 출력은 단순 문구·화면 표시만 부분 확인한 것이 아니라 해당 흐름을 실제로 실행해 연동 오류 없이 정상 작동함을 확인함으로써 이 목표 조건을 충족한다: {label}"
-            )),
+            Value::String(match_goal_instruction(label)),
         );
         questions.insert(name.clone(), Value::Object(q));
     }
@@ -988,7 +1018,47 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{goal_lines, MATCH_TYPES};
+    use super::{
+        goal_lines, load_config, match_goal_instruction, scope_coverage_instruction, MATCH_TYPES,
+    };
+
+    #[test]
+    fn doc_only_rows_never_get_runtime_clause() {
+        let goal = "1. [수정] AGENTS.md 알아두기 절 ⇒ 같은 색 묶음 한묶음 변경 규칙 기록";
+        let cov = scope_coverage_instruction("AGENTS.md에 색 묶음 규칙을 기록해", goal);
+        assert!(cov.contains("제품 런타임 실행·화면 확인 조건은 요구하지 않는다"));
+        assert!(!cov.contains("퀴즈가 작동해"));
+        let m = match_goal_instruction("[수정] AGENTS.md 알아두기 절 ⇒ 규칙 기록");
+        assert!(m.contains("제품 런타임 실행·화면 확인은 요구하지 않는다"));
+        assert!(!m.contains("실제로 실행해"));
+        let m = match_goal_instruction("[수정] manage-project Skill 3절 ⇒ 기호 문구 갱신");
+        assert!(!m.contains("실제로 실행해"));
+    }
+
+    #[test]
+    fn product_rows_keep_runtime_clause() {
+        let goal = "1. [기능] 퀴즈 칸 선택·제출 ⇒ 정답 처리 성공";
+        let cov = scope_coverage_instruction("퀴즈 색을 바꿔", goal);
+        assert!(cov.contains("실제 기능·화면·퀴즈가 작동해"));
+        let mixed = "1. [수정] AGENTS.md ⇒ 규칙 기록\n2. [기능] 퀴즈 제출 ⇒ 성공";
+        assert!(scope_coverage_instruction("AGENTS.md 규칙과 퀴즈 수정", mixed).contains("퀴즈가 작동해"));
+        assert!(scope_coverage_instruction("퀴즈 색 변경", goal).contains("퀴즈가 작동해"));
+        let m = match_goal_instruction("[수정] 다이어리 문서 생성 ⇒ ## 🔔 아래 기록");
+        assert!(m.contains("해당 흐름을 실제로 실행해 정상 작동함을 확인해야 한다"));
+    }
+
+    #[test]
+    fn config_always_uses_enforce_mode() {
+        let dir = std::env::temp_dir().join(format!("jev-cfg-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let env_file = dir.join(".env");
+        std::fs::write(&env_file, "JEV_MODEL=jev-latest\n").unwrap();
+        std::env::set_var("JEV_ENV_FILE", &env_file);
+        let cfg = load_config();
+        std::env::remove_var("JEV_ENV_FILE");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(cfg.mode, "enforce");
+    }
 
     #[test]
     fn parses_current_goal_tags_only() {

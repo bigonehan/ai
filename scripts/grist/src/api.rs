@@ -1,10 +1,18 @@
 //! Grist REST access. The key comes from the access-grist skill `.env` (or GRIST_API_KEY) and never
 //! appears in any output.
 
-use crate::util;
+use crate::{timing, util};
 use serde_json::{json, Map, Value};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+struct ApiCall(Instant);
+
+impl Drop for ApiCall {
+    fn drop(&mut self) {
+        timing::api_call(self.0.elapsed());
+    }
+}
 
 pub const PROJECT_TABLE: &str = "Table7";
 pub const TASK_TABLE: &str = "Table26";
@@ -130,6 +138,7 @@ pub fn request(method: &str, path: &str, body: Option<&Value>) -> R<Value> {
         .request(method, &url)
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json");
+    let _timed_call = ApiCall(Instant::now());
     let response = match body {
         Some(body) => call.send_string(&util::dumps(body, None, true)),
         None => call.call(),

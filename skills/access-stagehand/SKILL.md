@@ -10,8 +10,8 @@ Every Stagehand use in `/home/tree/extensions` work goes through `scripts/stageh
 ## Before and after a session
 
 - Read `references/attach-notes.md` before opening a session and follow its `먼저 할 일` (checks that avoid known init/attach costs).
-- On `runtime-stuck`, `A Stagehand instance is already initialized` or `Stagehand initialization is already in progress`, run `node ~/.codex/skills/access-stagehand/scripts/stagehand.mjs doctor --restart-runtime` once before any other retry: it reloads unresponsive page targets and restarts the Stagehand Runtime service worker, then reports JSON. When its `stillHung` list is not empty, rerun it with `--close-hung` to close only those tabs; a page that never answers makes every new Runtime init time out.
-- After an init/attach failure or an open slower than 30 s, add an entry to `references/attach-notes.md` (symptom text, cause, recovery, time spent, prevention) or extend the matching entry's `재발`, and update `먼저 할 일` when the procedure changes. Never record keys, cookies or prompt text there.
+- `openStagehand()` owns recovery: it serializes sessions with a socket lock, resets the Runtime once when the previous owner died, probes and closes hung tabs, retries each error class once, and loads or updates `extensions` itself. Do not run `doctor` first, wrap the script in extra restarts, or call `run_cdp --replace` before it. When it still fails, its error names the boundary (see below); report that line.
+- After an init/attach failure or an open slower than 30 s, look up the boundary name in `references/attach-notes.md` `오류별 제안` and follow it; for a new boundary or symptom add one two-line entry (`증상 :` boundary name and error text, `제안 :` the confirmed recovery action), and update `먼저 할 일` when the procedure changes. Never record keys, cookies or prompt text there.
 
 ## Commands
 
@@ -20,7 +20,9 @@ H=~/.codex/skills/access-stagehand/scripts/stagehand.mjs
 node $H status                                   # runtime version, model, whether a key is set
 node $H install                                  # (re)install the pinned runtime
 node $H open --url <URL> [--extension <dir>]     # visible session, prints mode/browser/headless/title
-node $H doctor [--restart-runtime] [--close-hung]  # probe page targets, reload unresponsive ones, restart the Runtime
+node $H browser [--replace] [--extension a,b] [--url URL] [--detach]  # start/attach the shared browser (run_cdp calls this)
+node $H stats [--last N]                         # p50/p90 per open stage and top error boundaries
+node $H doctor [--restart-runtime] [--close-hung]  # manual probe only; openStagehand already does this
 ```
 
 `status` and `open` print JSON; errors go to stderr as JSON with exit code 1 (2 for wrong arguments).
@@ -38,13 +40,11 @@ await session.close();                                        // disconnects; th
 
 - `session.page` (always populated even when `url` is omitted) and `session.pages` (`await stagehand.browser.context.pages()`) are returned on `session`. Note that Stagehand v3/v4 `page` does **not** have `page.frames()`, and `stagehand.context` does **not** exist (`stagehand.browser.context.pages()` is used internally). For iframe elements, use `page.locator("iframe >> <selector>")`.
 - When importing TypeScript server/src files alongside `openStagehand()` in Node 25 one-liners, always run `node --experimental-transform-types --input-type=module -e '...'` (do not use `npx tsx -e`, which defaults to CommonJS and fails on top-level `await`, and do not omit `--experimental-transform-types`, which fails on `readonly` parameter properties).
-- `session.mode` is `attach` when `http://127.0.0.1:9222` was healthy, `launch` when the script started the dedicated-profile Chromium (`/home/tree/.config/codex-run-cdp`) itself with `headless: false` and `keepAlive`.
-- Stagehand needs its own `Stagehand Runtime` extension (`/home/tree/.local/share/access-stagehand/node_modules/@browserbasehq/stagehand/dist/extension`) running in the browser. Both launchers (`run_cdp -e` and this script's `launch`) put it in `--load-extension` and `--disable-extensions-except` next to the product extension, and `run_cdp` adds `--enable-unsafe-extension-debugging`.
-- Before attaching, the script reads the running browser's flags and fails at once (instead of the 60 s `Stagehand initialization timed out`) with one of these boundaries; each message names the `run_cdp --replace -e <dir>` restart that fixes it:
-  - `extension-not-loaded` — an `--extension` you passed is not loaded in that browser.
-  - `stagehand-extension-blocked` — `--disable-extensions-except` leaves out the Stagehand Runtime.
-  - `stagehand-extension-unloadable` — no allow-list, but `--enable-unsafe-extension-debugging` is missing, so Stagehand cannot load its runtime.
-  Restarting the shared dedicated-profile browser this way is part of the check, not a user action; logins persist in the profile.
+- One browser launcher: `openStagehand()` and `run_cdp` both go through `stagehand.mjs browser`, which starts the dedicated-profile Chromium (`/home/tree/.config/codex-run-cdp`, `headless: false`) with the Stagehand Runtime and `--enable-unsafe-extension-debugging`, and remembers extensions in `<profile>/run_cdp-extensions`. `session.mode` is `attach` or `launch`.
+- `extensions` are compared with each `manifest.json` version and loaded (`Extensions.loadUnpacked`) or reloaded in place (`chrome.runtime.reload()`) without restarting the browser. `openStagehand()` never closes or restarts the shared browser (a browser started inside a Codex sandbox dies with the sandbox); when the in-place update cannot reach the new version it fails with `extension-reload-failed: … expected=… actual=…`, and the host restarts it with `run_cdp --replace`.
+- The Stagehand Runtime allows one initialized client per browser, so sessions on a port run one at a time behind the socket lock `<tmp>/access-stagehand-locks/<port>.sock` (`STAGEHAND_LOCK_DIR`). A waiter prints `[stagehand-step] runtime-lock-wait owner=<pid> stage=<stage>` every 30 s and gives up after 4 min with `runtime-lock-timeout`. SIGINT/SIGTERM/SIGHUP close the session and release the lock; `STAGEHAND_LEASE_TIMEOUT_MS` forces a close after that long (default: none).
+- Tabs the session opened are closed by `session.close()` (`keepPages: true` keeps them); tabs left by a dead session are closed by the next one.
+- Each open prints `[stagehand-summary] {"lockWaitMs",…,"retries","tabs","mode"}` and appends it to `~/.local/state/access-stagehand/sessions.jsonl` (`STAGEHAND_SESSION_LOG_FILE`); `stats` summarizes it. Error boundaries: `endpoint-absent`, `endpoint-unreachable`, `cdp-timeout: <method>`, `runtime-lock-timeout`, `runtime-worker-absent`, `runtime-worker-attach-failed`, `runtime-wake-failed`, `extension-manifest-absent`, `extension-load-failed`, `extension-reload-failed`, `stagehand-extension-blocked`, `stagehand-extension-unloadable`.
 - `session.aiEnabled` is false while `.env` has no `STAGEHAND_API_KEY`; navigation and page reads still work, `act`/`observe`/`extract` do not.
 - Which page to test, what to click and how to judge the result come from the `run-cdp` skill and the project's `AGENTS.md`.
 

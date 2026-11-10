@@ -15,9 +15,11 @@ description: manage-project 내부 Skill — /home/tree/extensions 요청의 입
 
 ## 2. 순수 설명·현황 질문
 
-- 파일·Grist 변경이 없는 설명·의견·현황 질문이나 진행 중 이유를 묻는 질문("왜 ~하고 있어?" 등)은 `?` 유무와 상관없이 기록 절차(`request-record`·`task-add`·`task-goal`·`flow-wait`·행 조회)를 돌리지 않는다. 필요한 줄만 `rg`로 읽어 즉시 답한다.
-- "왜 ~" 형태라도 에이전트의 오동작·절차 위반·제품 결함을 지적하면 설명이 아니라 수정 요청이다. 말뿐인 다짐 없이 원인 규칙·Skill·코드를 고쳐 `실행한 수정 → 검증 결과 → 남은 경계`로 보고한다.
-- "고쳐줄래?"·"~로 바꾸면?"처럼 수정을 요구하거나, 답하다 수정이 필요해지거나, 사용자가 진행을 지시하면 그때 `manage-project` 1단계를 시작한다. 행 없이 파일을 바꾸면 메인 Stop hook이 한 번 막는다.
+- 파일·Grist 변경이 없는 설명·의견·현황 질문이나 진행 중 지연·행동 이유를 묻는 질문("왜 오래 걸려?", "뭐하고 있어?" 등)은 `?` 유무와 상관없이 기록 절차·선행 위임을 벌이지 않고 즉시 이유부터 답한다(`main-edit-gate`가 위임·행 생성·3회째 조회를 거부하고 `task-complete`가 열린 행 중 이유 답변 종료를 허용).
+- 오동작·무행동·절차 위반 지적은 말뿐인 설명·제안 없이 원인 규칙·Skill·hook·코드를 고쳐 `실행한 수정 → 검증 결과 → 남은 경계`로 보고한다(`task-complete` Stop이 제안·무수정 말뿐인 응답을 차단).
+- 그 지적이 외부 연동 결과 누락이면 원래 요청의 최종 소비자를 먼저 확인한다. 시작 동작부터 소비자 readback까지 양의 효과를 실측하고, 그 결과와 목표의 누락을 바로잡은 다음 검증 도구를 정비한다. 0건·status·ACK·로그만으로 적용 확인을 끝내지 않는다.
+- 경로와 함께 준 결함 확인 요청은 그 파일을 고치라는 뜻이다. 없다고 결론 내기 전에 상수·표기를 넓혀 검색하고, 이전 버전이 있으면 노드·함수 단위 diff로 판정한다.
+- "고쳐줄래?"·"~로 바꾸면?"처럼 수정을 요구하거나, 답하다 수정이 필요해지거나, 사용자가 진행을 지시하면 그때 `manage-project` 1단계를 시작한다. 행 없이 파일·Grist 데이터를 바꾸면 메인 Stop hook이 행이 생길 때까지 막는다(`~/ai`·`~/.claude`·`/tmp` 제외).
 
 ## 3. 요구 사항 파악과 소유 프로젝트 판정
 
@@ -27,7 +29,8 @@ description: manage-project 내부 Skill — /home/tree/extensions 요청의 입
 - 지정된 원인·결함 경계는 진단 입력으로 삼는다. 수정 전 화면·로그·설치 확인으로 다시 입증하지 않는다.
 - 진행 중 사용자 정정은 새 요청으로 단정하지 않는다. 소유 대상을 판정한 뒤 그 프로젝트의 최신 요청(`grist request --project <dir>`)과 열린 Table26 목표에 연결한다. 수정 대상은 사용자가 말한 현상(관측값)과 그 재현 경로뿐이며, 재현하지 않은 다른 입력 경로·연동을 원인으로 정해 요청에 없는 동작을 추가하거나 검증하지 않는다.
 - 요구 사항은 `# 요구 사항` 한 줄과 `# 세부 사항`(`[📐|✒️|⌨️|🚿|✏️|🌍] 요약`) 줄로 정리해 `grist request-record`에 넘긴다. 세부 줄의 목표 분해는 `inquire-task`가 맡는다.
-- 현재 폴더를 소유자로 간주하지 않는다. 소유 프로젝트를 정한 뒤 `manage-project`를 `--project <dir> --query "<요청 키워드>"` 인자로 로드하면 진입 hook(`architecture-context`)이 그 프로젝트의 구조 출력을 문맥에 넣는다. 그 출력을 쓰고, 출력이 없을 때(다른 프로젝트로 옮김·구현자 시작 포함)만 `~/ai/scripts/bin/read-architecture --project <dir> --query "<키워드>"`를 직접 실행한다. `.ai/docs/architecture.md`로 대상 폴더를 고르고 `rg -n`으로 필요한 줄만 읽으며, `ls -R`·`find`로 구조를 다시 찾지 않는다(main-edit-gate가 거부). exit 2면 `.ai/docs/architecture.md`부터 작성한다.
+- 사용자가 프로젝트를 명시하지 않은 제품 증상 질문은 세션 시작 hook이 구조를 넣어 준 현재 폴더 프로젝트를 먼저 대상으로 본다. 메시지 속 낱말(셀 값·노드 텍스트, 예: `blender`·`강아지`)이 다른 프로젝트 이름과 겹쳐도 소유자 근거로 삼지 않고, 저장소 전체를 검색하기 전에 현재 프로젝트 `rg`로 증상을 대조한다(261109 mindmap 노드 `blender`를 blender_scene_creator로 오판).
+- 그 밖에는 현재 폴더를 소유자로 간주하지 않는다. 소유 프로젝트를 정한 뒤 `manage-project`를 `--project <dir> --query "<요청 키워드>"` 인자로 로드하면 진입 hook(`architecture-context`)이 그 프로젝트의 구조 출력을 문맥에 넣는다. 그 출력을 쓰고, 출력이 없을 때(다른 프로젝트로 옮김·구현자 시작 포함)만 `~/ai/scripts/bin/read-architecture --project <dir> --query "<키워드>"`를 직접 실행한다. `.ai/docs/architecture.md`로 대상 폴더를 고르고 `rg -n`으로 필요한 줄만 읽으며, `ls -R`·`find`로 구조를 다시 찾지 않는다(main-edit-gate가 거부). exit 2면 `.ai/docs/architecture.md`부터 작성한다.
 
 ## 4. 시작 시 Table26 행 읽기(캐시)
 
@@ -38,4 +41,5 @@ description: manage-project 내부 Skill — /home/tree/extensions 요청의 입
 ## 5. 미초기화 판정
 
 - 하위 프로젝트 `AGENTS.md`의 `# 상태`에서 Grist ID·Obsidian 문서·실행 runtime을 확인한다. 헤더가 없거나 `grist project <n>`이 행을 반환하지 않으면 미초기화다. 제품 파일 수정 전에 사용자에게 프로젝트 타입(`업무`, `공방`, `게임`, `보조`)을 물어 `references/initialize.md`를 실행한다.
-- 구조 출력이 `missing` 또는 빈 템플릿(exit 2)이면 해당 프로젝트 `.ai/docs/architecture.md`부터 작성한다. 작업 범위 안에서 폴더가 추가·삭제·이동되면 구조 문서를 갱신한다.
+- 구조 출력이 `missing` 또는 빈 템플릿(exit 2)이면 해당 프로젝트 `.ai/docs/architecture.md`부터 작성한다. 작업 범위 안에서 폴더가 추가·삭제·이동되면 `.ai/changes`(과거 기록)를 제외한 모든 문서(`AGENTS.md`·`.ai/docs`·Skill 문서)를 새 구조로 갱신한다.
+- 외부 데이터 위치(Eagle 폴더 경로·ID, Obsidian 경로)를 옮기거나 재구성하는 요청은 저장소 폴더 변경이 아니어도 `remove-legacy`를 함께 적용해, 옛 ID·경로를 쓰는 형제 사용처의 기본값과 changes를 제외한 모든 `AGENTS.md`·`.ai/docs`를 갱신한다.
