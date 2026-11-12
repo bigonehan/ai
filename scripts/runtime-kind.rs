@@ -19,13 +19,33 @@ pub fn runtime_kind(project: &Path) -> Result<RuntimeKind, String> {
                 if value.contains("없음(로컬 cli)") || value.contains("local cli")
                     || value.starts_with("cli ") || value.starts_with("~/ai/scripts/bin/")
                     || value.starts_with("npm test") { return Ok(RuntimeKind::Cli); }
+                if ["blender", "eagle", "resolve", "obsidian", "tauri", "데스크톱 앱", "comfyui"]
+                    .iter().any(|word| value.contains(word)) { return Ok(RuntimeKind::App); }
                 if value.contains("http://") || value.contains("https://") || value.contains("웹")
                     || value.contains("위젯") || value.contains("chrome") { return Ok(RuntimeKind::Web); }
-                if ["blender", "eagle", "resolve", "obsidian", "tauri", "데스크톱 앱", "comfyui", "플러그인"]
-                    .iter().any(|word| value.contains(word)) { return Ok(RuntimeKind::App); }
+                if value.contains("플러그인") { return Ok(RuntimeKind::App); }
                 break;
             }
         }
     }
     Err("AGENTS.md # 상태 > ### 실행의 runtime : 종류를 판정할 수 없어요".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{runtime_kind, RuntimeKind};
+    use std::fs;
+
+    #[test]
+    fn blender_with_web_screen_uses_desktop_runtime() {
+        let project = std::env::temp_dir().join(format!("runtime-kind-{}", std::process::id()));
+        fs::create_dir_all(&project).unwrap();
+        let agents = project.join("AGENTS.md");
+        fs::write(&agents, "# 정보\n### 실행\nruntime : 웹\n# 상태\n### 실행\nruntime : 폰 웹 화면 web/index.html / 설치본 blender_camera_control ZIP / QR 접속 후 Tap to start 탭 / Blender 선택 카메라 readback\n").unwrap();
+        assert_eq!(runtime_kind(&project).unwrap(), RuntimeKind::App);
+        fs::write(&agents, "# 상태\n### 실행\nruntime : 없음(로컬 CLI) / ~/ai/scripts/bin/grist / Codex hook\n").unwrap();
+        assert_eq!(runtime_kind(&project).unwrap(), RuntimeKind::Cli);
+        fs::remove_file(agents).unwrap();
+        fs::remove_dir(project).unwrap();
+    }
 }

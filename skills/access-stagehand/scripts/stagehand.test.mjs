@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { acquireRuntimeLock, attachExtension, browserArgs, browserCdp, cleanupBrowserLogs, closeRuntimeSession, connectAndCreate, createWithRuntimeWorker, enableProfileExtensions, ensureBrowser, ensureExtensions, extensionIdFor, formatSessionSummary, holdRuntimeWorker, openStagehand, optionalStateWrite, runDoctor, runtimeLockDir, runtimeResetForRecoveredOwner, sessionStats, STAGEHAND_EXTENSION_DIR } from "./stagehand.mjs";
+import { acquireRuntimeLock, attachExtension, browserArgs, browserCdp, cleanupBrowserLogs, closeRuntimeSession, connectAndCreate, createWithRuntimeWorker, enableProfileExtensions, enhanceStagehandPage, ensureBrowser, ensureExtensions, extensionIdFor, formatSessionSummary, holdRuntimeWorker, openStagehand, optionalStateWrite, runDoctor, runtimeLockDir, runtimeResetForRecoveredOwner, sessionStats, STAGEHAND_EXTENSION_DIR } from "./stagehand.mjs";
 
 test("browser log sweep removes only expired port logs", () => {
   const dir = mkdtempSync(join(tmpdir(), "run-cdp-sweep-"));
@@ -26,7 +26,7 @@ test("browser log sweep removes only expired port logs", () => {
 const runtimeUrl = `chrome-extension://${extensionIdFor(STAGEHAND_EXTENSION_DIR)}/service-worker.js`;
 const worker = (targetId) => ({ targetId, type: "service_worker", url: runtimeUrl, attached: false, browserContextId: "context-1" });
 const temporaryLockDir = () => {
-  const root = "/home/tree/extensions/test/tmp";
+  const root = join(tmpdir(), "access-stagehand-test");
   mkdirSync(root, { recursive: true });
   const dir = mkdtempSync(join(root, "runtime-lock-"));
   return { dir, clean: () => { rmSync(dir, { recursive: true, force: true }); try { rmdirSync(root); } catch {} } };
@@ -101,16 +101,34 @@ test("already attached to a Stagehand instance reconnects without a Runtime rest
   assert.equal(result.stagehand.browser.id, 2);
 });
 
-test("create deadline runs doctor and restart once, then fails at create timeout", async () => {
+test("create deadline does not start another create while the first is unsettled", async () => {
   let creates = 0;
   let doctors = 0;
   let restarts = 0;
   await assert.rejects(connectAndCreate({
     connect: async () => ({}), create: async () => { creates++; return new Promise(() => {}); },
     refreshTarget: async () => {}, doctor: async () => { doctors++; }, restartRuntime: async () => { restarts++; },
-    createTimeoutMs: 5, totalTimeoutMs: 1000,
-  }), /stagehand-create-timeout/);
-  assert.deepEqual([creates, doctors, restarts], [2, 1, 1]);
+    createTimeoutMs: 5, createSettleTimeoutMs: 5, totalTimeoutMs: 1000,
+  }), /stagehand-create-unsettled/);
+  assert.deepEqual([creates, doctors, restarts], [1, 0, 0]);
+});
+
+test("create timeout waits for the pending call to settle before returning", async () => {
+  let settle;
+  let finished = false;
+  const result = connectAndCreate({
+    connect: async () => ({}),
+    create: async () => new Promise((resolve) => { settle = () => { finished = true; resolve({ close: async () => {} }); }; }),
+    refreshTarget: async () => {}, doctor: async () => {}, restartRuntime: async () => {},
+    createTimeoutMs: 5, createSettleTimeoutMs: 100, totalTimeoutMs: 1000,
+  });
+  setTimeout(() => settle(), 20);
+  await assert.rejects(result, /stagehand-create-timeout/);
+  assert.equal(finished, true);
+});
+
+test("internal browser pages are rejected before opening a Stagehand session", async () => {
+  await assert.rejects(openStagehand({ url: "chrome://extensions" }), /stagehand-internal-page-unsupported: chrome:/);
 });
 
 test("session summary shape and stats percentiles are stable", () => {
@@ -431,7 +449,7 @@ test("doctor probes twenty pages with two hung renderers in bounded time", async
 });
 
 const fixture = () => {
-  const root = "/home/tree/extensions/test/tmp";
+  const root = join(tmpdir(), "access-stagehand-test");
   mkdirSync(root, { recursive: true });
   const dir = mkdtempSync(join(root, "browser-"));
   const ext = join(dir, "ext");
@@ -810,4 +828,39 @@ test("insufficient flags and ineffective first load fail without browser replace
     await assert.rejects(ensureExtensions(cdp, [ext], { sleep: async () => {} }), /extension-version-stale/);
     assert.equal(calls.filter((method) => method === "Browser.close").length, 0);
   } finally { clean(); }
+});
+
+test("enhanceStagehandPage polyfills locator.evaluate and evaluateAll including cross-origin iframe fallback", async () => {
+  const calls = [];
+  const makeRawLocator = (selector, nth) => ({
+    descriptor: { selector, ...(nth === undefined ? {} : { nth }) },
+    innerHtml: async () => `<div class="video-maker-init-overlay-backdrop"><p>초기화를 해주세요</p><button type="button">초기화</button></div>`,
+    first: () => makeRawLocator(selector, 0),
+    nth: (index) => makeRawLocator(selector, index),
+  });
+  const fakePage = {
+    locator: (selector) => makeRawLocator(selector),
+    evaluate: async (_fn, arg) => {
+      calls.push(arg);
+      if (arg.parts && arg.parts[0] === "iframe.custom_view") {
+        return { status: "cross-origin" };
+      }
+      if (arg.html) {
+        const fn = (0, eval)(`(${arg.fnText})`);
+        const fakeEl = { className: "video-maker-init-overlay-backdrop", textContent: "초기화를 해주세요" };
+        return arg.evalAll ? fn([fakeEl], arg.fnArg) : fn(fakeEl, arg.fnArg);
+      }
+      const fn = (0, eval)(`(${arg.fnText})`);
+      const fakeEl = { tagName: "BUTTON", textContent: "초기화", nth: arg.nthIndex };
+      return { status: "ok", value: arg.evalAll ? fn([fakeEl], arg.fnArg) : fn(fakeEl, arg.fnArg) };
+    },
+  };
+  const enhanced = enhanceStagehandPage(fakePage);
+  assert.equal(enhanced, fakePage);
+  const sameOrigin = await enhanced.locator("button").nth(1).evaluate((el, suffix) => `${el.textContent}:${el.nth}:${suffix}`, "ok");
+  assert.equal(sameOrigin, "초기화:1:ok");
+  const crossOrigin = await enhanced.locator("iframe.custom_view >> .video-maker-init-overlay-backdrop").evaluate((el) => el.className);
+  assert.equal(crossOrigin, "video-maker-init-overlay-backdrop");
+  const allResult = await enhanced.locator("button").evaluateAll((els) => els.length);
+  assert.equal(allResult, 1);
 });

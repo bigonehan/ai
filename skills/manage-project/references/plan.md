@@ -17,11 +17,11 @@
 
   ```
   ~/ai/scripts/bin/dispatch-agent --agent codex|gemini [--role agent|verifier|improver] --project <dir> --row <id> --prompt-file <F> --expect-seconds <N> [--add-dir <DIR> ...] [--watch-log <record-log path> ...]
-  # 검증자: --row <첫 행> --rows <행,행,…> 둘 다 필수, 프로젝트 .ai/logs가 없으면 --watch-log <런타임 로그>(예: Eagle %APPDATA%\Eagle\log.log) 필수
-  ~/ai/scripts/bin/dispatch-agent --agent codex --role verifier --project <dir> --row <id> --rows <id,id> --prompt-file <F> --watch-log <path>
+  # 검증자: --row <첫 행> --rows <행,행,…> 둘 다 필수. 프로젝트 .ai/logs가 없으면 실제 런타임 로그를 --watch-log로 지정하거나 .ai/docs/role-verifier.md에 단독 줄 watch-source: dispatch-log를 기록한다.
+  ~/ai/scripts/bin/dispatch-agent --agent codex --role verifier --project <dir> --row <id> --rows <id,id> --prompt-file <F> [--watch-log <path>]
   ```
 
-  - `--role agent`(기본)는 대행자(`T26_ROLE=worker`, `role-agent`), `--role verifier`는 검증자(`T26_ROLE=verifier`, `role-verifier`), `--role improver`는 흐름 마감 뒤 개선자(`T26_ROLE=improver`, `role-improver`, `~/ai` 쓰기 허용, 언제 부르는지는 `improve_process` §2)로 실행한다. 프롬프트 맨 앞에 `[Role] from=<보낸 역할> to=<받는 역할> row=<id> skill=<Skill>` 머리줄이 자동으로 붙는다. 검증자 기록은 `.ai/dispatch/<id>.verify.*`에 따로 남는다.
+  - `--role agent`(기본)는 대행자(`T26_ROLE=worker`, `role-agent`), `--role verifier`는 검증자(`T26_ROLE=verifier`, `role-verifier`), `--role improver`는 과정·로그 결함 감지 시 또는 흐름 마감 뒤 비동기 개선자(`T26_ROLE=improver`, `role-improver`, `~/ai` 쓰기 허용, 언제 부르는지는 `improve_process` §2)로 실행한다. 프롬프트 맨 앞에 `[Role] from=<보낸 역할> to=<받는 역할> row=<id> skill=<Skill>` 머리줄이 자동으로 붙는다. 검증자 기록은 `.ai/dispatch/<id>.verify.*`에 따로 남는다.
   - 프로젝트 밖을 고치는 행은 수정 경로를 `--add-dir`로 넘긴다. `~/ai/scripts` crate는 작업공간 루트(`--add-dir /home/tree/ai/scripts`)를 넘겨야 `cargo test`가 `target`·`Cargo.lock`에 쓸 수 있다.
   - `--expect-seconds` 기준: 짧은 CLI·확인 검증자 90초, 한 함수 수정 대행자 300초, 여러 파일 대행자 540초. Claude Bash 백그라운드 명령은 600초에 끊기므로 540초를 넘기지 않는다.
   - Windows 데스크톱 앱 런타임 확인은 `build-win`을 따른다.
@@ -44,7 +44,7 @@
 
 ## 3. 마감 (요청 대조)
 
-1. 구현자가 끝나면 `grist task-show <id> --project <dir> --section 검증` 한 번으로 `$H=검증`(제출 기록 존재)과 `task-submit` 테스트 출력을 함께 본다.
+1. 구현자가 끝나면 `grist task-show <id> --project <dir> --section 구현` 한 번으로 `### 구현`의 `- 상태 : 검증`(제출 완료)과 구현·테스트 내역을 함께 본다.
 2. 목표가 아니라 **요청과 계획**으로 판정한다. 최신 요청 원문(`~/ai/scripts/bin/grist request --project <dir>`, changes를 열지 않음)과 1의 테스트 출력을 대조해, 요청 범위가 좁혀졌거나 빠진 항목이 없는지 본다.
    - diff는 전체를 읽지 않는다. `git -C <저장소> diff --stat -- <수정 경로>`로 바뀐 파일·줄 수를 보고, 목표 줄마다 그 목표의 함수·경로 이름으로 `git diff -- <파일> | rg -n "<이름>" -C 3`처럼 해당 부분만 읽는다. 계획에 없는 파일이 stat에 보이면 그 파일만 연다.
    - 읽지 않은 나머지 변경은 숨긴 사례(`task-hidden`)와 흐름 확인 뒤의 목표별 근거(`task-confirm --evidence`)로 판정한다.

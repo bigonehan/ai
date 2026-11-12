@@ -539,6 +539,56 @@ pub fn append_item(project_dir: &Path, raw_id: i64, text: &str) -> R<()> {
     }
 }
 
+/// Sets `- 상태 : <status>` at the top of the row's `### 구현` section and clears any stale `#### 확인 (#id)` blocks.
+pub fn set_impl_status(project_dir: &Path, raw_id: i64, status: &str) -> R<()> {
+    let placed = edit_item(project_dir, raw_id, |lines| {
+        upsert_impl_status(lines, raw_id, status);
+    })?;
+    match placed {
+        Some(()) => Ok(()),
+        None => api::fail("records", format!("Table26 #{raw_id} block not found in .ai/changes")),
+    }
+}
+
+fn upsert_impl_status(lines: &mut Vec<String>, raw_id: i64, status: &str) {
+    let status_line = format!("- 상태 : {status}");
+    let (sub_start, sub_end) = subsection(lines, raw_id, "구현");
+    let mut h4_at = sub_end;
+    for idx in (sub_start + 1)..sub_end {
+        if lines[idx].starts_with("#### ") {
+            h4_at = idx;
+            break;
+        }
+    }
+    let mut replaced = false;
+    for idx in (sub_start + 1)..h4_at {
+        if lines[idx].trim_start().starts_with("- 상태 :") {
+            lines[idx] = status_line.clone();
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        lines.insert(sub_start + 1, status_line);
+    }
+    let (_, new_sub_end) = subsection(lines, raw_id, "구현");
+    let confirm_heading = format!("#### 확인 (#{raw_id})");
+    let mut i = sub_start + 1;
+    let mut end = new_sub_end;
+    while i < end {
+        if lines[i].trim() == confirm_heading {
+            let block_end = span(lines, i, 4).min(end);
+            let remove_start = if i > sub_start + 1 && lines[i - 1].trim().is_empty() { i - 1 } else { i };
+            let removed = block_end - remove_start;
+            lines.drain(remove_start..block_end);
+            end -= removed;
+            i = remove_start;
+        } else {
+            i += 1;
+        }
+    }
+}
+
 pub fn sections_in(text: &str, heading: &Regex) -> Vec<Vec<String>> {
     let lines = util::splitlines(text);
     let mut found = Vec::new();
@@ -839,6 +889,8 @@ pub fn register_item(project_dir: &Path, raw_id: i64, title: &str, kind: &str, j
             format!("- 판정 : {judge_str}"),
             "### 목표".to_string(),
             String::new(),
+            "### 할당".to_string(),
+            String::new(),
             "### 메모".to_string(),
             String::new(),
             "### 오류".to_string(),
@@ -884,7 +936,13 @@ pub fn subsection(lines: &mut Vec<String>, raw_id: i64, name: &str) -> (usize, u
     let index = match find(lines, 3, name, start, Some(end)) {
         Some(idx) => idx,
         None => {
-            let at = content_end(lines, start, end);
+            let at = if name == "할당" {
+                find(lines, 3, "메모", start, Some(end))
+                    .or_else(|| find(lines, 3, "구현", start, Some(end)))
+                    .unwrap_or_else(|| content_end(lines, start, end))
+            } else {
+                content_end(lines, start, end)
+            };
             lines.splice(at..at, [format!("### {name}"), String::new()]);
             at
         }
@@ -915,15 +973,30 @@ pub fn record_cell(project_dir: &Path, raw_id: i64, name: &str, value: &str) -> 
     Ok(res.unwrap_or(false))
 }
 
-/// Append one agent identity to the changes memo without writing Table26 `$D`.
+fn valid_alloc_line(line: &str) -> bool {
+    if line.trim() != line || line.is_empty() || line.contains(['\n', '\r']) {
+        return false;
+    }
+    match line.split_once(" · ") {
+        Some((id, session)) => {
+            crate::gate::parse_agent_id(id).is_ok()
+                && !session.is_empty()
+                && session.trim() == session
+                && !session.contains(" · ")
+        }
+        None => crate::gate::parse_agent_id(line).is_ok(),
+    }
+}
+
+/// Append one agent allocation (`<11자리 ID> · <세션 식별자>`) to changes `### 할당` without writing Table26 `$D`.
 pub fn record_agent_memo(project_dir: &Path, raw_id: i64, line: &str) -> R<bool> {
-    if !line.starts_with("에이전트 ") || line.trim() != line || line.contains(['\n', '\r']) {
-        return api::fail("validation", "task-memo needs one agent line starting with `에이전트 `");
+    if !valid_alloc_line(line) {
+        return api::fail("validation", "task-memo needs `<11자리 ID>` or `<11자리 ID> · <세션 식별자>`");
     }
     if item_file(project_dir, raw_id).is_none() {
         return api::fail("records", format!("Table26 #{raw_id} block not found in .ai/changes"));
     }
-    record_cell(project_dir, raw_id, "메모", line)
+    record_cell(project_dir, raw_id, "할당", line)
 }
 
 pub fn task_memo(project_arg: &str, raw_id: i64, line: &str) -> R<Value> {
@@ -988,8 +1061,22 @@ pub fn improve_record(project_arg: &str, raw_id: i64, kind: &str, text: &str) ->
         _ => format!("- 처리 : [#{raw_id}] {text}"),
     };
     let current = std::fs::read_to_string(&record).map_err(api::other)?;
+    if done_role_denied(&current, raw_id, kind, std::env::var("T26_ROLE").ok().as_deref()) {
+        return api::fail("role", format!("row {raw_id}: 실패·착각 개선 요구는 개선자(dispatch-agent --role improver)만 improve-done을 기록할 수 있어요"));
+    }
     write_atomic(&record, &append_improve_line(&current, &line))?;
     Ok(json!({ "id": raw_id, "record": record.file_name().map(|n| n.to_string_lossy().to_string()), "line": line }))
+}
+
+fn improvement_requires_improver(record: &str, raw_id: i64) -> bool {
+    let marker = format!("- [#{raw_id}]");
+    improve_lines(record).is_some_and(|lines| lines.iter().any(|line| {
+        line.starts_with(&marker) && !line[marker.len()..].trim_start().starts_with("해당 없음")
+    }))
+}
+
+fn done_role_denied(record: &str, raw_id: i64, kind: &str, role: Option<&str>) -> bool {
+    kind == "done" && improvement_requires_improver(record, raw_id) && role != Some("improver")
 }
 
 #[cfg(test)]
@@ -1012,6 +1099,19 @@ mod improve_tests {
         let out = append_improve_line(text, "- 처리 : [#2] c");
         assert_eq!(improve_lines(&out).unwrap(), vec!["- 처리 : [#1] a", "- 처리 : [#2] c"]);
         assert!(out.ends_with("## [구현] b (#2)\n#### 확인 (#2)\n- x\n"));
+    }
+
+    #[test]
+    fn failure_note_requires_improver_for_done() {
+        let record = "## 개선 요구\n- [#830] [실패 0회] 착각\n- [#831] 해당 없음 — 착각 없음\n";
+        assert!(improvement_requires_improver(record, 830));
+        assert!(!improvement_requires_improver(record, 831));
+        assert!(!improvement_requires_improver(record, 832));
+        assert!(done_role_denied(record, 830, "done", None));
+        assert!(done_role_denied(record, 830, "done", Some("worker")));
+        assert!(!done_role_denied(record, 830, "done", Some("improver")));
+        assert!(!done_role_denied(record, 831, "done", None));
+        assert!(!done_role_denied(record, 830, "note", None));
     }
 }
 
@@ -1664,6 +1764,25 @@ pub fn last_request_in(text: &str) -> Option<String> {
     Some(lines[block_start..block_end].join("\n"))
 }
 
+/// The `## ` block of `# 요청` that owns `item_title`, falling back to `last_request_in`.
+pub fn request_for_item_in(text: &str, item_title: Option<&str>) -> Option<String> {
+    let lines = util::splitlines(text);
+    let start = find(&lines, 1, "요청", 0, None)?;
+    let end = level1_end(&lines, start);
+    if let Some(want) = item_title.map(normalize_detail_title).filter(|t| !t.is_empty()) {
+        for i in ((start + 1)..end).rev() {
+            if matches!(heading(&lines[i]), Some((2, _))) {
+                let block_end = content_end(&lines, i, span(&lines, i, 2).min(end));
+                let block = lines[i..block_end].join("\n");
+                if block.lines().filter_map(|l| l.trim().strip_prefix("- ").map(normalize_detail_title)).any(|d| d == want) {
+                    return Some(block);
+                }
+            }
+        }
+    }
+    last_request_in(text)
+}
+
 /// The newest request across the project's changes records (J3 input).
 pub fn latest_request_block(project_dir: &Path) -> String {
     util::glob(&project_dir.join(".ai").join("changes"), "", ".md")
@@ -1719,10 +1838,6 @@ fn task_add_fields(mut fields: Map<String, Value>) -> Map<String, Value> {
     fields
 }
 
-fn session_rows_path(thread: &str) -> PathBuf {
-    state_dir().join("session_rows").join(format!("{}.json", util::sanitize_key(thread)))
-}
-
 fn state_dir() -> PathBuf {
     std::env::var_os("TASK_COMPLETE_STATE_DIR")
         .filter(|value| !value.is_empty())
@@ -1769,10 +1884,48 @@ fn register_session_row_at(path: &Path, raw_id: i64) -> R<()> {
     })
 }
 
-pub fn register_session_row(raw_id: i64) -> R<()> {
+/// 삭제한 Table26 행은 어느 세션의 종료 판정에도 남지 않게 모든 세션 행 목록에서 뺀다.
+fn forget_session_row_at(state: &Path, raw_id: i64) -> R<()> {
+    let Ok(entries) = std::fs::read_dir(state.join("session_rows")) else { return Ok(()); };
+    for path in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") { continue; }
+        with_lock(&path, || {
+            let Some(mut rows) = std::fs::read_to_string(&path).ok()
+                .and_then(|text| serde_json::from_str::<Vec<i64>>(&text).ok()) else { return Ok(()); };
+            if !rows.contains(&raw_id) { return Ok(()); }
+            rows.retain(|id| *id != raw_id);
+            write_atomic(&path, &serde_json::to_string(&rows).map_err(api::other)?)
+        })?;
+    }
+    Ok(())
+}
+
+pub fn forget_session_row(raw_id: i64) -> R<()> {
+    forget_session_row_at(&state_dir(), raw_id)
+}
+
+fn register_codex_session_row_at(state: &Path, thread: &str, project: &Path, raw_id: i64) -> R<()> {
+    register_session_row_at(&state.join("session_rows").join(format!("{}.json", util::sanitize_key(thread))), raw_id)?;
+    register_session_project_at(state, thread, raw_id, project)
+}
+
+pub fn register_session_row(project: &Path, raw_id: i64) -> R<()> {
     let Ok(thread) = std::env::var("CODEX_THREAD_ID") else { return Ok(()); };
     if thread.is_empty() { return Ok(()); }
-    register_session_row_at(&session_rows_path(&thread), raw_id)
+    register_codex_session_row_at(&state_dir(), &thread, project, raw_id)
+}
+
+fn register_existing_session_project_at(state: &Path, thread: &str, project: &Path, raw_id: i64) -> R<()> {
+    let rows: Vec<i64> = std::fs::read_to_string(state.join("session_rows").join(format!("{}.json", util::sanitize_key(thread))))
+        .ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+    if rows.contains(&raw_id) { register_session_project_at(state, thread, raw_id, project)?; }
+    Ok(())
+}
+
+pub fn register_existing_session_project(project: &Path, raw_id: i64) -> R<()> {
+    let Ok(thread) = std::env::var("CODEX_THREAD_ID") else { return Ok(()); };
+    if thread.is_empty() { return Ok(()); }
+    register_existing_session_project_at(&state_dir(), &thread, project, raw_id)
 }
 
 fn register_claude_session_row_at(state: &Path, project: &Path, raw_id: i64, codex_thread: Option<&str>, claude_session: Option<&str>) -> R<()> {
@@ -1860,7 +2013,7 @@ pub fn task_show(project_arg: &str, raw_id: i64, section_opt: Option<&str>) -> R
     if let Some(sec) = section_opt.filter(|s| !s.trim().is_empty()) {
         let lines = match sec.trim() {
             "목표" => goal_lines(),
-            stage @ ("초안" | "검증" | "확인" | "완료") => latest_stage_block(&lines[start..end], stage, raw_id),
+            stage @ ("확인" | "완료") => latest_stage_block(&lines[start..end], stage, raw_id),
             name => extract_sub(name),
         };
         return Ok(json!({
@@ -1912,7 +2065,8 @@ fn upsert_step(lines: &mut Vec<String>, raw_id: i64, step: &str, clean: &str, go
     let mut insert_at = sub_start + 1;
     for idx in (sub_start + 1)..h4_at {
         let line = lines[idx].trim_start();
-        if (goal.is_none() && line.starts_with("- ["))
+        if line.starts_with("- 상태 :")
+            || (goal.is_none() && line.starts_with("- ["))
             || (goal.is_some() && (line.starts_with("- [▷]") || line.starts_with("- [▶]"))) {
             insert_at = idx + 1;
         }
@@ -2005,7 +2159,15 @@ fn confirm_in_project_with_partial(project_dir: &Path, raw_id: i64, summary: &st
     if partial_reason.is_none() { if let Some(marker) = crate::task::runtime_evidence_marker(project_dir, raw_id, &confirmation) {
         return api::fail("validation", format!("#{raw_id} runtime confirmation contains unverified evidence: {marker}"));
     } }
+    let has_submit = crate::gate::gate_load(project_dir, raw_id).contains_key("submit");
     let steps = edit_item(project_dir, raw_id, |lines| {
+        if has_submit && docs.is_none() {
+            let (sub_start, sub_end) = subsection(lines, raw_id, "구현");
+            let has_status = ((sub_start + 1)..sub_end).any(|idx| lines[idx].trim_start().starts_with("- 상태 :"));
+            if !has_status {
+                lines.insert(sub_start + 1, "- 상태 : 검증".to_string());
+            }
+        }
         upsert_step(lines, raw_id, "○", check, None);
         upsert_step(lines, raw_id, "●", "사용자 검토 대기", None);
     })?;
@@ -2148,10 +2310,14 @@ mod tests {
 
     #[test]
     fn stage_section_returns_only_the_latest_record_block() {
-        let block: Vec<String> = "## [구현] [✒️] a (#7)\n#### 확인 (#7)\n- 요약 : 옛\n#### 검증 (#7)\n- 결과 : 성공\n#### 확인 (#7)\n- 요약 : 새\n- [x] 검사\n  결과 : 성공\n\n## [구현] [✒️] b (#8)\n".lines().map(String::from).collect();
+        let mut block: Vec<String> = "## [구현] [✒️] a (#7)\n### 구현\n- [▶] 1. 단계\n#### 확인 (#7)\n- 요약 : 옛\n#### 확인 (#7)\n- 요약 : 새\n- [x] 검사\n  결과 : 성공\n\n## [구현] [✒️] b (#8)\n".lines().map(String::from).collect();
         assert_eq!(super::latest_stage_block(&block, "확인", 7), vec!["- 요약 : 새", "- [x] 검사", "  결과 : 성공"]);
-        assert_eq!(super::latest_stage_block(&block, "검증", 7), vec!["- 결과 : 성공"]);
-        assert!(super::latest_stage_block(&block, "초안", 7).is_empty());
+        super::upsert_impl_status(&mut block, 7, "초안");
+        assert!(super::latest_stage_block(&block, "확인", 7).is_empty());
+        assert!(block.contains(&"- 상태 : 초안".to_string()));
+        super::upsert_impl_status(&mut block, 7, "검증");
+        assert!(block.contains(&"- 상태 : 검증".to_string()));
+        assert!(!block.contains(&"- 상태 : 초안".to_string()));
     }
 
     #[test]
@@ -2226,6 +2392,21 @@ mod tests {
     }
 
     #[test]
+    fn codex_row_registration_keeps_owning_project_for_stop_gate() {
+        let dir = std::env::temp_dir().join(format!("grist-codex-project-{}", std::process::id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        super::register_codex_session_row_at(&dir, "codex-1", &project, 860).unwrap();
+        let projects: Map<String, Value> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_projects/codex-1.json")).unwrap()).unwrap();
+        assert_eq!(projects.get("860").and_then(Value::as_str), project.to_str());
+        super::register_existing_session_project_at(&dir, "codex-1", &project, 860).unwrap();
+        super::register_existing_session_project_at(&dir, "codex-1", &project, 861).unwrap();
+        let restored: Map<String, Value> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_projects/codex-1.json")).unwrap()).unwrap();
+        assert_eq!(restored.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn claude_project_pointer_resolves_session_for_task_add() {
         let dir = std::env::temp_dir().join(format!("grist-claude-session-{}", std::process::id()));
         let project = dir.join("project");
@@ -2247,6 +2428,10 @@ mod tests {
         super::register_claude_session_row_at(&dir, &dir.join("other"), 412, None, Some("claude-env")).unwrap();
         let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_rows/claude-env.json")).unwrap()).unwrap();
         assert_eq!(rows, vec![412]);
+        super::register_claude_session_row_at(&dir, &project, 413, None, None).unwrap();
+        super::forget_session_row_at(&dir, 410).unwrap();
+        let rows: Vec<i64> = serde_json::from_str(&std::fs::read_to_string(dir.join("session_rows/claude-123.json")).unwrap()).unwrap();
+        assert_eq!(rows, vec![413]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -2311,12 +2496,12 @@ mod tests {
         let changes = project.join(".ai/changes");
         std::fs::create_dir_all(&changes).unwrap();
         let record = changes.join("260101.작업.md");
-        std::fs::write(&record, "# 작업\n1. [✒️] a (#1)\n2. [📐] b (#2)\n# 완료\n# 진행\n## [구현] [✒️] a (#1)\n### 구현\n\n## [구현] [📐] b (#2)\n### 구현\n#### 초안 (#2)\n").unwrap();
+        std::fs::write(&record, "# 작업\n1. [✒️] a (#1)\n2. [📐] b (#2)\n# 완료\n# 진행\n## [구현] [✒️] a (#1)\n### 구현\n\n## [구현] [📐] b (#2)\n### 구현\n- 상태 : 초안\n").unwrap();
         super::append_item(&project, 1, "\n#### 확인 (#1)\n- 요약 : x ⇒ y\n").unwrap();
         let text = std::fs::read_to_string(&record).unwrap();
         let first = text.find("#### 확인 (#1)").unwrap();
         assert!(first < text.find("## [구현] [📐] b (#2)").unwrap());
-        assert!(text.ends_with("#### 초안 (#2)\n"));
+        assert!(text.ends_with("- 상태 : 초안\n"));
         assert!(super::append_item(&project, 9, "x").is_err());
         std::fs::remove_dir_all(project).unwrap();
     }
@@ -2393,7 +2578,7 @@ mod tests {
         let changes = project.join(".ai/changes");
         std::fs::create_dir_all(&changes).unwrap();
         let record = changes.join("260101.작업.md");
-        std::fs::write(&record, "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n### 구현\n#### 검증 (#7)\n- [▶] Rust 실행 파일 연결\n#### 확인 (#7)\n- [○] 종료 입력 검증\n").unwrap();
+        std::fs::write(&record, "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n### 구현\n- 상태 : 검증\n- [▶] Rust 실행 파일 연결\n#### 확인 (#7)\n- [○] 종료 입력 검증\n").unwrap();
         assert_eq!(super::ensure_completion_note(&project, 7).unwrap(), true);
         assert_eq!(super::ensure_completion_note(&project, 7).unwrap(), false);
         assert_eq!(super::complete_item(&project, 7).unwrap(), true);
@@ -2475,7 +2660,7 @@ mod tests {
         println!("task_show_extracts_only_requested_section_without_full_block ▷ 필요한 줄·필드만 발췌해 읽고 출력하며 구형 경로·전체 덤프·불필요한 해시 검증 0건");
     }
 
-    const GOAL_ITEM: &str = "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n- 유형 : 개선\n### 목표\n1. [기능] 첫째\n2. [수정] 둘째\n\n### 메모\n- 메모 줄\n### 구현\n- [▶] 구현 줄\n#### 검증 (#7)\n- 검증\n";
+    const GOAL_ITEM: &str = "# 작업\n1. [✒️] 작업 (#7)\n# 완료\n# 진행\n## [구현] [✒️] 작업 (#7)\n- 유형 : 개선\n### 목표\n1. [기능] 첫째\n2. [수정] 둘째\n\n### 메모\n- 메모 줄\n### 구현\n- 상태 : 검증\n- [▶] 구현 줄\n";
 
     fn temp_project(name: &str, text: &str) -> std::path::PathBuf {
         let project = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
@@ -2497,19 +2682,22 @@ mod tests {
     }
 
     #[test]
-    fn task_memo_appends_only_agent_line_to_memo() {
+    fn task_memo_appends_only_agent_line_to_alloc_without_touching_memo() {
         let project = temp_project("grist-task-memo", GOAL_ITEM);
-        let line = "에이전트 1 : codex_338 · 4910ec9c ← 0 main";
+        let line = "00119800071 · 4910ec9c";
         assert!(super::record_agent_memo(&project, 7, line).unwrap());
         assert!(!super::record_agent_memo(&project, 7, line).unwrap());
         assert!(super::record_agent_memo(&project, 7, "다른 메모").is_err());
-        assert!(super::record_agent_memo(&project, 7, "에이전트 2 : a\nb").is_err());
+        assert!(super::record_agent_memo(&project, 7, "00119800072 · a\nb").is_err());
         let file = super::item_file(&project, 7).unwrap();
         let content = std::fs::read_to_string(file).unwrap();
         let mut lines = crate::util::splitlines(&content);
-        let (start, end) = super::subsection(&mut lines, 7, "메모");
-        assert_eq!(lines[(start + 1)..end].iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(),
-            vec!["- 메모 줄", "1. 에이전트 1 : codex_338 · 4910ec9c ← 0 main"]);
+        let (alloc_start, alloc_end) = super::subsection(&mut lines, 7, "할당");
+        assert_eq!(lines[(alloc_start + 1)..alloc_end].iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(),
+            vec!["1. 00119800071 · 4910ec9c"]);
+        let (memo_start, memo_end) = super::subsection(&mut lines, 7, "메모");
+        assert_eq!(lines[(memo_start + 1)..memo_end].iter().filter(|l| !l.is_empty()).cloned().collect::<Vec<_>>(),
+            vec!["- 메모 줄"]);
         std::fs::remove_dir_all(project).unwrap();
     }
 
@@ -2572,7 +2760,7 @@ mod tests {
         assert_eq!(super::apply_row(&project, 7, &fields).unwrap(), vec!["# 완료 이동"]);
         assert_eq!(std::fs::read_to_string(&note).unwrap(), original_note);
 
-        let confirmed = feature.replace("- 검증\n", "- 검증\n#### 확인 (#7)\n- 가능 : 사용자가 목록을 볼 수 있다\n");
+        let confirmed = feature.replace("- [▶] 구현 줄\n", "- [▶] 구현 줄\n#### 확인 (#7)\n- 가능 : 사용자가 목록을 볼 수 있다\n");
         std::fs::write(&record, confirmed).unwrap();
         assert_eq!(super::apply_row(&project, 7, &fields).unwrap(), vec!["# 완료 이동", "📍 추가"]);
         assert!(super::apply_row(&project, 7, &fields).unwrap().is_empty());
@@ -2617,7 +2805,7 @@ mod tests {
 
     #[test]
     fn confirm_keeps_document_and_no_runtime_exceptions() {
-        let document = temp_project("grist-document-confirm", &GOAL_ITEM.replace("#### 검증 (#7)\n- 검증\n", ""));
+        let document = temp_project("grist-document-confirm", &GOAL_ITEM.replace("- 상태 : 검증\n", ""));
         std::fs::write(document.join("AGENTS.md"), "runtime : 확장 브라우저\n").unwrap();
         super::confirm_in_project(&document, 7, "입력 ⇒ 결과", "충돌 검사", "단위 테스트", "1. 규칙 확인\n2. 문서 확인", None).unwrap();
         std::fs::remove_dir_all(document).unwrap();

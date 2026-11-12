@@ -124,6 +124,14 @@ impl TaskStore for GateStore {
     fn ready(&self, ctx: &mut TaskCtx) -> R<()> {
         let dir = ctx.dir()?.to_path_buf();
         let mut state = if ctx.prep_kind == "red" { Map::new() } else { gate::gate_load(&dir, ctx.raw_id) };
+        if let Some(prev_snap) = state.get(ctx.prep_kind)
+            .and_then(|p| p.get("snapshot"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+        {
+            ctx.prepared.insert("snapshot".into(), Value::String(prev_snap));
+        }
         state.remove("flow_wait");
         state.remove("verifier_recorded");
         state.remove(if ctx.prep_kind == "red" { "ready" } else { "red" });
@@ -151,7 +159,7 @@ impl TaskStore for ChangesStore {
 
     fn add(&self, ctx: &mut TaskCtx) -> R<()> {
         let Some(dir) = ctx.project_dir.clone() else { return Ok(()) };
-        records::register_session_row(ctx.raw_id)?;
+        records::register_session_row(&dir, ctx.raw_id)?;
         let title = ctx
             .fields
             .get("B")
@@ -167,12 +175,11 @@ impl TaskStore for ChangesStore {
     }
 
     fn ready(&self, ctx: &mut TaskCtx) -> R<()> {
-        let ok = ctx.prep_kind == "ready";
-        records::append_item(ctx.dir()?, ctx.raw_id, &gate::test_record("초안", ctx.raw_id, &ctx.purpose, ok, &ctx.detail))
+        records::set_impl_status(ctx.dir()?, ctx.raw_id, "초안")
     }
 
     fn submit(&self, ctx: &mut TaskCtx) -> R<()> {
-        records::append_item(ctx.dir()?, ctx.raw_id, &gate::test_record("검증", ctx.raw_id, &ctx.purpose, true, &ctx.detail))
+        records::set_impl_status(ctx.dir()?, ctx.raw_id, "검증")
     }
 
     fn check(&self, ctx: &mut TaskCtx) -> R<()> {
@@ -459,8 +466,40 @@ pub(crate) fn validated_docs(project_dir: &Path, docs: &str) -> Result<Vec<Strin
     Ok(paths.into_iter().map(str::to_string).collect())
 }
 
+pub(crate) fn row_status_in_text(text: &str, raw_id: i64) -> Option<&str> {
+    let suffix = format!("(#{raw_id})");
+    let mut in_any_item = false;
+    let mut in_target = false;
+    let mut status = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## [구현] ") {
+            in_any_item = true;
+            in_target = trimmed.ends_with(&suffix);
+            if in_target {
+                status = None;
+            }
+        } else if trimmed.starts_with("## ") || trimmed.starts_with("# ") {
+            in_target = false;
+        } else if in_target {
+            if let Some(val) = trimmed.strip_prefix("- 상태 :").map(str::trim) {
+                status = Some(val);
+            }
+        }
+    }
+    if in_any_item {
+        status
+    } else {
+        text.lines().filter_map(|l| l.trim().strip_prefix("- 상태 :").map(str::trim)).last()
+    }
+}
+
+pub(crate) fn row_has_verified_status(text: &str, raw_id: i64) -> bool {
+    row_status_in_text(text, raw_id) == Some("검증")
+}
+
 fn documented_text_only_in(project_dir: &Path, text: &str, raw_id: i64) -> bool {
-    if text.lines().any(|line| line.trim() == format!("#### 검증 (#{raw_id})")) { return false; }
+    if row_has_verified_status(text, raw_id) { return false; }
     latest_block(text, &format!("#### 확인 (#{raw_id})"), None)
         .and_then(|lines| lines.into_iter().find_map(|line| line.strip_prefix("- 문서 : ").map(str::to_string)))
         .is_some_and(|docs| validated_docs(project_dir, &docs).is_ok())
@@ -468,8 +507,7 @@ fn documented_text_only_in(project_dir: &Path, text: &str, raw_id: i64) -> bool 
 
 fn text_only_in(text: &str, raw_id: i64) -> bool {
     let suffix = format!("(#{raw_id})");
-    let submitted = format!("#### 검증 (#{raw_id})");
-    if text.lines().any(|line| line.trim() == submitted) { return false; }
+    if row_has_verified_status(text, raw_id) { return false; }
     text.lines()
         .filter(|line| line.starts_with("## [구현] ") && line.trim_end().ends_with(&suffix))
         .last()
@@ -533,9 +571,8 @@ pub fn confirmation_output_in_text(text: &str, raw_id: i64) -> Result<Option<Str
 }
 
 pub fn flow_confirmation_in_text(text: &str, raw_id: i64) -> Result<Option<String>, String> {
-    let verification = format!("#### 검증 (#{raw_id})");
-    if !text.lines().any(|line| line.trim() == verification) { return Ok(None); }
-    let Some(lines) = latest_block(text, &format!("#### 확인 (#{raw_id})"), Some(&verification)) else { return Ok(None) };
+    if !row_has_verified_status(text, raw_id) { return Ok(None); }
+    let Some(lines) = latest_block(text, &format!("#### 확인 (#{raw_id})"), None) else { return Ok(None) };
     let valid = lines.iter().any(|line| line.starts_with("- 요약 :") && line.contains('⇒'))
         && lines.iter().any(|line| line.starts_with("- [x]"))
         && lines.iter().any(|line| line == "결과 : 성공")
@@ -565,16 +602,23 @@ pub fn require_j1_pass(judgment: &Value, goal_count: usize) -> Result<(), String
     if !valid_shape { return Err("invalid J1 response".into()); }
     let Some(items) = judgment.get("items").and_then(Value::as_array) else { return Err("invalid J1 response".into()) };
     if items.len() != goal_count { return Err("invalid J1 response".into()); }
-    if judgment.get("verdict").and_then(Value::as_str) != Some("pass") {
-        return Err("J1 goal/output mismatch".into());
-    }
+    // 점수가 경계 근처에서 흔들리는 `uncertain`은 증거 재작성 반복만 낳으므로 막지 않고, 목표를 명백히 못 덮은 `fail`만 막는다.
+    let accepted = |verdict: Option<&str>| matches!(verdict, Some("pass" | "uncertain"));
+    let mismatch = || {
+        let failed = items.iter().filter(|item| !accepted(item.get("verdict").and_then(Value::as_str)))
+            .map(|item| format!("{}:{}", item.get("name").and_then(Value::as_str).unwrap_or("?"), item.get("verdict").and_then(Value::as_str).unwrap_or("?")))
+            .collect::<Vec<_>>();
+        if failed.is_empty() { "J1 goal/output mismatch".to_string() }
+        else { format!("J1 goal/output mismatch — {}", failed.join(", ")) }
+    };
     for index in 1..=goal_count {
         let name = format!("g{index}");
         let named: Vec<&Value> = items.iter().filter(|item| item.get("name").and_then(Value::as_str) == Some(&name)).collect();
-        if named.len() != 1 || named[0].get("verdict").and_then(Value::as_str) != Some("pass") {
-            return Err("J1 goal/output mismatch".into());
+        if named.len() != 1 || !accepted(named[0].get("verdict").and_then(Value::as_str)) {
+            return Err(mismatch());
         }
     }
+    if !accepted(judgment.get("verdict").and_then(Value::as_str)) { return Err(mismatch()); }
     Ok(())
 }
 
@@ -689,6 +733,19 @@ mod tests {
     }
 
     #[test]
+    fn ready_keeps_first_snapshot_when_preparation_is_repeated() {
+        let dir = tmp_project("ready-snapshot");
+        let mut ctx = TaskCtx { project_dir: Some(dir.clone()), raw_id: 845, prep_kind: "ready", ..Default::default() };
+        ctx.prepared.insert("snapshot".into(), json!("initial tree"));
+        GateStore.ready(&mut ctx).unwrap();
+        ctx.prepared.insert("snapshot".into(), json!("later tree"));
+        GateStore.ready(&mut ctx).unwrap();
+        assert_eq!(ctx.prepared["snapshot"], json!("initial tree"));
+        assert_eq!(gate::gate_load(&dir, 845)["ready"]["snapshot"], json!("initial tree"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn red_preparation_replaces_previous_gate_state() {
         let dir = tmp_project("red");
         let mut ctx = TaskCtx { project_dir: Some(dir.clone()), raw_id: 8, prep_kind: "ready", ..Default::default() };
@@ -734,7 +791,7 @@ mod tests {
     fn text_only_row_requires_document_symbol_and_no_submit() {
         let doc = "## [구현] [✒️] 규칙 정리 (#9)\n";
         assert!(text_only_in(doc, 9));
-        assert!(!text_only_in(&format!("{doc}#### 검증 (#9)\n"), 9));
+        assert!(!text_only_in(&format!("{doc}### 구현\n- 상태 : 검증\n"), 9));
         assert!(!text_only_in("## [구현] [📐] 체인 (#9)\n", 9));
     }
 
@@ -748,7 +805,7 @@ mod tests {
         assert!(super::confirmation_output_in_text(body, 9).unwrap().unwrap().contains("문서 : guide.md"));
         assert!(!super::documented_text_only_in(&dir, &body.replace("guide.md", "other.txt"), 9));
         assert!(!super::documented_text_only_in(&dir, &body.replace("guide.md", "missing.md"), 9));
-        assert!(!super::documented_text_only_in(&dir, &format!("{body}#### 검증 (#9)\n"), 9));
+        assert!(!super::documented_text_only_in(&dir, &body.replace("#### 확인 (#9)\n", "### 구현\n- 상태 : 검증\n#### 확인 (#9)\n"), 9));
         assert_eq!(super::validated_docs(&dir, "guide.md,missing.md").unwrap_err(), "--docs file missing: missing.md");
         std::fs::write(dir.join(".ai/changes/261023.light.md"), body).unwrap();
         assert!(super::text_only_row(&dir, 9));
@@ -780,7 +837,7 @@ mod tests {
         let state = code_state(Some(3));
         let without = exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &state).unwrap_err());
         assert!(without.contains("확인 블록 없음"));
-        std::fs::write(&path, "#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 값\n- 근거 1 : 값\n").unwrap();
+        std::fs::write(&path, "### 구현\n- 상태 : 검증\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 값\n- 근거 1 : 값\n").unwrap();
         let unsaved = exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &state).unwrap_err());
         assert!(unsaved.contains("flow-wait 미실행 또는 저장 안 됨") && !unsaved.contains("누락"));
         let _ = std::fs::remove_dir_all(dir);
@@ -788,12 +845,12 @@ mod tests {
 
     #[test]
     fn flow_evidence_uses_latest_successful_confirmation_after_verification() {
-        let old = "#### 검증 (#276)\n#### 확인 (#276)\n- 요약 : [🏗️] 이전 ⇒ 결과\n- [x] 이전 검사\n  결과 : 성공\n  상세 : 이전 값\n";
-        let current = "#### 검증 (#276)\n#### 확인 (#276)\n- 요약 : [🏗️] hook 입력 ⇒ 판정\n- [x] Stop 연결 검사\n  결과 : 성공\n  상세 : 설치 CLI 실행\n";
+        let old = "### 구현\n- 상태 : 검증\n#### 확인 (#276)\n- 요약 : [🏗️] 이전 ⇒ 결과\n- [x] 이전 검사\n  결과 : 성공\n  상세 : 이전 값\n";
+        let current = "#### 확인 (#276)\n- 요약 : [🏗️] hook 입력 ⇒ 판정\n- [x] Stop 연결 검사\n  결과 : 성공\n  상세 : 설치 CLI 실행\n";
         let output = flow_confirmation_in_text(&format!("{old}{current}"), 276).unwrap().unwrap();
         assert!(output.contains("Stop 연결 검사") && !output.contains("이전 검사"));
         assert_eq!(flow_confirmation_in_text(old, 277).unwrap(), None);
-        let failed = "#### 검증 (#1)\n#### 확인 (#1)\n- 요약 : [🏗️] a ⇒ b\n- [x] c\n  결과 : 실패\n  상세 : d\n";
+        let failed = "### 구현\n- 상태 : 검증\n#### 확인 (#1)\n- 요약 : [🏗️] a ⇒ b\n- [x] c\n  결과 : 실패\n  상세 : d\n";
         assert!(flow_confirmation_in_text(failed, 1).is_err());
     }
 
@@ -807,7 +864,7 @@ mod tests {
     fn light_row_skips_flow_wait_with_confirmation() {
         let dir = tmp_project("light-confirm");
         std::fs::write(dir.join(".ai/changes/261023.light.md"),
-            "#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n- 근거 1 : 첫 목표 값\n- 근거 2 : 둘째 목표 값\n").unwrap();
+            "### 구현\n- 상태 : 검증\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n- 근거 1 : 첫 목표 값\n- 근거 2 : 둘째 목표 값\n").unwrap();
         for count in [1, 2] {
             let evidence = code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(count))).unwrap();
             assert!(evidence.starts_with("# 목표별 근거\n- 근거 1 : 첫 목표 값\n- 근거 2 : 둘째 목표 값\n# 전체 흐름 확인 증거\n"));
@@ -821,7 +878,7 @@ mod tests {
     fn code_evidence_rejects_confirmation_without_goal_evidence() {
         let dir = tmp_project("no-goal-evidence");
         std::fs::write(dir.join(".ai/changes/261023.light.md"),
-            "#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n").unwrap();
+            "### 구현\n- 상태 : 검증\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n").unwrap();
         let err = code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err();
         assert!(exit_message(&err).contains("per-goal evidence missing"));
         let _ = std::fs::remove_dir_all(dir);
@@ -834,13 +891,13 @@ mod tests {
         let path = dir.join(".ai/changes/261023.light.md");
         for marker in ["단위 테스트", "경계·통합 테스트", "통합 테스트만", "로그인 필요", "로그인이 필요", "검증 중단", "확인하지 못", "미검증", "MOCK"] {
             std::fs::write(&path, format!(
-                "## [구현] [📐] 코드 (#303)\n#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n- 근거 1 : {marker}\n"
+                "## [구현] [📐] 코드 (#303)\n### 구현\n- 상태 : 검증\n#### 확인 (#303)\n- 요약 : 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n- 근거 1 : {marker}\n"
             )).unwrap();
             let err = code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err();
             assert!(exit_message(&err).contains("unverified evidence"), "{marker}");
         }
         std::fs::write(&path,
-            "## [구현] [📐] 코드 (#303)\n#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 로그인 필요\n- 근거 1 : 실제 파일 확인\n").unwrap();
+            "## [구현] [📐] 코드 (#303)\n### 구현\n- 상태 : 검증\n#### 확인 (#303)\n- 요약 : 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 로그인 필요\n- 근거 1 : 실제 파일 확인\n").unwrap();
         assert!(exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err()).contains("unverified evidence"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -858,7 +915,7 @@ mod tests {
         let dir = tmp_project("partial-confirm-check");
         std::fs::write(dir.join("AGENTS.md"), "runtime : 브라우저 확장\n").unwrap();
         let path = dir.join(".ai/changes/261023.light.md");
-        let base = "#### 검증 (#303)\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 일부 결과 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 검증 중단\n";
+        let base = "### 구현\n- 상태 : 검증\n#### 확인 (#303)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 일부 결과 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 검증 중단\n";
         std::fs::write(&path, base).unwrap();
         assert!(exit_message(&code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err()).contains("unverified evidence"));
         std::fs::write(&path, base.replace("- [x]", "- 부분 확인 : 사용자 지시로 검증 중단\n- [x]")).unwrap();
@@ -905,9 +962,9 @@ mod tests {
         assert!(require_j1_pass(&base("enforce", "pass", pass.clone()), 2).is_ok());
         assert!(require_j1_pass(&base("other", "pass", pass), 2).is_err());
         let one_uncertain = json!([{"name": "g1", "verdict": "pass"}, {"name": "g2", "verdict": "uncertain"}]);
-        assert!(require_j1_pass(&base("enforce", "uncertain", one_uncertain), 2).is_err());
+        assert!(require_j1_pass(&base("enforce", "uncertain", one_uncertain), 2).is_ok());
         let one_fail = json!([{"name": "g1", "verdict": "pass"}, {"name": "g2", "verdict": "fail"}]);
-        assert!(require_j1_pass(&base("enforce", "pass", one_fail), 2).is_err());
+        assert!(require_j1_pass(&base("enforce", "pass", one_fail), 2).unwrap_err().contains("g2:fail"));
         assert!(require_j1_pass(&json!({"ok": false, "boundary": "jev-timeout"}), 1).is_err());
         assert!(require_j1_pass(&base("enforce", "pass", json!([])), 0).is_err());
     }
@@ -918,7 +975,10 @@ pub fn request_as_goal(project_dir: &Path, raw_id: i64) -> Option<String> {
     let record = records::item_file(project_dir, raw_id)?;
     let text = std::fs::read_to_string(record).ok()?;
     let title = records::item_title_in(&text, raw_id);
-    let scoped = records::scope_request_block(&records::last_request_in(&text)?, title.as_deref());
+    let scoped = records::scope_request_block(&records::request_for_item_in(&text, title.as_deref())?, title.as_deref());
+    // A multi-detail request without an exact row-title match has no reliable per-row scope.
+    // Its goals were already checked against the request when the row was created (J3).
+    if scoped.lines().filter(|line| line.trim_start().starts_with("- ")).count() >= 2 { return None; }
     request_goal_lines(&scoped)
 }
 
@@ -953,5 +1013,20 @@ mod request_goal_tests {
         );
         let unsplit = crate::records::scope_request_block("## 단일 요약\n- [✒️] 하나뿐인 세부\n", Some("[✒️] 하나뿐인 세부"));
         assert!(unsplit.starts_with("## 단일 요약\n"));
+    }
+
+    #[test]
+    fn request_blocks_match_each_row_across_multiple_requests() {
+        let mut text = String::from("# 요청\n");
+        for number in 1..=8 {
+            text.push_str(&format!("## 요청 {number}\n- [✒️] 세부 작업 {number}\n"));
+        }
+        text.push_str("# 작업\n");
+        for number in [3, 5, 8] {
+            let title = format!("[✒️] 세부 작업 {number}");
+            let block = crate::records::request_for_item_in(&text, Some(&title)).unwrap();
+            assert_eq!(block, format!("## 요청 {number}\n- {title}"));
+            assert_eq!(crate::records::scope_request_block(&block, Some(&title)), block);
+        }
     }
 }

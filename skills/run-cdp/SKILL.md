@@ -12,15 +12,19 @@ description: "Check the visible start action, rendered screen and authoritative 
 - 브라우저·프로필·세션 열기·확장 로드와 갱신은 `access-stagehand`를 이용한다(`headless: false`, 공용 `:9222`, 전용 프로필 하나). headless는 프로젝트 `AGENTS.md`가 요구할 때만 쓴다.
 - Windows Chrome 디버깅 프로필은 쓰지 않는다. Windows 호스트 프로세스·포트는 PowerShell/CIM으로 확인한다.
 - 사용자 흐름은 Stagehand로, 정확한 DOM 읽기는 `session.page`로 한다. raw CDP(`/json/version`, `/json/list`)는 endpoint·target 확인에만 쓴다.
+- `chrome://extensions` 등 브라우저 내부 페이지는 Stagehand DOM 대상이 아니다(`openStagehand`가 URL을 거부한다). 확장 적재·버전·service worker 상태는 `openStagehand({ extensions: [배포 dir], url: <일반 페이지> })`의 확장 적재 결과와 `Target.getTargets`의 `chrome-extension://<id>/` target으로 확인한다. 내부 페이지를 열어 DOM을 읽거나 실패 뒤 같은 프로세스에서 세션을 다시 열지 않는다.
 
 ## Whole flow
 
 `runtime :`·`row:` 줄과 행마다 시작 동작·요구 결과는 위임 프롬프트에 있다. `AGENTS.md`·`grist task`로 다시 찾지 않는다.
 
-1. `openStagehand({ url, extensions: [배포 dir] })`로 세션을 연다. 확장 버전 비교·적재는 `openStagehand`가 하고, 맞지 않으면 그 오류 줄이 실패 경계다.
+1. `openStagehand({ url, waitForSelector, extensions: [배포 dir] })`로 세션을 연다. 확장 버전 비교·적재는 `openStagehand`가 하고, 맞지 않으면 그 오류 줄이 실패 경계다.
+   Grist 페이지는 초기 `page.evaluate`에서 iframe·작품 DOM이 아직 비어 있을 수 있다. 한 세션 안에서 `waitForSelector` 옵션 또는 `page.waitForSelector`로 화면의 작품 카드·위젯 iframe이 나타날 때까지 기다린 뒤 선택한다(`main-edit-gate`가 세션당 4회를 넘는 `openStagehand` 원라이너 반복 재접속을 거부). `session.page.locator`는 `enhanceStagehandPage`로 `evaluate`·`evaluateAll`(교차 출처 `iframe >> selector` 포함)과 `innerText`·`textContent`·`isVisible`·`click`을 지원한다.
 2. 시작 동작 전에 최종 소비자 상태를 읽는다.
 3. 실제 시작 동작을 하고 producer → transport/handler → 페이지·사이트 → 최종 소비자를 따라가 소비자를 다시 읽는다. 빈 페이지·target 목록·빌드·로그·ACK만으로는 런타임 결과가 아니다.
 4. 결과는 `role-verifier`의 `task-hidden`·`readback:` 줄로 남긴다. 자격 증명·쿠키·인증 헤더·비공개 쿼리 값은 기록하지 않는다.
+
+Grist 화면에서 테스트할 작품·행과 위젯 연결 상태는 열린 공용 CDP 페이지의 렌더된 카드·iframe으로 찾는다. `_grist_Views_section`·`_grist_Filters` CLI 조회나 `*.bundle.js` curl 조회로 UI를 역추적하지 않는다(`main-edit-gate`가 거부). `grist get Table7/Table34`는 화면 동작 뒤 저장된 값의 최종 readback에만 쓴다.
 
 반복 측정마다 공용 브라우저의 탭·창을 만들거나 닫지 않는다. attach해 기존 target을 읽고 연결만 끊으며, 페이지가 필요한 확인은 탭 하나를 한 번 열어 재사용한다.
 

@@ -5,7 +5,7 @@ description: Own the global agent rules and settings — read or change `~/ai/ru
 
 # Manage Global Rules
 
-전역 규칙은 원본 `~/ai/rules/Agents.md` 하나로만 관리한다. 생성본(`~/.codex/AGENTS.md`·`~/.claude/CLAUDE.md`·`~/.gemini/GEMINI.md`·`~/.gemini/antigravity-cli/GEMINI.md`)은 직접 고치지 않는다(`main-edit-gate`가 거부). 사용자가 "전역규칙/전역설정"·"앞으로"를 말하거나 전역 규칙·설정을 읽기·변경·지적하면 이 Skill이 담당한다.
+전역 규칙은 원본 `~/ai/rules/Agents.md` 하나로만 관리하고, 에이전트 전용 동작은 분리된 전용 문서(`~/ai/rules/antigravity.md` 등)에 둔다. 생성본(`~/.codex/AGENTS.md`·`~/.claude/CLAUDE.md`·`~/.gemini/GEMINI.md`·`~/.gemini/antigravity-cli/GEMINI.md`)은 직접 고치지 않는다(`main-edit-gate`가 거부). 사용자가 "전역규칙/전역설정"·"앞으로"를 말하거나 전역 규칙·설정을 읽기·변경·지적하면 이 Skill이 담당한다.
 
 ## 1. 전역 규칙·설정 지적 처리 (가장 먼저)
 
@@ -13,18 +13,18 @@ description: Own the global agent rules and settings — read or change `~/ai/ru
 
 1. **기존 규칙 찾기:** `agent-rules read`·`rg -n "<키워드>" ~/ai/rules/Agents.md ~/ai/skills`로 같은 내용의 규칙이 전역 규칙·Skill에 이미 있는지 확인한다.
 2. **이미 있으면 강제 수단으로 바꾼다:** 같은 문구를 다시 쓰거나 강조하지 않는다. 그 규칙을 기계적으로 막거나 수행하는 hook·script를 찾아 고치거나 새로 만든다.
-   - 후보: PreToolUse 거부(`~/ai/scripts/main-edit-gate`·`agy-hook`), Stop 판정(`task-complete`), CLI 검증(`grist`·`agent-rules`·`dispatch-agent`의 인자·상태 검사), 알림(`ask-notify`).
+   - 후보: PreToolUse 거부(`~/ai/scripts/main-edit-gate`), Stop 판정(`task-complete`), CLI 검증(`grist`·`agent-rules`·`dispatch-agent`의 인자·상태 검사), 알림(`ask-notify`).
    - 강제가 들어가면 그 규칙 문구는 전역 규칙에서 지우거나 "hook이 거부한다" 한 줄로 줄인다(예: `nf` 직접 실행 금지 → `main-edit-gate`가 거부).
    - hook·script는 작업 도구이므로 대행자에게 위임하지 않고 메인이 직접 고치며, `create-skill`의 위치·링크 규칙을 따른다. 실제 hook 환경에서 거부·통과 사례를 확인한다.
    - 기계적으로 판정할 수 없는 규칙(말투·판단 기준 등)만 문구 수정으로 처리하고, 그 이유를 보고에 한 줄로 적는다.
 3. **없으면 추가한다:** 가장 좁은 소유 위치(프로젝트 `AGENTS.md` → 해당 Skill → 전역 규칙 순)에 한 줄로 넣는다. 강제 가능한 내용이면 2번의 hook·script를 함께 만든다.
 
-## 2. 세 에이전트 공통 적용
+## 2. 에이전트 공통 적용과 전용 분리
 
-- 설정·hook·규칙 변경 요청은 `~/ai` 원본에만 적용하고 `agent-rules sync`로 Claude·Codex·Gemini·antigravity-cli에 생성한다.
+- 설정·hook·규칙 변경 요청은 `~/ai` 원본에만 적용하고 `agent-rules sync`로 생성본을 동기화한다. 특정 에이전트에만 있는 기능은 공통 전역 규칙이나 공통 Skill·공통 게이트에 섞지 않고 전용 문서(`~/ai/rules/antigravity.md`)와 전용 어댑터에서만 다룬다.
   - 규칙 원본: `~/ai/rules/Agents.md` (`agent-rules` 명령으로만 변경).
   - Skill 원본: `~/ai/skills/<name>`; 링크 아닌 사용자 Skill은 보존한다.
-  - hook 원본: `~/ai/codex/hook-manifest.json`; 이벤트·matcher·명령은 항목마다 한 번 적고 지원하지 않는 이벤트와 사유는 `unsupported`에 기록한다. 각 에이전트의 입력·출력 차이는 `agy-hook` 어댑터가 처리한다.
+  - hook 원본: `~/ai/codex/hook-manifest.json`; 이벤트·matcher·명령은 항목마다 한 번 적고 지원하지 않는 이벤트와 사유는 `unsupported`에 기록한다.
   - 규칙·Skill·hook·바이너리의 배포 상태는 `agent-rules status`(exit 0)로 확인하고, 어긋나면 `agent-rules sync`로 `~/ai` 원본에서 다시 생성한다. SessionStart의 `agent-rules ensure`도 어긋난 생성본을 백업한 뒤 재생성한다.
 
 ## 3. 어느 파일을 바꾸는가

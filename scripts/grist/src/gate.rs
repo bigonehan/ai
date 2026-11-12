@@ -41,16 +41,15 @@ pub fn confirmed_fields(stage: &str, summary: Option<&str>) -> Map<String, Value
 }
 
 pub(crate) fn flow_summary_from_text(text: &str, raw_id: i64) -> Option<String> {
-    let submitted = format!("#### 검증 (#{raw_id})");
+    if matches!(task::row_status_in_text(text, raw_id), Some(status) if status != "검증") {
+        return None;
+    }
     let confirmed = format!("#### 확인 (#{raw_id})");
     let mut in_confirmed = false;
     let mut summary = None;
     for line in text.lines() {
         let line = line.trim();
-        if line == submitted {
-            in_confirmed = false;
-            summary = None;
-        } else if line == confirmed {
+        if line == confirmed {
             in_confirmed = true;
             summary = None;
         } else if line.starts_with('#') {
@@ -146,16 +145,17 @@ fn verifier_row_from(role: Option<&str>, row: Option<&str>) -> Option<i64> {
 
 fn main_code_file(path: &str) -> bool {
     let path = Path::new(path);
+    // The delegator owns workflow tools under ~/ai/scripts; only product code is delegated.
+    if path.starts_with("/home/tree/ai/scripts") { return false; }
     if release_artifact(path) { return false; }
     if matches!(path.file_name().and_then(|name| name.to_str()), Some("Cargo.toml" | "package.json" | "manifest.json" | "blender_manifest.toml" | "runtime-contract.js" | "tauri.conf.json")) {
         return false;
     }
     let extension_source = !path.is_absolute() || records::workflow_root_of(path).is_some();
-    let script_source = path.starts_with("/home/tree/ai/scripts");
-    script_source || (extension_source
+    extension_source
         && !path.components().any(|part| part.as_os_str() == ".ai")
         && path.file_name().and_then(|name| name.to_str()) != Some("AGENTS.md")
-        && path.extension().and_then(|ext| ext.to_str()) != Some("md"))
+        && path.extension().and_then(|ext| ext.to_str()) != Some("md")
 }
 
 fn release_artifact(path: &Path) -> bool {
@@ -427,6 +427,22 @@ pub fn check_purpose(text: &str) -> R<String> {
     Ok(label.to_string())
 }
 
+fn hidden_replay_command(command: &str) -> R<()> {
+    // The hidden command runs again in flow-wait, in a fresh Stagehand session.
+    // AI actions can depend on an extension world that was ready only in the
+    // verifier's session; deterministic page actions can be replayed.
+    if Regex::new(r"\.stagehand\s*\.\s*(?:act|observe|extract)\s*\(")
+        .unwrap()
+        .is_match(command)
+    {
+        return api::fail(
+            "validation",
+            "task-hidden --test: Stagehand AI actions are session-dependent; use session.page locator/click/evaluate for a replayable check",
+        );
+    }
+    Ok(())
+}
+
 pub fn one_line(text: &str, project_dir: &Path) -> String {
     let proj_prefix = format!("{}/", util::path_str(project_dir));
     let home_str = util::path_str(&util::home());
@@ -696,6 +712,26 @@ fn generated(path: &str) -> bool {
         .is_match(path)
 }
 
+fn child_project_claimed(project_dir: &Path, path: &str) -> bool {
+    let Some((sub, rel)) = path.split_once('/') else { return false };
+    let child_dir = project_dir.join(sub);
+    if !child_dir.join("AGENTS.md").is_file() { return false; }
+    let Ok(entries) = std::fs::read_dir(child_dir.join(".ai/gate")) else { return false };
+    let mut allowed: Vec<String> = ALWAYS_EDITABLE.iter().map(|s| s.to_string()).collect();
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("json") { continue; }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse::<i64>().ok()) else { continue };
+        let detail = preparation_data(&child_dir, stem).map(|(_, data)| data).unwrap_or_default();
+        for key in ["paths", "tests"] {
+            if let Some(arr) = detail.get(key).and_then(|v| v.as_array()) {
+                allowed.extend(arr.iter().filter_map(|v| v.as_str()).map(String::from));
+            }
+        }
+    }
+    inside(rel, &allowed)
+}
+
 /// The working tree (tracked and untracked, ignore rules applied) as path, mode and blob IDs.
 /// Objects written by `git add` live only in a temporary store, never in the real repository.
 pub fn snapshot(project_dir: &Path) -> Option<String> {
@@ -806,6 +842,26 @@ fn is_test_file(path: &str) -> bool {
         || name.ends_with("_test.py")
 }
 
+/// 폴더 이름 변경으로 미추적이 된 파일은 작업 트리에서 지워진 옛 경로(첫 폴더만 다름)의
+/// HEAD 내용에 없던 줄만 돌려준다. 옛 경로가 없으면 None.
+fn renamed_added_lines(project_dir: &Path, file: &Path, contents: &str) -> Option<String> {
+    let git = |args: &[&str]| Command::new("git").arg("-C").arg(project_dir).args(args).output().ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+    let top = PathBuf::from(git(&["rev-parse", "--show-toplevel"])?.trim());
+    let rel = file.canonicalize().ok()?.strip_prefix(top.canonicalize().ok()?).ok()?.to_path_buf();
+    let tail: PathBuf = rel.components().skip(1).collect();
+    if tail.as_os_str().is_empty() { return None; }
+    let deleted = git(&["diff", "--name-only", "--diff-filter=D", "HEAD", "--", ":/"])?;
+    let old = deleted.lines().find(|line| {
+        let old = Path::new(line);
+        old.components().skip(1).collect::<PathBuf>() == tail && old.components().next() != rel.components().next()
+    })?;
+    let previous = git(&["show", &format!("HEAD:{old}")])?;
+    let previous: BTreeSet<&str> = previous.lines().collect();
+    Some(contents.lines().filter(|line| !previous.contains(line)).collect::<Vec<_>>().join("\n"))
+}
+
 fn bridge_sample_boundary<'a>(
     row_label: &str,
     changed_sources: impl IntoIterator<Item = (&'a str, &'a str)>,
@@ -833,7 +889,27 @@ fn bridge_sample_files(project_dir: &Path, row_label: &str, files: &[String], pr
     let source_contents: Vec<(String, String)> = files.iter().filter(|path| !is_test_file(path))
         .filter_map(|path| {
             let file = if Path::new(path).is_absolute() { PathBuf::from(path) } else { project_dir.join(path) };
-            std::fs::read_to_string(file).ok().map(|contents| (path.clone(), contents))
+            let contents = if Path::new(path).is_absolute() {
+                std::fs::read_to_string(&file).ok()?
+            } else {
+                let diff = Command::new("git").arg("-C").arg(project_dir)
+                    .args(["diff", "--unified=0", "HEAD", "--", path])
+                    .output().ok().filter(|output| output.status.success())?;
+                if diff.stdout.is_empty() {
+                    let tracked = Command::new("git").arg("-C").arg(project_dir)
+                        .args(["ls-files", "--error-unmatch", "--", path])
+                        .output().ok().is_some_and(|output| output.status.success());
+                    if tracked { String::new() } else {
+                        let contents = std::fs::read_to_string(&file).ok()?;
+                        renamed_added_lines(project_dir, &file, &contents).unwrap_or(contents)
+                    }
+                } else {
+                    String::from_utf8_lossy(&diff.stdout).lines()
+                        .filter_map(|line| line.strip_prefix('+').filter(|_| !line.starts_with("+++")))
+                        .collect::<Vec<_>>().join("\n")
+                }
+            };
+            Some((path.clone(), contents))
         }).collect();
     let mut test_paths: BTreeSet<String> = prepared.get("tests").and_then(Value::as_array)
         .into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
@@ -926,13 +1002,17 @@ pub fn check_goal_for_title(
     if !errors.is_empty() {
         return gate_err(json!({"boundary": "goal", "raw_id": raw_id, "errors": errors}));
     }
-    let req = records::scope_request_block(&latest_request(project_dir), item_title);
+    let request = raw_id.and_then(|id| records::item_file(project_dir, id))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| records::request_for_item_in(&text, item_title))
+        .unwrap_or_else(|| latest_request(project_dir));
+    let req = records::scope_request_block(&request, item_title);
     let judgment = jev("scope", raw_id, &[("request", &req), ("goal", &goal)]);
     if jev_blocks(&judgment) {
         return gate_err(json!({
             "boundary": "goal",
             "raw_id": raw_id,
-            "reason": "goal not grounded in the latest # 요청 or incomplete",
+            "reason": "각 행 목표는 판정 대상 # 요청 세부 사항 전체를 덮어야 해요. 행을 나누려면 # 요청에 독립된 '- ' 세부 사항이 2개 이상 있어야 하고, 행 제목이 해당 세부 사항과 일치해야 해요. 목표에 요청 밖 내용이 있어도 통과하지 않아요.",
             "jev": judgment.get("items").cloned().unwrap_or(Value::Null)
         }));
     }
@@ -970,10 +1050,10 @@ pub fn store_goal(project_dir: &Path, raw_id: i64, goal: &str, summary: &str) ->
     api::update(TASK_TABLE, raw_id, &upd)
 }
 
-/// What task-red does about the agent origin line in 메모.
+/// What task-red does about the agent origin line in 할당.
 #[derive(Debug, PartialEq)]
 pub enum OriginAction {
-    /// The 메모 already has `에이전트 <char> :` for the given agent ID.
+    /// The 할당 section already has the given agent ID.
     Skip,
     /// The agent ID is valid but its line is missing; warn and record nothing.
     Warn(char),
@@ -994,16 +1074,20 @@ pub fn parse_agent_id(id: &str) -> Result<char, String> {
     Ok(c)
 }
 
-/// Whether the row's 메모 already has an `에이전트 <agent> : ...` line.
-pub fn memo_has_agent_char(memo: &[String], agent: char) -> bool {
-    let head = format!("에이전트 {agent} : ");
-    memo.iter().any(|line| {
-        line.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c.is_whitespace())
-            .starts_with(&head)
+/// Whether the row's `### 할당` already has an `<11자리 ID>` line for `agent`.
+pub fn memo_has_agent_char(alloc: &[String], agent: char) -> bool {
+    alloc.iter().any(|line| {
+        let trimmed = line.trim();
+        let body = match trimmed.split_once(". ") {
+            Some((n, rest)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => rest.trim(),
+            _ => trimmed,
+        };
+        let id = body.split_once(" · ").map_or(body, |(id, _)| id.trim());
+        parse_agent_id(id) == Ok(agent)
     })
 }
 
-/// Decides skip / warn / record from the optional agent ID and the row's 메모.
+/// Decides skip / warn / record from the optional agent ID and the row's 할당.
 pub fn origin_action(memo: &[String], agent_id: Option<&str>) -> Result<OriginAction, String> {
     match agent_id {
         None => Ok(OriginAction::Record),
@@ -1027,7 +1111,7 @@ pub fn record_log_paths(home: &str) -> (String, String) {
 
 /// Applies the origin decision through the record-log CLI; failures only warn on stderr.
 fn record_agent_origin(project_arg: &str, project_dir: &Path, raw_id: i64, agent_id: Option<&str>) {
-    let memo: Vec<String> = records::task_show(project_arg, raw_id, Some("메모"))
+    let memo: Vec<String> = records::task_show(project_arg, raw_id, Some("할당"))
         .ok()
         .and_then(|v| v.get("lines").and_then(|l| l.as_array()).cloned())
         .map(|a| a.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect())
@@ -1037,7 +1121,7 @@ fn record_agent_origin(project_arg: &str, project_dir: &Path, raw_id: i64, agent
         Ok(OriginAction::Skip) => return,
         Ok(OriginAction::Warn(c)) => {
             return eprintln!(
-                "warning: 메모 of #{raw_id} has no `에이전트 {c} :` line; the caller must run record-log start; nothing recorded"
+                "warning: 할당 of #{raw_id} has no agent {c} ID line; the caller must run record-log start; nothing recorded"
             )
         }
         Ok(OriginAction::Record) => {}
@@ -1249,8 +1333,7 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
         .to_string();
     let run = testrun::run(&test_cmd, &project_dir);
     if run.code != 0 {
-        let detail = format!("{} {}", failure_detail(&run.output, &project_dir), run.suffix());
-        records::append_item(&project_dir, raw_id, &test_record("검증", raw_id, &purpose, false, &detail))?;
+        records::set_impl_status(&project_dir, raw_id, "초안")?;
         return gate_err(json!({
             "boundary": "submit",
             "raw_id": raw_id,
@@ -1259,8 +1342,14 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
             "output": run.output
         }));
     }
-    let changed = prepared.get("snapshot").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
-        .map(|prepared_tree| changed_since(&project_dir, prepared_tree)).unwrap_or_default();
+    let own_allowed: Vec<String> = prepared.get("paths").and_then(|v| v.as_array())
+        .into_iter().flatten().filter_map(|v| v.as_str()).map(String::from).collect();
+    let changed: BTreeSet<String> = prepared.get("snapshot").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+        .map(|prepared_tree| changed_since(&project_dir, prepared_tree))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|f| inside(f, &own_allowed) || !child_project_claimed(&project_dir, f))
+        .collect();
     if prepared.get("snapshot").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
         let mut allowed: Vec<String> = ALWAYS_EDITABLE.iter().map(|s| s.to_string()).collect();
         let mut test_files: Vec<String> = Vec::new();
@@ -1345,6 +1434,7 @@ pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str,
     if actor().0 == "verifier" { require_row("task-hidden", raw_id)?; }
     else { require_main("task-hidden")?; }
     let purpose = check_purpose(purpose)?;
+    hidden_replay_command(command)?;
     let (project_dir, _, _) = records::owned(project_arg, raw_id)?;
     let row = rows(&[raw_id])?.into_iter().next().unwrap();
     if row.h_str() != SUBMITTED_STAGE {
@@ -1419,10 +1509,16 @@ fn flow_skipped(rows: &[Row]) -> Vec<Value> {
         .map(|row| json!({"id": row.id, "H": row.h})).collect()
 }
 
+fn active_flow_ids(ids: Vec<i64>, current_open: &[i64]) -> Vec<i64> {
+    if current_open.is_empty() { ids } else { ids.into_iter().filter(|id| current_open.contains(id)).collect() }
+}
+
 pub fn flow_wait(project_arg: &str) -> R<Value> {
     require_main("flow-wait")?;
     let (project_dir, _, ids) = records::project(project_arg)?;
-    let fetched = rows(&ids)?;
+    let current_open = task::open_ids(&project_dir);
+    let active_ids = active_flow_ids(ids, &current_open);
+    let fetched = rows(&active_ids)?;
     let submitted_ids = flow_submitted_ids(&fetched);
     let skipped = flow_skipped(&fetched);
     if submitted_ids.is_empty() {
@@ -1482,7 +1578,7 @@ pub fn flow_wait(project_arg: &str) -> R<Value> {
     if !missing_hidden.is_empty() {
         return gate_err(json!({
             "boundary": "flow",
-            "reason": "each 검증 row needs a hidden case after its latest `#### 검증 (#id)`: `task-hidden N --purpose LABEL --test CMD`",
+            "reason": "each 검증 row needs a hidden case after task-submit (`- 상태 : 검증`): `task-hidden N --purpose LABEL --test CMD`",
             "rows": missing_hidden,
             "skipped": skipped
         }));
@@ -1522,9 +1618,8 @@ pub(crate) fn flow_wait_missing(project_dir: &Path, raw_id: i64) -> Option<&'sta
     let has_block = util::glob(&project_dir.join(".ai").join("changes"), "", ".md")
         .into_iter().filter_map(|path| std::fs::read_to_string(path).ok())
         .any(|text| {
-            let verification = format!("#### 검증 (#{raw_id})");
             let confirmation = format!("#### 확인 (#{raw_id})");
-            text.find(&verification).and_then(|start| text[start..].find(&confirmation)).is_some()
+            task::row_has_verified_status(&text, raw_id) && text.contains(&confirmation)
         });
     if !has_block { return Some("확인 블록"); }
     if flow_summary(project_dir, raw_id).is_none() { return Some("요약"); }
@@ -1546,6 +1641,12 @@ pub(crate) fn flow_wait_missing(project_dir: &Path, raw_id: i64) -> Option<&'sta
 mod tests {
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup { fn drop(&mut self) { let _ = std::process::Command::new("chmod").args(["-R", "u+w"]).arg(&self.0).output(); let _ = std::fs::remove_dir_all(&self.0); } }
+    #[test]
+    fn hidden_replay_rejects_stagehand_ai_actions_but_allows_page_actions() {
+        assert!(super::hidden_replay_command("await s.stagehand.act('click tab')").is_err());
+        assert!(super::hidden_replay_command("await session.stagehand . extract('read')").is_err());
+        assert!(super::hidden_replay_command("await s.page.locator('#tabs a').click()").is_ok());
+    }
     #[test]
     fn changed_since_reports_changes_when_git_objects_are_read_only() {
         use std::process::Command;
@@ -1598,18 +1699,56 @@ mod tests {
     }
 
     #[test]
+    fn bridge_sample_ignores_marker_on_unchanged_lines() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("grist-bridge-diff-{}", std::process::id()));
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let run = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&dir).args(args).status().unwrap().success());
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("consumer.js"), "const old = '127.0.0.1:41600';\nconst value = 1;\n").unwrap();
+        run(&["add", "consumer.js"]);
+        run(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "baseline"]);
+        std::fs::write(dir.join("consumer.js"), "const old = '127.0.0.1:41600';\nconst value = 2;\n").unwrap();
+        assert!(super::bridge_sample_files(&dir, "[🌍] Grist 저장", &["consumer.js".into()], &serde_json::Map::new()).is_none());
+        std::fs::write(dir.join("consumer.js"), "const old = '127.0.0.1:41600';\nconst value = 2;\nfetch('/commands/new');\n").unwrap();
+        assert!(super::bridge_sample_files(&dir, "[🌍] Grist 저장", &["consumer.js".into()], &serde_json::Map::new()).is_some());
+    }
+
+    #[test]
+    fn bridge_sample_ignores_existing_marker_after_folder_rename() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("grist-bridge-rename-{}", std::process::id()));
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(dir.join("old_app")).unwrap();
+        let run = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&dir).args(args).status().unwrap().success());
+        run(&["init", "-q"]);
+        std::fs::write(dir.join("old_app/clients.js"), "fetch('/commands/save');\nconst value = 1;\n").unwrap();
+        run(&["add", "old_app/clients.js"]);
+        run(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "baseline"]);
+        std::fs::rename(dir.join("old_app"), dir.join("new_app")).unwrap();
+        let project = dir.join("new_app");
+        std::fs::write(project.join("clients.js"), "fetch('/commands/save');\nconst value = 2;\n").unwrap();
+        assert!(super::bridge_sample_files(&project, "[🌍] Grist 저장", &["clients.js".into()], &serde_json::Map::new()).is_none());
+        std::fs::write(project.join("fresh.js"), "fetch('/commands/new');\n").unwrap();
+        assert!(super::bridge_sample_files(&project, "[🌍] Grist 저장", &["fresh.js".into()], &serde_json::Map::new()).is_some());
+        std::fs::write(project.join("clients.js"), "fetch('/commands/save');\nfetch('/queries/added');\n").unwrap();
+        assert!(super::bridge_sample_files(&project, "[🌍] Grist 저장", &["clients.js".into()], &serde_json::Map::new()).is_some());
+    }
+
+    #[test]
     fn flow_wait_missing_is_scoped_to_each_row_and_names_item() {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("test/tmp").join(format!("flow-wait-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".ai/changes")).unwrap();
         let record = dir.join(".ai/changes/261031.flow.md");
-        std::fs::write(&record, "#### 검증 (#10)\n#### 확인 (#10)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 실제 값\n#### 검증 (#11)\n").unwrap();
+        std::fs::write(&record, "## [구현] a (#10)\n### 구현\n- 상태 : 검증\n#### 확인 (#10)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 실제 값\n## [구현] b (#11)\n### 구현\n- 상태 : 검증\n").unwrap();
         assert_eq!(super::flow_wait_missing(&dir, 10), None);
         assert_eq!(super::flow_wait_missing(&dir, 11), Some("확인 블록"));
-        std::fs::write(&record, "#### 검증 (#11)\n#### 확인 (#11)\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 실제 값\n").unwrap();
+        std::fs::write(&record, "## [구현] b (#11)\n### 구현\n- 상태 : 검증\n#### 확인 (#11)\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 실제 값\n").unwrap();
         assert_eq!(super::flow_wait_missing(&dir, 11), Some("요약"));
-        std::fs::write(&record, "#### 검증 (#11)\n#### 확인 (#11)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n").unwrap();
+        std::fs::write(&record, "## [구현] b (#11)\n### 구현\n- 상태 : 검증\n#### 확인 (#11)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n").unwrap();
         assert_eq!(super::flow_wait_missing(&dir, 11), Some("근거"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1622,7 +1761,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".ai/changes")).unwrap();
         std::fs::write(dir.join("AGENTS.md"), "runtime : 브라우저 확장\n").unwrap();
         let record = dir.join(".ai/changes/261031.flow.md");
-        let base = "#### 검증 (#10)\n#### 확인 (#10)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 검증 중단\n";
+        let base = "### 구현\n- 상태 : 검증\n#### 확인 (#10)\n- 요약 : [🏗️] 입력 ⇒ 결과\n- [x] 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 검증 중단\n";
         std::fs::write(&record, base).unwrap();
         assert_eq!(super::flow_wait_missing(&dir, 10), Some("근거"));
         std::fs::write(&record, base.replace("- [x]", "- 부분 확인 : 사용자 지시로 검증 중단\n- [x]")).unwrap();
@@ -1646,7 +1785,8 @@ mod tests {
             assert!(super::delegate_boundary(None, 375, &[file.into()]).is_some(), "{file}");
         }
         assert!(super::delegate_boundary(None, 375, &["README.md".into(), "src/main.rs".into()]).is_some());
-        assert!(super::delegate_boundary(None, 375, &["/home/tree/ai/scripts/a.md".into()]).is_some());
+        assert!(super::delegate_boundary(None, 375, &["/home/tree/ai/scripts/a.md".into()]).is_none());
+        assert!(super::delegate_boundary(None, 375, &["/home/tree/ai/scripts/dispatch-agent/src/main.rs".into()]).is_none());
         assert!(super::delegate_boundary(Some("worker"), 375, &files).is_none());
     }
     #[test]
@@ -1726,6 +1866,12 @@ mod tests {
         let rows = vec![row(548, "초안"), row(551, "검증"), row(552, "작업"), row(553, "검증")];
         assert_eq!(flow_submitted_ids(&rows), vec![551, 553]);
         assert_eq!(super::flow_skipped(&rows), vec![json!({"id":548,"H":"초안"}), json!({"id":552,"H":"작업"})]);
+    }
+
+    #[test]
+    fn flow_wait_limits_project_history_to_current_open_rows() {
+        assert_eq!(super::active_flow_ids(vec![840, 845, 846], &[845]), vec![845]);
+        assert_eq!(super::active_flow_ids(vec![840, 845, 846], &[]), vec![840, 845, 846]);
     }
 
     #[test]
@@ -1819,20 +1965,20 @@ mod tests {
 
     #[test]
     fn origin_skips_when_agent_char_line_exists() {
-        let memo = vec!["1. 에이전트 1 : t26_7 · codex://x".to_string()];
+        let memo = vec!["1. 00120000071 · x".to_string()];
         assert_eq!(origin_action(&memo, Some("00120000071")), Ok(OriginAction::Skip));
     }
 
     #[test]
     fn origin_warns_when_agent_char_line_missing() {
-        let memo = vec!["에이전트 2 : reviewer · c".to_string()];
+        let memo = vec!["00120000072 · c".to_string()];
         assert_eq!(origin_action(&memo, Some("0012000007A")), Ok(OriginAction::Warn('A')));
         assert_eq!(origin_action(&[], Some("00120000071")), Ok(OriginAction::Warn('1')));
     }
 
     #[test]
     fn origin_records_without_agent_id() {
-        let memo = vec!["에이전트 1 : t26_7 · c".to_string()];
+        let memo = vec!["00120000071 · c".to_string()];
         assert_eq!(origin_action(&memo, None), Ok(OriginAction::Record));
         assert_eq!(agent_start_args("/p", 7), vec!["start", "/p", "7", "--role", "t26_7"]);
     }
@@ -1863,9 +2009,10 @@ mod tests {
 
     #[test]
     fn confirmation_summary_is_scoped_to_row_and_latest_verification() {
-        let text = "#### 검증 (#7)\n#### 확인 (#7)\n- 요약 : [✨] 이전 입력 ⇒ 오래된 결과\n#### 검증 (#7)\n#### 확인 (#8)\n- 요약 : [⭕️] 다른 입력 ⇒ 다른 결과\n#### 확인 (#7)\n- 요약 : [✨] 현재 입력 ⇒ 구현 결과\n";
+        let text = "## [구현] a (#7)\n### 구현\n- 상태 : 검증\n#### 확인 (#7)\n- 요약 : [✨] 이전 입력 ⇒ 오래된 결과\n#### 확인 (#7)\n- 요약 : [✨] 현재 입력 ⇒ 구현 결과\n## [구현] b (#8)\n### 구현\n- 상태 : 검증\n#### 확인 (#8)\n- 요약 : [⭕️] 다른 입력 ⇒ 다른 결과\n";
         assert_eq!(flow_summary_from_text(text, 7).as_deref(), Some("[✨] 현재 입력 ⇒ 구현 결과"));
         assert_eq!(flow_summary_from_text(text, 8).as_deref(), Some("[⭕️] 다른 입력 ⇒ 다른 결과"));
+        assert_eq!(flow_summary_from_text("## [구현] a (#7)\n### 구현\n- 상태 : 초안\n#### 확인 (#7)\n- 요약 : [✨] 현재 입력 ⇒ 구현 결과\n", 7), None);
         assert_eq!(flow_summary_from_text("#### 확인 (#7)\n- 요약 : 입력 ⇒ 결과\n", 7), None);
         assert_eq!(flow_summary_from_text("#### 확인 (#7)\n- 요약 : 사용자 확인 대기\n", 7), None);
     }
@@ -1900,6 +2047,25 @@ mod tests {
         let errors = super::goal_errors("1. [기능] a ▷ b\n목표 아님\n[수정] c");
         println!("goal_errors ▷ {errors:?}");
         assert_eq!(errors.len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn child_project_claimed_ignores_files_prepared_in_child_project() {
+        let dir = std::env::temp_dir().join(format!("grist-child-claimed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let child = dir.join("blender_bridge");
+        std::fs::create_dir_all(child.join(".ai/gate")).unwrap();
+        std::fs::write(child.join("AGENTS.md"), "# 상태\n").unwrap();
+        std::fs::write(
+            child.join(".ai/gate/846.json"),
+            r#"{"ready":{"paths":["ui.py","tests"],"tests":["tests/test_bridge.py"]}}"#,
+        ).unwrap();
+        assert!(super::child_project_claimed(&dir, "blender_bridge/ui.py"));
+        assert!(super::child_project_claimed(&dir, "blender_bridge/AGENTS.md"));
+        assert!(super::child_project_claimed(&dir, "blender_bridge/tests/test_bridge.py"));
+        assert!(!super::child_project_claimed(&dir, "blender_bridge/unclaimed.py"));
+        assert!(!super::child_project_claimed(&dir, "other/ui.py"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

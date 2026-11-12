@@ -47,8 +47,20 @@ fn validate(args: Args, root: &Path) -> Result<(PathBuf, PathBuf, PathBuf, Vec<O
     let script = if args.script.is_absolute() { args.script } else { project.join(args.script) };
     let script = fs::canonicalize(&script).map_err(|_| (format!("실패 — 스크립트 없음: {}", script.display()), 2))?;
     if !script.is_file() { return Err((format!("실패 — 스크립트 파일 아님: {}", script.display()), 2)); }
+    let source = fs::read_to_string(&script).map_err(|e| (format!("실패 — 스크립트 읽기 불가: {e}"), 2))?;
+    if repeated_render_benchmark(&source) {
+        return Err(("실패 — 반복 render.render 벤치마크 금지: .blend 원인은 데이터블록 1회 조회로 조사하세요".into(), 2));
+    }
     let exe = args.exe.or_else(|| choose_exe(root)).ok_or_else(|| (format!("실패 — blender.exe 없음: {SEARCH}"), 2))?;
     Ok((project, script, exe, args.extra))
+}
+
+fn repeated_render_benchmark(source: &str) -> bool {
+    let lines: Vec<&str> = source.lines().map(|line| line.split('#').next().unwrap_or("").trim()).collect();
+    let renders = lines.iter().map(|line| line.matches("render.render(").count()).sum::<usize>();
+    let bench = lines.iter().any(|line| line.starts_with("def bench") && line.contains('('));
+    let loop_present = lines.iter().any(|line| line.starts_with("for ") || line.starts_with("while "));
+    renders >= 2 || (bench && loop_present)
 }
 
 fn wslpath(path: &Path) -> Result<OsString, String> {
@@ -78,7 +90,18 @@ fn display(exe: &Path, args: &[OsString]) -> String {
 
 fn select(stdout: &[u8], stderr: &[u8]) -> Vec<String> {
     let lines: Vec<String> = [stdout, stderr].into_iter().flat_map(|bytes| String::from_utf8_lossy(bytes).lines().map(str::to_owned).collect::<Vec<_>>()).collect();
-    let hits: Vec<String> = lines.iter().filter(|line| ["SMOKE", "Error", "Traceback", "Exception"].iter().any(|word| line.contains(word))).cloned().collect();
+    let progress: Vec<usize> = lines.iter().enumerate()
+        .filter(|(_, line)| line.contains("Fra:"))
+        .map(|(index, _)| index).collect();
+    let saved: Vec<usize> = lines.iter().enumerate()
+        .filter(|(_, line)| line.contains("Saved:"))
+        .map(|(index, _)| index).collect();
+    let samples = [progress.first().copied(), progress.get(progress.len() / 2).copied(), progress.last().copied(),
+        saved.first().copied(), saved.get(saved.len() / 2).copied(), saved.last().copied()];
+    let hits: Vec<String> = lines.iter().enumerate()
+        .filter(|(index, line)| ["SMOKE", "Error", "Traceback", "Exception"].iter().any(|word| line.contains(word))
+            || samples.contains(&Some(*index)))
+        .map(|(_, line)| line.clone()).collect();
     if hits.is_empty() { lines.into_iter().rev().take(10).collect::<Vec<_>>().into_iter().rev().collect() } else { hits }
 }
 
@@ -119,22 +142,23 @@ try {
   Start-Sleep -Seconds 5
   $console = @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" | Where-Object { $_.Name -match 'conhost|OpenConsole|WindowsTerminal' })
   if ($console.Count -gt 0) { throw "console_children=$($console.Count)" }
-  $pages = @(Invoke-RestMethod 'http://127.0.0.1:19339/json')
+  $rawPages = Invoke-RestMethod 'http://127.0.0.1:19339/json'
+  $pages = @($rawPages | ForEach-Object { $_ })
   foreach ($label in @('overlay', 'settings')) {
-    $page = $pages | Where-Object { $_.url -match $label } | Select-Object -First 1
+    $page = @($pages | Where-Object { $_.url -match $label })[0]
     if (-not $page) { throw "missing_page=$label" }
     $ws = [System.Net.WebSockets.ClientWebSocket]::new()
     try {
-      $ws.ConnectAsync([Uri]$page.webSocketDebuggerUrl, [Threading.CancellationToken]::None).Wait()
+      $ws.ConnectAsync([Uri][string]$page.webSocketDebuggerUrl, [Threading.CancellationToken]::None).Wait()
       $expr = "window.__TAURI__.event.listen('smoke-check',()=>{}).then(f=>{f();if(/not allowed by ACL|uncaught|exception/i.test(document.body.innerText))throw Error('page error text');return 'ok'})"
       $msg = @{ id=1; method='Runtime.evaluate'; params=@{ expression=$expr; awaitPromise=$true; returnByValue=$true } } | ConvertTo-Json -Compress -Depth 5
       $bytes = [Text.Encoding]::UTF8.GetBytes($msg)
-      $ws.SendAsync([ArraySegment[byte]]$bytes, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).Wait()
+      $ws.SendAsync([System.ArraySegment[byte]]::new($bytes, 0, $bytes.Length), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).Wait()
       do {
         $buf = New-Object byte[] 65536
         $sb = New-Object System.Text.StringBuilder
         do {
-          $r = $ws.ReceiveAsync([ArraySegment[byte]]$buf, [Threading.CancellationToken]::None).Result
+          $r = $ws.ReceiveAsync([System.ArraySegment[byte]]::new($buf, 0, $buf.Length), [Threading.CancellationToken]::None).Result
           [void]$sb.Append([Text.Encoding]::UTF8.GetString($buf, 0, $r.Count))
         } while (-not $r.EndOfMessage)
         $response = $sb.ToString() | ConvertFrom-Json
@@ -144,6 +168,9 @@ try {
     } finally { $ws.Dispose() }
   }
   Write-Output 'SMOKE console_children=0'
+} catch {
+  Write-Output "SMOKE Error: $($_.Exception.Message) | $($_.InvocationInfo.Line.Trim())"
+  throw
 } finally {
   Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
 }
@@ -157,6 +184,7 @@ fn run_tauri(exe: &Path) -> i32 {
     let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", TAURI_SCRIPT])
         .env("TAURI_SMOKE_EXE", win_exe)
+        .env("WSLENV", "TAURI_SMOKE_EXE")
         .output();
     match output {
         Ok(output) => {
@@ -230,6 +258,8 @@ mod tests {
     #[test]
     fn filtering_and_failures() {
         assert_eq!(select(b"noise\nSMOKE ok\n",b"Traceback\nError\nException\n"),["SMOKE ok","Traceback","Error","Exception"]);
+        assert_eq!(select(b"Fra: 5\nFra: 7\nFra: 9\nSMOKE callback=3\nSaved: frame_0009.png\n",b""),
+            ["Fra: 5", "Fra: 7", "Fra: 9", "SMOKE callback=3", "Saved: frame_0009.png"]);
         let many=(0..12).map(|i| format!("line{i}\n")).collect::<String>();
         assert_eq!(select(many.as_bytes(),b"").first().unwrap(),"line2");
         let p=temp(); fs::write(p.join("smoke.py"),"pass").unwrap();
@@ -240,6 +270,20 @@ mod tests {
         assert!(validate(absent,Path::new("unused")).unwrap_err().0.starts_with("실패 — 프로젝트 없음:"));
         assert_eq!(run_with(make("smoke.py",Some("x".into())),Path::new("unused"), |_| Err("wslpath failed".into()), |_,_,_| unreachable!()),3);
         assert_eq!(run_with(make("smoke.py",Some("x".into())),Path::new("unused"), |_| Ok("C:\\smoke.py".into()), |_,_,_| Err(std::io::Error::new(std::io::ErrorKind::NotFound,"exe missing"))),3);
+        fs::remove_dir_all(p).unwrap();
+    }
+
+    #[test]
+    fn refuses_repeated_render_before_starting_blender() {
+        let p = temp();
+        let script = p.join("smoke.py");
+        let args = || Args { project: p.clone(), script: "smoke.py".into(), exe: Some("blender.exe".into()), extra: vec![], user_prefs: false };
+        fs::write(&script, "bpy.ops.render.render(write_still=True)\nbpy.ops.render.render(write_still=True)\n").unwrap();
+        assert_eq!(run_with(args(), Path::new("unused"), |_| unreachable!(), |_, _, _| unreachable!()), 2);
+        fs::write(&script, "def bench():\n    for engine in engines:\n        measure(engine)\n").unwrap();
+        assert_eq!(run_with(args(), Path::new("unused"), |_| unreachable!(), |_, _, _| unreachable!()), 2);
+        fs::write(&script, "# bpy.ops.render.render()\nbpy.ops.render.render(write_still=True)\n").unwrap();
+        assert_eq!(validate(args(), Path::new("unused")).unwrap().1, script);
         fs::remove_dir_all(p).unwrap();
     }
 }

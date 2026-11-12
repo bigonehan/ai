@@ -15,7 +15,13 @@
 제안 : 스크립트의 Runtime 재시작 1회 뒤에도 남으면 무응답 탭(무한 루프·대형 캔버스) 때문이다. `stagehand.mjs doctor --restart-runtime --close-hung` 한 번 뒤 재실행한다.
 
 증상 : `stagehand-create-timeout` — `Stagehand initialization timed out after 60000ms`
-제안 : 무거운 앱 탭(ComfyUI·Grist 다중 탭)이 열려 있으면 실행마다 `doctor --restart-runtime --close-hung` 뒤 연다. 반복되면 그 탭을 닫고 측정한다.
+제안 : 같은 프로세스에서 재초기화하지 않는다. `openStagehand()`가 진행 중인 create의 종료를 기다린 뒤 오류를 반환한다. 무거운 앱 탭을 점검하고 새 프로세스에서 한 번만 재시도한다.
+
+증상 : `stagehand-create-unsettled` — 시간 초과 뒤 기존 create가 종료되지 않음
+제안 : 세션 잠금이 풀려도 기존 호출이 남을 수 있다. 해당 프로세스를 종료하고 새 프로세스에서 시작한다.
+
+증상 : `stagehand-internal-page-unsupported` — `chrome://`·`devtools://` URL
+제안 : 내부 페이지 DOM을 관측하지 않는다. `extensions` 적재 결과와 `chrome-extension://<id>/` target으로 확장 상태를 확인한 뒤 일반 웹 페이지에서 동작을 검증한다.
 
 증상 : `stagehand-connect-target`·`stagehand-create-target` — `Target.attachToTarget` `No target with given id found`
 제안 : 다른 세션이 Runtime SW를 재적재해 targetId가 바뀐 것이다. 같은 스크립트를 1회 재실행하고, 계속되면 동시에 공용 브라우저를 쓰는 세션을 확인한다.

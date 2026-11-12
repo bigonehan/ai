@@ -29,7 +29,7 @@ description: 대행자(구현자, T26_ROLE=worker 또는 t26_<id> 에이전트)�
 
 ## Bridge 연동 행(`[🌍]`)
 - consumer 테스트는 Bridge 소유 wire 샘플(`<bridge>/contracts/samples/<계약>/*.json`)을 파일 그대로 읽어 실제 handler(HTTP 서버·파서)에 넣는다. 상대 요청·응답 모양(본문 유무·Content-Type·mime·이름 대소문자)을 테스트에서 손으로 만들지 않는다. 샘플이 없거나 프롬프트와 다르면 고치지 않고 `last`로 보고하고 끝낸다(`task-submit`이 샘플 참조 없는 `[🌍]` 제출을 거부한다).
-- 거부 경로마다 원인별로 다른 오류 문구와 record-log 한 줄(관측한 요청 모양: `len=`·`ctype=`·`path=`·파싱 오류)을 남기고, 원인이 다른 두 실패의 문구가 서로 다른지 테스트로 확인한다.
+- 거부 경로마다 원인별로 다른 오류 문구를 반환하고 원인이 다른 두 실패의 문구가 서로 다른지 테스트로 확인한다. 로그 기록·점검은 직접 붙잡고 대기하지 않고 `record-log` Skill 비동기 에이전트에 맡긴다.
 - 261031 blender_bridge #544: 테스트가 claim을 `{}` 본문으로, finish 이미지를 자기 PNG로 직접 만들어 통과했지만 실제 Bridge는 본문 없는 claim과 다른 mime을 보내 런타임에서만 실패했다.
 
 ## 세 가지 모드

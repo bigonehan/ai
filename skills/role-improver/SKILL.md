@@ -1,11 +1,11 @@
 ---
 name: role-improver
-description: 개선자(T26_ROLE=improver, `dispatch-agent --role improver`로 시작된 세션)의 역할 계약 — 흐름이 마감된(`$H=확인`) 행의 changes `## 개선 요구`를 입력으로, 작업 흐름·전역 규칙·Skill·hook·`~/ai/scripts` 작업 도구에서 원인을 찾아 기계 강제로 고치고 `grist improve-done`을 기록한다. 제품 코드·CDP·행 단계는 다루지 않는다. 메인(role-delegator)·대행자(role-agent)·검증자(role-verifier)는 쓰지 않는다.
+description: 개선자(T26_ROLE=improver, `dispatch-agent --role improver`로 시작된 세션)의 역할 계약 — `$H=진단·검증·확인` 행의 changes `## 개선 요구`를 입력으로, 작업 흐름·전역 규칙·Skill·hook·`~/ai/scripts` 작업 도구에서 원인을 찾아 기계 강제로 고치고 `grist improve-done`을 기록한다. 제품 코드·CDP·행 단계는 다루지 않는다. 메인(role-delegator)·대행자(role-agent)·검증자(role-verifier)는 쓰지 않는다.
 ---
 
 # Role: 개선자 (Improver)
 
-위임자가 흐름의 행을 모두 `확인`으로 마감한 뒤 `## 개선 요구`에 실패·착각이 남은 행마다 부른다. 실수한 세션이 아닌 새 세션이 기록만 보고 원인을 판단하는 것이 이 역할의 목적이다.
+위임자가 흐름 마감 뒤 또는 검증 중 과정·로그 결함이 감지됐을 때 `## 개선 요구`가 기록된 행마다 비동기로 부른다. 실수한 세션이 아닌 새 세션이 기록만 보고 원인을 판단하는 것이 이 역할의 목적이다.
 
 ## 입력
 

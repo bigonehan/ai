@@ -15,6 +15,7 @@ Windows 데스크톱 앱의 헤드리스 런타임 확인은 위임자가 `win-s
 ```
 
 - `--script`: 프로젝트 기준 상대 경로 또는 절대 경로의 Python 스크립트. WSL 경로는 `wslpath`로 바꿔 넘긴다.
+- `.blend`의 렉·상태 원인 조사는 데이터블록을 한 번 조회해 판단한다. 엔진·조건별 `bpy.ops.render.render()` 반복 비교 벤치마크는 실행하지 않는다. `win-smoke`는 스크립트에 반복 렌더 호출 또는 `def bench` 루프가 있으면 실행 전 `exit=2`로 거부한다.
 - `--exe`: 없으면 `/mnt/c/Program Files/Blender Foundation/Blender */blender.exe` 중 최신 버전을 고른다.
 - 기본 인자: `-b --factory-startup --python-exit-code 1 --python <script>`. 사용자 설정·애드온이 필요하면 `--user-prefs`로 `--factory-startup`을 뺀다.
 - `--` 뒤 인자는 스크립트에 그대로 넘긴다.

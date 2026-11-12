@@ -145,17 +145,29 @@ fn paths(project: &Path, row: u64, role: &str) -> Paths {
 
 /// 대행자 위임에 record-log 에이전트 ID가 없으면 발급해 프롬프트에 붙인다(대행자가 ID를 물으며 멈추는 재위임 방지).
 fn agent_id_line(project: &Path, row: u64, role: &str, original: &[u8], issue: impl Fn(&Path, u64) -> Option<String>) -> Option<String> {
-    if role != "agent" || String::from_utf8_lossy(original).contains("에이전트 ID") { return None; }
+    if role != "agent" { return None; }
+    let has_id_header = String::from_utf8_lossy(original).lines().any(|line| {
+        let Some(value) = line.strip_prefix("에이전트 ID: ") else { return false; };
+        let Some(id) = value.get(..11) else { return false; };
+        id.as_bytes()[..10].iter().all(u8::is_ascii_digit)
+            && id.as_bytes()[10].is_ascii_alphanumeric()
+            && value[11..].chars().next().is_none_or(|ch| ch.is_whitespace() || ch == '(')
+    });
+    if has_id_header { return None; }
     let id = issue(project, row)?;
     Some(format!("에이전트 ID: {id} (작업 게이트에 --agent-id {id})\n"))
 }
 
 fn issue_agent_id(project: &Path, row: u64) -> Option<String> {
+    let conversation = ["CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID"]
+        .into_iter()
+        .find_map(|k| std::env::var(k).ok().filter(|v| !v.trim().is_empty()))
+        .unwrap_or_else(|| "dispatch".into());
     let output = Command::new("/home/tree/ai/skills/record-log/scripts/bin/record-log")
-        .args(["start", &project.to_string_lossy(), &row.to_string(), "--role", &format!("codex_{row}"), "--conversation", &std::env::var("CLAUDE_SESSION_ID").unwrap_or_else(|_| "dispatch".into()), "--caller", "0", "main"])
+        .args(["start", &project.to_string_lossy(), &row.to_string(), "--role", &format!("codex_{row}"), "--conversation", &conversation])
         .output().ok()?;
     let id = String::from_utf8_lossy(&output.stdout).lines().last()?.trim().to_string();
-    (output.status.success() && id.len() == 11 && id.bytes().all(|b| b.is_ascii_digit())).then_some(id)
+    (output.status.success() && id.len() == 11 && id.as_bytes()[..10].iter().all(u8::is_ascii_digit) && id.as_bytes()[10].is_ascii_alphanumeric()).then_some(id)
 }
 
 fn role_header(sender: Option<&str>, role: &str, row: u64, rows: Option<&[u64]>) -> String {
@@ -189,6 +201,24 @@ fn verifier_runtime_line(project: &Path, role: &str) -> String {
     if role != "verifier" { return String::new(); }
     fs::read_to_string(project.join("AGENTS.md"))
         .map(|agents| runtime_line(&agents)).unwrap_or_default()
+}
+
+fn already_verified_local_cli_hook(project: &Path, rows: &[u64]) -> bool {
+    if project != Path::new("/home/tree/extensions") || runtime_kind(project) != Ok(RuntimeKind::Cli) {
+        return false;
+    }
+    local_cli_hook_verified_in_gate(project, rows)
+}
+
+fn local_cli_hook_verified_in_gate(project: &Path, rows: &[u64]) -> bool {
+    rows.iter().any(|row| {
+        let path = project.join(".ai/gate").join(format!("{row}.json"));
+        fs::read_to_string(path).ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|gate| gate.get("hidden").and_then(|value| value.as_array()).cloned())
+            .is_some_and(|cases| cases.iter().any(|case| case.get("test").and_then(|value| value.as_str())
+                .is_some_and(|command| command.contains("task-complete --hook") || command.contains("main-edit-gate"))))
+    })
 }
 
 const VERIFIER_DOCS: &str = "~/ai/skills/role-verifier/references";
@@ -989,11 +1019,11 @@ fn preflight_then_target<T>(
 
 const IMPROVER_ROOT: &str = "/home/tree/ai";
 
-/// 개선자는 흐름이 끝난 행(`$H=확인`)의 `## 개선 요구`만 다룬다. 작업 중인 행에 붙으면 메인과 같은 파일을 동시에 고친다.
+/// 개선자는 흐름이 끝난 행(`$H=확인`) 또는 작업 과정·로그 결함으로 멈춘 행(`$H=진단`·`검증`)의 `## 개선 요구`를 다룬다.
 fn improver_preflight(row: u64, fields: &serde_json::Value) -> Result<String, String> {
     match fields.get("H").and_then(serde_json::Value::as_str) {
-        Some("확인") => Ok(String::new()),
-        state => Err(format!("실패 — improver: #{row} H={} (흐름 마감 뒤 $H=확인에서만 시작)", state.unwrap_or(""))),
+        Some("확인" | "검증" | "진단") => Ok(String::new()),
+        state => Err(format!("실패 — improver: #{row} H={} ($H=진단·검증·확인에서만 시작)", state.unwrap_or(""))),
     }
 }
 
@@ -1041,6 +1071,43 @@ fn run_limit_crossed(p: &Paths) -> Result<Option<SystemTime>, String> {
         if total > ANALYSIS_LIMIT { return Ok(Some(UNIX_EPOCH + Duration::from_millis(end))); }
     }
     Ok(None)
+}
+
+/// Finished agent·verifier run time on the row; improver runs fix the process and are not stall time.
+fn row_run_total(project: &Path, row: u64) -> Result<Duration, String> {
+    let mut total = Duration::ZERO;
+    for role in ["agent", "verifier"] {
+        let p = paths(project, row, role);
+        let text = match fs::read_to_string(&p.runs) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("dispatch runs: {error}")),
+        };
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let run = line.split_whitespace().nth(1).and_then(|run| run.parse::<u64>().ok())
+                .ok_or_else(|| format!("invalid dispatch state: {}", p.runs.display()))?;
+            total += Duration::from_millis(run);
+        }
+    }
+    Ok(total)
+}
+
+/// The first dispatch after a row's cumulative run time passes 20 minutes marks one improvement
+/// and is rejected until the improver handles it; later dispatches on the row are not marked again.
+fn stall_improvement(project: &Path, row: u64, role: &str, analysis: bool) -> Result<Option<String>, String> {
+    if role == "improver" || analysis { return Ok(None); }
+    let total = row_run_total(project, row)?;
+    if total <= ANALYSIS_LIMIT { return Ok(None); }
+    let dir = project.join(".ai/dispatch");
+    fs::create_dir_all(&dir).map_err(|error| format!("stall dir: {error}"))?;
+    match OpenOptions::new().write(true).create_new(true).open(dir.join(format!("{row}.stall-improve"))) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(error) => return Err(format!("stall marker: {error}")),
+    }
+    let minutes = total.as_secs() / 60;
+    mark_improvement_required(project, row, &format!("누적 실행 {minutes}m 정체(20분 초과)"))?;
+    Ok(Some(format!("과정결함 — {row}: 누적 실행 {minutes}m 정체, grist improve-note 후 dispatch-agent --role improver --row {row}를 호출하세요")))
 }
 
 fn row_closed(fields: &serde_json::Value) -> bool {
@@ -1123,8 +1190,11 @@ fn entrypoint_preflight(project: &Path, prompt: &[u8], resume: bool) -> Result<(
         let Some(raw_file) = entry.split_whitespace().next() else { continue };
         let file = raw_file.trim_matches(['`', '"', '\'', ',', ';']);
         if !file.contains('/') && !file.contains('.') { continue; }
-        let path = Path::new(file);
-        let path = if path.is_absolute() { path.to_path_buf() } else { project.join(path) };
+        let path = match (file.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => Path::new(&home).join(rest),
+            _ => PathBuf::from(file),
+        };
+        let path = if path.is_absolute() { path } else { project.join(path) };
         if !path.is_file() {
             return Err(format!("실패 — 진입점 파일 없음: {file} (위임 직전 실제 경로를 확인하세요)"));
         }
@@ -1171,6 +1241,38 @@ fn verifier_prompt_check(prompt: &[u8]) -> Result<(), String> {
         return Err("실패 — 실제 흐름 없음: 검증자 프롬프트에 실제 데이터로 시작 동작→최종 소비자까지 진행하는 `실제 흐름:` 줄이 필요해요".into());
     }
     Ok(())
+}
+
+/// A verifier runs the recorded goals. Broad checks of old flows and waiting for a
+/// video to finish are separate work unless the goals explicitly ask for them.
+fn verifier_scope_check(prompt: &[u8], goals: &str) -> Result<(), String> {
+    let prompt = String::from_utf8_lossy(prompt);
+    for line in prompt.lines() {
+        let old_flow = line.contains("기존")
+            && ["저장", "학습", "캡처"].iter().any(|word| line.contains(word))
+            && ["확인", "검증", "전수", "점검"].iter().any(|word| line.contains(word));
+        if old_flow && !goals.contains("기존") && !goals.contains("회귀") {
+            return Err("실패 — 검증 범위 초과: 목표에 없는 기존 저장·학습·캡처 흐름 확인은 별도 행으로 분리하세요".into());
+        }
+        let playback_wait = ["영상 완료", "영상 끝", "재생 완료", "재생 종료", "끝날 때까지", "재생이 끝날 때까지"]
+            .iter().any(|word| line.contains(word))
+            && ["대기", "기다", "확인", "검증"].iter().any(|word| line.contains(word));
+        if playback_wait && !goals.contains("재생 완료") && !goals.contains("영상 완료") {
+            return Err("실패 — 검증 대기 초과: 분량·재생시간은 메타데이터 값으로 확인하고 영상 종료를 기다리지 마세요".into());
+        }
+    }
+    Ok(())
+}
+
+fn verifier_goals(project: &Path, row: u64, rows: Option<&[u64]>) -> Result<String, String> {
+    let mut goals = String::new();
+    for &id in rows.unwrap_or(std::slice::from_ref(&row)) {
+        let output = grist_output(&["goal", &id.to_string(), "--project", &project.to_string_lossy()])
+            .map_err(|error| format!("grist goal {id}: {error}"))?;
+        if !output.status.success() { return Err(format!("grist goal {id} failed")); }
+        goals.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    Ok(goals)
 }
 
 fn agent_preflight(project: &Path, row: u64, p: &Paths, prompt: &[u8], resume: bool, role: &str,
@@ -1248,7 +1350,7 @@ fn cleanup_old_dispatch(dir: &Path, active_rows: &HashSet<String>, now: SystemTi
         let row = name.split(['.', '-']).next().unwrap_or("");
         if active_rows.contains(row) { continue; }
         let Ok(meta) = entry.metadata() else { continue; };
-        if meta.is_file() && meta.modified().ok().and_then(|time| now.duration_since(time).ok()).is_some_and(|age| age > Duration::from_secs(14 * 24 * 3600)) {
+        if !name.ends_with(".improve-required") && meta.is_file() && meta.modified().ok().and_then(|time| now.duration_since(time).ok()).is_some_and(|age| age > Duration::from_secs(14 * 24 * 3600)) {
             let _ = fs::remove_file(path);
         }
     }
@@ -1316,7 +1418,7 @@ fn runner_script(agent: &str, role: &str, project: &Path, add_dirs: &[PathBuf], 
     let rows_env = rows.map(|ids| format!(" T26_ROWS={}", ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","))).unwrap_or_default();
     let analysis_env = analysis_report.map(|path| format!(" T26_ANALYSIS_REPORT={}", quote(path))).unwrap_or_default();
     format!(
-        "#!/bin/bash\ncd {project} || exit 1\nrm -f {exit}\nexport PATH={path} T26_ROW={row} T26_ROLE={runtime_role}{rows_env}{analysis_env}\nrun_start=$(date +%s%3N)\nrecord_run() {{ [ -n \"$run_recorded\" ] && return; run_recorded=1; run_end=$(date +%s%3N); echo \"$run_end $((run_end - run_start))\" >> {runs}; }}\ntrap 'record_run; exit 129' HUP TERM\n{cmd} 2>&1 | {tee} {log}\nstatus=\"${{PIPESTATUS[0]}}\"\nrecord_run\necho \"$status\" > {exit}.tmp && mv {exit}.tmp {exit}\n",
+        "#!/bin/bash\ncd {project} || exit 1\nrm -f {exit}\nexport PATH={path} T26_ROW={row} T26_ROLE={runtime_role}{rows_env}{analysis_env}\nrun_start=$(date +%s%3N)\nrecord_run() {{ [ -n \"$run_recorded\" ] && return; run_recorded=1; run_end=$(date +%s%3N); echo \"$run_end $((run_end - run_start))\" >> {runs}; }}\ntrap 'record_run; echo 129 > {exit}.tmp && mv {exit}.tmp {exit}; exit 129' HUP TERM\n{cmd} 2>&1 | {tee} {log}\nstatus=\"${{PIPESTATUS[0]}}\"\nrecord_run\necho \"$status\" > {exit}.tmp && mv {exit}.tmp {exit}\n",
         project = quote(project),
         path = quote(Path::new(path_env)),
         cmd = agent_command(agent, project, add_dirs, resume_session, p),
@@ -1377,6 +1479,11 @@ fn checkpoint_limit(expect_seconds: Option<u64>) -> Duration {
         .filter(|seconds| *seconds > 0).map(Duration::from_secs).unwrap_or(Duration::from_secs(300))
 }
 
+fn role_checkpoint_limit(role: &str, expect_seconds: Option<u64>) -> Duration {
+    let limit = checkpoint_limit(expect_seconds);
+    if role == "verifier" { limit.min(Duration::from_secs(300)) } else { limit }
+}
+
 fn file_size(path: &Path) -> u64 { fs::metadata(path).map(|meta| meta.len()).unwrap_or(0) }
 
 fn write_start_time(p: &Paths, now: SystemTime) -> Result<(), String> {
@@ -1405,6 +1512,11 @@ struct SeenLines { offset: u64, lines: Vec<String> }
 
 #[derive(Default)]
 struct TailSummary { new: usize, repeat: usize, repeated: Option<String>, last: Option<String> }
+
+fn verifier_checkpoint_defect(role: &str, analysis: bool, tail: &TailSummary) -> bool {
+    role == "verifier" && !analysis && (tail.new == 0 ||
+        (tail.repeat > 0 && tail.repeated.as_deref().is_some_and(|line| line.chars().any(char::is_alphanumeric))))
+}
 
 fn normalize_log_line(line: &str) -> String {
     let chars: Vec<char> = line.trim().chars().collect();
@@ -1468,6 +1580,7 @@ fn summarize_tail(p: &Paths) -> Result<TailSummary, String> {
     let mut counts = HashMap::<String, usize>::new();
     let mut summary = TailSummary::default();
     for raw in String::from_utf8_lossy(&bytes).lines() {
+        if raw.trim_start().starts_with("hook: ") { continue; }
         let line = normalize_log_line(raw);
         if line.is_empty() { continue; }
         *counts.entry(line.clone()).or_default() += 1;
@@ -1520,12 +1633,35 @@ fn record_decision_with(
     Ok(())
 }
 
+fn is_process_log_defect_only(detail: &str) -> bool {
+    (detail.contains("확인됐으나") || detail.contains("통과했으나")) && detail.contains("로그")
+}
+
+fn verifier_process_defect_row(last: &str, rows: &[u64]) -> Option<(u64, String)> {
+    if let Some(rest) = last.strip_prefix("과정결함 — ") {
+        let (id, detail) = rest.split_once(':')?;
+        if detail.trim().is_empty() { return None; }
+        let id = id.parse::<u64>().ok()?;
+        return rows.contains(&id).then(|| (id, last.chars().take(120).collect()));
+    }
+    let rest = last.strip_prefix("실패 — ")?;
+    let (id, detail) = rest.split_once(':')?;
+    if !is_process_log_defect_only(detail) { return None; }
+    let id = id.parse::<u64>().ok()?;
+    rows.contains(&id).then(|| (id, last.chars().take(120).collect()))
+}
+
 fn verifier_failure_row(last: &str, rows: &[u64]) -> Option<(u64, String)> {
+    if verifier_process_defect_row(last, rows).is_some() { return None; }
     let rest = last.strip_prefix("실패 — ")?;
     let (id, detail) = rest.split_once(':')?;
     if detail.trim().is_empty() { return None; }
     let id = id.parse::<u64>().ok()?;
     rows.contains(&id).then(|| (id, last.chars().take(120).collect()))
+}
+
+fn analysis_process_timeout(role: &str, analysis: bool, last: &str) -> bool {
+    role == "verifier" && analysis && last.contains("20분 초과")
 }
 
 fn verifier_fail_log(row: u64, ack: &str, error: &str) {
@@ -1585,6 +1721,63 @@ fn grist_output(args: &[&str]) -> io::Result<Output> {
     Command::new(PathBuf::from(home).join("ai/scripts/bin/grist")).args(args).output()
 }
 
+fn improvement_marker(project: &Path, row: u64) -> PathBuf {
+    project.join(".ai/dispatch").join(format!("{row}.improve-required"))
+}
+
+fn mark_improvement_required(project: &Path, row: u64, detail: &str) -> Result<bool, String> {
+    let dir = project.join(".ai/dispatch");
+    fs::create_dir_all(&dir).map_err(|error| format!("improvement dir: {error}"))?;
+    let marker = improvement_marker(project, row);
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(&marker) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(error) => return Err(format!("improvement marker: {error}")),
+    };
+    let safe = detail.replace(['\r', '\n'], " ").chars().take(160).collect::<String>();
+    if let Err(error) = file.write_all(safe.as_bytes()) {
+        let _ = fs::remove_file(&marker);
+        return Err(format!("improvement marker: {error}"));
+    }
+    Ok(true)
+}
+
+fn pending_improvement(project: &Path) -> Result<Option<u64>, String> {
+    let dir = project.join(".ai/dispatch");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("improvement signals: {error}")),
+    };
+    let mut rows = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("improvement signals: {error}"))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(row) = name.strip_suffix(".improve-required").and_then(|id| id.parse::<u64>().ok()) {
+            rows.push(row);
+        }
+    }
+    Ok(rows.into_iter().min())
+}
+
+fn require_improvement_handled(project: &Path, role: &str, row: u64) -> Result<(), String> {
+    if let Some(pending) = pending_improvement(project)? {
+        if role != "improver" || row != pending {
+            return Err(format!("과정결함 미처리 — {pending}: grist improve-note 후 dispatch-agent --role improver --row {pending}를 호출하세요"));
+        }
+    }
+    Ok(())
+}
+
+fn clear_improvement_required(project: &Path, row: u64) -> Result<(), String> {
+    match fs::remove_file(improvement_marker(project, row)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("improvement signal clear: {error}")),
+    }
+}
+
 fn check_row_owner(project: &Path, row: u64) -> Result<(), String> {
     let output = grist_output(&["task-show", &row.to_string(), "--project", &project.to_string_lossy(), "--section", "row"]);
     row_owner_result(row, output)
@@ -1635,6 +1828,12 @@ fn project_logs(directory: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
+fn dispatch_log_watch_declared(project: &Path) -> bool {
+    fs::read_to_string(project.join(".ai/docs/role-verifier.md"))
+        .ok()
+        .is_some_and(|doc| doc.lines().any(|line| line.trim() == "watch-source: dispatch-log"))
+}
+
 fn rejected_key(line: &str) -> Option<&str> {
     if !line.contains("ack=rejected") { return None; }
     let (time, rest) = line.split_once(" | ")?;
@@ -1649,6 +1848,9 @@ fn rejected_key(line: &str) -> Option<&str> {
 
 impl LogWatch {
     fn new(project: &Path, explicit: &[PathBuf], role: &str, limits: StallLimits) -> Result<Self, String> {
+        if role == "verifier" && explicit.iter().any(|path| path.starts_with(project.join("test/tmp"))) {
+            return Err("verifier --watch-log must name a runtime log, not test/tmp".into());
+        }
         let directory = project.join(".ai/logs");
         let mut files = HashMap::new();
         for path in project_logs(&directory).map_err(|error| format!("watch logs: {error}"))?
@@ -1660,8 +1862,8 @@ impl LogWatch {
             };
             files.insert(path, LogCursor { offset, pending: Vec::new() });
         }
-        if role == "verifier" && files.is_empty() {
-            return Err("verifier needs --watch-log <record-log path>".into());
+        if role == "verifier" && files.is_empty() && !dispatch_log_watch_declared(project) {
+            return Err("verifier needs --watch-log <record-log path> or .ai/docs/role-verifier.md watch-source: dispatch-log".into());
         }
         Ok(Self { directory, files, dispatch_log: None, last_line: None, last_rejected: None,
             rejected_count: 0, last_progress: Duration::ZERO, limits })
@@ -1873,7 +2075,15 @@ fn report_result(args: &Args, p: &Paths, code: String, stalled: Option<String>, 
     if args.analysis && stalled.is_none() {
         if let Some(problem) = current_analysis_problem(p, args.row) { last = format!("실패 — 분석 보고서: {problem} ({last})"); }
     }
-    let recorded = if args.role == "verifier" && !args.analysis {
+    let recorded = if analysis_process_timeout(&args.role, args.analysis, &last) {
+        match mark_improvement_required(&args.project, args.row, &last) {
+            Ok(_) => Some(format!(" process_defect=improve:{}", args.row)),
+            Err(error) => {
+                eprintln!("dispatch-agent improvement signal: {error}");
+                Some(format!(" process_defect=signal-error:{}", args.row))
+            }
+        }
+    } else if args.role == "verifier" && !args.analysis {
         let parsed_rows: Vec<u64> = args.rows.clone().unwrap_or_else(|| {
             fs::read_to_string(&p.script).ok()
                 .and_then(|sh| sh.split("T26_ROWS=").nth(1)
@@ -1886,15 +2096,28 @@ fn report_result(args: &Args, p: &Paths, code: String, stalled: Option<String>, 
                 let _ = fs::copy(&p.log, p.dir.join(format!("{id}.verify.log")));
             }
         }
-        verifier_failure_row(&last, &parsed_rows).and_then(|(row, line)|
-            record_verifier_failure(&args.project, row, &line).then_some(row))
+        if let Some((row, line)) = verifier_process_defect_row(&last, &parsed_rows) {
+            match mark_improvement_required(&args.project, row, &line) {
+                Ok(_) => Some(format!(" process_defect=improve:{row}")),
+                Err(error) => {
+                    eprintln!("dispatch-agent improvement signal: {error}");
+                    Some(format!(" process_defect=signal-error:{row}"))
+                }
+            }
+        } else {
+            verifier_failure_row(&last, &parsed_rows).and_then(|(row, line)|
+                record_verifier_failure(&args.project, row, &line).then(|| format!(" recorded=I:{row}")))
+        }
     } else { None };
-    let suffix = recorded.map(|row| format!(" recorded=I:{row}")).unwrap_or_default();
+    let suffix = recorded.unwrap_or_default();
     println!("{}", submit_result_line(&code, p, &last, &suffix, submit_pass));
     code.trim().parse().unwrap_or(1)
 }
 
 fn finish_result(args: &Args, p: &Paths, code: String, stalled: Option<String>) -> Result<i32, String> {
+    if args.role == "improver" && stalled.is_none() && code.trim() == "0" {
+        clear_improvement_required(&args.project, args.row)?;
+    }
     if args.role != "agent" || args.analysis || stalled.is_some() || code.trim() != "0" {
         return Ok(report_result(args, p, code, stalled, false));
     }
@@ -1950,6 +2173,10 @@ fn attach_timeout_message(total: Duration, summary: &str, analysis: bool) -> Opt
     ))
 }
 
+fn process_stall_result(role: &str, analysis: bool, row: u64, stalled: String) -> String {
+    if role == "verifier" && !analysis { format!("과정결함 — {row}: {stalled}") } else { stalled }
+}
+
 fn finish_completed_attach(args: &Args, p: &Paths) -> Option<Result<i32, String>> {
     let code = completed_exit(p)?;
     close_saved_window(p);
@@ -1963,6 +2190,10 @@ fn watch_role(args: &Args) -> &str { if args.analysis { "analysis" } else { &arg
 fn run(mut args: Args) -> Result<i32, String> {
     let mut startup_stages = Vec::new();
     let stage_start = Instant::now();
+    require_improvement_handled(&args.project, &args.role, args.row)?;
+    if let Some(rejection) = stall_improvement(&args.project, args.row, &args.role, args.analysis)? {
+        return Err(rejection);
+    }
     check_row_owner(&args.project, args.row)?;
     if let Some(rows) = &args.rows {
         for &row in rows { check_row_owner(&args.project, row)?; }
@@ -1984,13 +2215,21 @@ fn run(mut args: Args) -> Result<i32, String> {
             }
         };
         let mut watch = LogWatch::new(&args.project, &args.watch_logs, watch_role(&args), StallLimits::default())?;
-        let result = wait_for_exit(&p, pane.trim(), &mut watch, checkpoint_limit(args.expect_seconds), None)?;
+        let result = wait_for_exit(&p, pane.trim(), &mut watch, role_checkpoint_limit(watch_role(&args), args.expect_seconds), None)?;
         return match result {
             WaitResult::Checkpoint(_elapsed, grown, last) => {
                 let total = total_elapsed(&p, SystemTime::now())?;
                 let tail = summarize_tail(&p)?;
                 let summary = checkpoint_line(args.row, total, grown, &tail, &cached_stage(args.row), last.as_deref(), args.expect_seconds);
+                if verifier_checkpoint_defect(&args.role, args.analysis, &tail) {
+                    let defect = format!("과정결함 — {}: 검증 정체 {}", args.row, summary);
+                    write_stall_result(&p, pane.trim(), &defect)?;
+                    close_saved_window(&p);
+                    let _ = fs::remove_file(&p.started);
+                    return Ok(report_result(&args, &p, "4\n".into(), Some(defect), false));
+                }
                 if let Some(stalled) = attach_timeout_message(total, &summary, args.analysis) {
+                    let stalled = process_stall_result(&args.role, args.analysis, args.row, stalled);
                     write_stall_result(&p, pane.trim(), &stalled)?;
                     close_saved_window(&p);
                     let _ = fs::remove_file(&p.started);
@@ -2044,7 +2283,15 @@ fn run(mut args: Args) -> Result<i32, String> {
             } else if args.role == "improver" {
                 agent_row_fields(&args.project, args.row).and_then(|fields| improver_preflight(args.row, &fields))
             } else {
-                (if args.role == "verifier" && !args.analysis && !args.resume { verifier_prompt_check(&original) } else { Ok(()) })
+                (if args.role == "verifier" && !args.analysis && !args.resume
+                    && already_verified_local_cli_hook(&args.project, args.rows.as_deref().unwrap_or(&[args.row])) {
+                    Err("실패 — 로컬 CLI 훅 경로가 task-hidden에서 이미 검증됨: 기존 명령·출력으로 마감하세요".to_string())
+                } else if args.role == "verifier" && !args.analysis && !args.resume {
+                    verifier_prompt_check(&original).and_then(|()| {
+                        verifier_goals(&args.project, args.row, args.rows.as_deref())
+                            .and_then(|goals| verifier_scope_check(&original, &goals))
+                    })
+                } else { Ok(()) })
                     .and_then(|()| ensure_verifier_browser(&args.role))
                     .and_then(|browser| verifier_preflight(&args.project, &args.role)
                         .map(|checks| format!("{browser}{checks}")))
@@ -2130,12 +2377,18 @@ fn run(mut args: Args) -> Result<i32, String> {
     if args.role == "agent" { record_agent_start(&p, args.resume, SystemTime::now())?; }
     write_start_time(&p, SystemTime::now())?;
     let deadline = startup_deadline();
-    match wait_for_exit(&p, &pane, &mut watch, checkpoint_limit(args.expect_seconds), Some((pane_created, deadline)))? {
+    match wait_for_exit(&p, &pane, &mut watch, role_checkpoint_limit(watch_role(&args), args.expect_seconds), Some((pane_created, deadline)))? {
         WaitResult::Checkpoint(_elapsed, grown, last) => {
-            window_guard.keep();
             let total = total_elapsed(&p, SystemTime::now())?;
             let tail = summarize_tail(&p)?;
             let summary = checkpoint_line(args.row, total, grown, &tail, &cached_stage(args.row), last.as_deref(), args.expect_seconds);
+            if verifier_checkpoint_defect(&args.role, args.analysis, &tail) {
+                let defect = format!("과정결함 — {}: 검증 정체 {}", args.row, summary);
+                write_stall_result(&p, &pane, &defect)?;
+                let _ = fs::remove_file(&p.started);
+                return Ok(report_result(&args, &p, "4\n".into(), Some(defect), false));
+            }
+            window_guard.keep();
             checkpoint_log("received", total.as_secs(), grown, tail.new, tail.repeat, "none");
             println!("{}", result_line("6", &p, &summary));
             Ok(6)
@@ -2258,6 +2511,17 @@ mod tests {
     }
 
     #[test]
+    fn verifier_prompt_rejects_extra_old_flows_and_playback_wait() {
+        let goals = "현재 페이지 저장 ⇒ Table16 값 생성\nYouTube 분량 메타데이터 저장";
+        assert!(verifier_scope_check("기존 Table8 페이지 저장·학습·캡처 시작 동작도 확인한다".as_bytes(), goals)
+            .unwrap_err().contains("검증 범위 초과"));
+        assert!(verifier_scope_check("영상 재생 완료까지 대기해 분량을 확인한다".as_bytes(), goals)
+            .unwrap_err().contains("검증 대기 초과"));
+        assert!(verifier_scope_check("YouTube 메타데이터의 분량을 확인한다".as_bytes(), goals).is_ok());
+        assert!(verifier_scope_check("기존 저장 흐름을 확인한다".as_bytes(), "기존 저장 흐름 유지").is_ok());
+    }
+
+    #[test]
     fn agent_preflight_rejects_multiple_implementations_before_target() {
         let (project, p, mut fields, _) = agent_guard_fixture();
         fields["H"] = serde_json::json!("작업");
@@ -2306,6 +2570,14 @@ mod tests {
         assert!(entrypoint_preflight(&project, original_error, false).unwrap_err().contains("진입점 함수 없음"));
         let corrected = "진입점: src-tauri/src/lib.rs run() (Tauri Builder setup)\n".as_bytes();
         assert!(entrypoint_preflight(&project, corrected, false).is_ok());
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let rel = format!(".cache/dispatch-tilde-{}", std::process::id());
+        fs::create_dir_all(home.join(&rel)).unwrap();
+        fs::write(home.join(&rel).join("gate.rs"), "fn role_denial() {}\n").unwrap();
+        let tilde = format!("진입점: ~/{rel}/gate.rs role_denial(383)\n");
+        let tilde_result = entrypoint_preflight(&project, tilde.as_bytes(), false);
+        fs::remove_dir_all(home.join(&rel)).unwrap();
+        assert!(tilde_result.is_ok(), "{tilde_result:?}");
         assert!(entrypoint_preflight(&project, stale, true).is_ok());
         assert!(entrypoint_preflight(&project, "조사 위임\n진입점: src-tauri/src/missing.rs run()\n".as_bytes(), false).is_ok());
         fs::remove_dir_all(project).unwrap();
@@ -2508,6 +2780,29 @@ mod tests {
     }
 
     #[test]
+    fn cumulative_stall_marks_one_improvement_across_roles() {
+        let (project, p, _, now) = agent_guard_fixture();
+        // 12 minutes of agent + 6 minutes of verifier: under the limit, nothing is marked
+        write_runs(&p, &[(now - Duration::from_secs(60), 720)]);
+        let verify = paths(&project, 591, "verifier");
+        fs::write(&verify.runs, format!("{} 360000\n", now.duration_since(UNIX_EPOCH).unwrap().as_millis())).unwrap();
+        assert_eq!(super::stall_improvement(&project, 591, "agent", false), Ok(None));
+        assert_eq!(super::require_improvement_handled(&project, "agent", 591), Ok(()));
+        // another 3 minutes of verifier crosses 20 minutes: one marker, the dispatch is sent to the improver
+        fs::write(&verify.runs, format!("1 360000\n{} 180000\n", now.duration_since(UNIX_EPOCH).unwrap().as_millis())).unwrap();
+        assert_eq!(super::stall_improvement(&project, 591, "improver", false), Ok(None));
+        assert_eq!(super::stall_improvement(&project, 591, "verifier", true), Ok(None));
+        assert!(super::stall_improvement(&project, 591, "verifier", false).unwrap().unwrap().contains("--role improver --row 591"));
+        assert!(super::require_improvement_handled(&project, "agent", 591).unwrap_err().contains("--row 591"));
+        assert_eq!(super::require_improvement_handled(&project, "improver", 591), Ok(()));
+        // after the improver clears it, the same row is not marked again
+        super::clear_improvement_required(&project, 591).unwrap();
+        assert_eq!(super::stall_improvement(&project, 591, "agent", false), Ok(None));
+        assert_eq!(super::require_improvement_handled(&project, "agent", 591), Ok(()));
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn elapsed_limit_skips_closed_rows() {
         let (project, p, mut fields, now) = agent_guard_fixture();
         fields["H"] = serde_json::json!("작업");
@@ -2592,6 +2887,20 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_tail_ignores_hook_metadata_during_real_progress() {
+        let project = watch_test_project();
+        let p = paths(&project, 569, "verifier");
+        fs::create_dir_all(&p.dir).unwrap();
+        fs::write(&p.log, format!("{}[verify-step] settings-action opened\n[verify-step] readback consumer=Grist value=Table8\n", "hook: PostToolUse\n".repeat(12))).unwrap();
+        let tail = summarize_tail(&p).unwrap();
+        assert_eq!(tail.new, 2);
+        assert_eq!(tail.repeat, 0);
+        assert!(!super::verifier_checkpoint_defect("verifier", false, &tail));
+        assert!(!checkpoint_line(569, Duration::from_secs(240), 100, &tail, "검증", None, None).contains("내용 정체"));
+        fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
     fn completed_attach_reads_exit_without_pane_and_reports_existing_result() {
         let project = watch_test_project();
         let p = paths(&project, 563, "agent");
@@ -2670,6 +2979,57 @@ mod tests {
         assert!(checkpoint_line(566, total, 0, &TailSummary::default(), "교정", None, args.expect_seconds).ends_with("기대 1s 초과, 내용 정체"));
         assert!(!checkpoint_line(566, Duration::from_millis(900), 0, &TailSummary::default(), "교정", None, args.expect_seconds).contains("기대"));
         fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn verifier_checkpoint_never_waits_past_five_minutes() {
+        assert_eq!(super::role_checkpoint_limit("verifier", Some(540)), std::time::Duration::from_secs(300));
+        assert_eq!(super::role_checkpoint_limit("verifier", Some(90)), std::time::Duration::from_secs(90));
+        assert_eq!(super::role_checkpoint_limit("agent", Some(540)), std::time::Duration::from_secs(540));
+        assert_eq!(super::role_checkpoint_limit("analysis", Some(540)), std::time::Duration::from_secs(540));
+    }
+
+    #[test]
+    fn verifier_checkpoint_defect_requires_real_stagnation() {
+        let mut tail = super::TailSummary { new: 20, repeat: 8, repeated: Some("}".into()), last: None };
+        assert!(!super::verifier_checkpoint_defect("verifier", false, &tail));
+        tail.repeated = Some("Error: retry failed".into());
+        assert!(super::verifier_checkpoint_defect("verifier", false, &tail));
+        assert!(!super::verifier_checkpoint_defect("agent", false, &tail));
+        assert!(!super::verifier_checkpoint_defect("verifier", true, &tail));
+        tail.new = 0;
+        tail.repeated = None;
+        assert!(super::verifier_checkpoint_defect("verifier", false, &tail));
+    }
+
+    #[test]
+    fn process_defect_returns_one_pending_signal_without_launching() {
+        let dir = std::env::temp_dir().join(format!("dispatch-improvement-signal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(super::mark_improvement_required(&dir, 853, "검증 정체"), Ok(true));
+        assert_eq!(super::mark_improvement_required(&dir, 853, "검증 정체"), Ok(false));
+        assert_eq!(std::fs::read_to_string(super::improvement_marker(&dir, 853)).unwrap(), "검증 정체");
+        assert!(!dir.join(".ai/dispatch/853.auto-improve.prompt").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pending_improvement_blocks_delegation_until_improver_finishes() {
+        let dir = std::env::temp_dir().join(format!("dispatch-improvement-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(super::require_improvement_handled(&dir, "agent", 854), Ok(()));
+        super::mark_improvement_required(&dir, 853, "검증 정체").unwrap();
+        assert!(super::require_improvement_handled(&dir, "agent", 854).unwrap_err().contains("--row 853"));
+        assert!(super::require_improvement_handled(&dir, "improver", 854).is_err());
+        assert_eq!(super::require_improvement_handled(&dir, "improver", 853), Ok(()));
+        let argv = ["--agent", "codex", "--role", "improver", "--project", dir.to_str().unwrap(), "--row", "853", "--prompt-file", "/dev/null"]
+            .map(str::to_string);
+        let args = super::parse_args(&argv).unwrap();
+        let p = super::paths(&dir, 853, "improver");
+        std::fs::write(&p.last, "improve-done recorded").unwrap();
+        assert_eq!(super::finish_result(&args, &p, "0\n".into(), None), Ok(0));
+        assert_eq!(super::require_improvement_handled(&dir, "agent", 854), Ok(()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2944,7 +3304,11 @@ mod tests {
         let project = Path::new("/tmp");
         let issue = |_: &Path, _: u64| Some("00120107151".to_string());
         assert_eq!(agent_id_line(project, 7, "agent", "원문".as_bytes(), issue).unwrap(), "에이전트 ID: 00120107151 (작업 게이트에 --agent-id 00120107151)\n");
-        assert!(agent_id_line(project, 7, "agent", "에이전트 ID: 1".as_bytes(), issue).is_none());
+        assert_eq!(agent_id_line(project, 7, "agent", "프롬프트의 11자리 에이전트 ID를 사용".as_bytes(), issue).unwrap(), "에이전트 ID: 00120107151 (작업 게이트에 --agent-id 00120107151)\n");
+        assert_eq!(agent_id_line(project, 7, "agent", "에이전트 ID: 1".as_bytes(), issue).unwrap(), "에이전트 ID: 00120107151 (작업 게이트에 --agent-id 00120107151)\n");
+        assert_eq!(agent_id_line(project, 7, "agent", "설명\n  에이전트 ID: 00120107151".as_bytes(), issue).unwrap(), "에이전트 ID: 00120107151 (작업 게이트에 --agent-id 00120107151)\n");
+        assert_eq!(agent_id_line(project, 7, "agent", "에이전트 ID: 00120107151x".as_bytes(), issue).unwrap(), "에이전트 ID: 00120107151 (작업 게이트에 --agent-id 00120107151)\n");
+        assert!(agent_id_line(project, 7, "agent", "설명\n에이전트 ID: 00120107151 (기존 발급)".as_bytes(), issue).is_none());
         assert!(agent_id_line(project, 7, "verifier", "원문".as_bytes(), issue).is_none());
     }
 
@@ -3300,7 +3664,7 @@ mod tests {
         assert!(script.contains("rm -f '/w/proj/.ai/dispatch/307.exit'\n"));
         assert!(script.contains("| tee '/w/proj/.ai/dispatch/307.log'\n"));
         assert!(script.ends_with("&& mv '/w/proj/.ai/dispatch/307.exit'.tmp '/w/proj/.ai/dispatch/307.exit'\n"));
-        assert!(script.contains("run_end=$(date +%s%3N); echo \"$run_end $((run_end - run_start))\" >> '/w/proj/.ai/dispatch/307.runs'; }\ntrap 'record_run; exit 129' HUP TERM\n"));
+        assert!(script.contains("run_end=$(date +%s%3N); echo \"$run_end $((run_end - run_start))\" >> '/w/proj/.ai/dispatch/307.runs'; }\ntrap 'record_run; echo 129 > '/w/proj/.ai/dispatch/307.exit'.tmp && mv '/w/proj/.ai/dispatch/307.exit'.tmp '/w/proj/.ai/dispatch/307.exit'; exit 129' HUP TERM\n"));
         assert!(script.contains("status=\"${PIPESTATUS[0]}\"\nrecord_run\n"));
     }
 
@@ -3329,12 +3693,31 @@ mod tests {
         assert!(writable_dirs("improver", "codex", &[]).contains(&PathBuf::from("/home/tree/ai")));
         assert!(!writable_dirs("agent", "codex", &[]).contains(&PathBuf::from("/home/tree/ai")));
         assert_eq!(improver_preflight(7, &serde_json::json!({"H": "확인"})), Ok(String::new()));
-        assert!(improver_preflight(7, &serde_json::json!({"H": "검증"})).unwrap_err().starts_with("실패 — improver: #7 H=검증"));
+        assert_eq!(improver_preflight(7, &serde_json::json!({"H": "검증"})), Ok(String::new()));
+        assert_eq!(improver_preflight(7, &serde_json::json!({"H": "진단"})), Ok(String::new()));
+        assert!(improver_preflight(7, &serde_json::json!({"H": "초안"})).unwrap_err().starts_with("실패 — improver: #7 H=초안"));
+        assert_eq!(
+            verifier_process_defect_row("실패 — 844: Ctrl+5 ⇒ Grist 상태와 다이어리 기록은 확인됐으나 updateGrist 로그가 없음", &[844]),
+            Some((844, "실패 — 844: Ctrl+5 ⇒ Grist 상태와 다이어리 기록은 확인됐으나 updateGrist 로그가 없음".into()))
+        );
+        assert!(verifier_failure_row("실패 — 844: Ctrl+5 ⇒ Grist 상태와 다이어리 기록은 확인됐으나 updateGrist 로그가 없음", &[844]).is_none());
         let argv: Vec<String> = ["--agent", "codex", "--project", "/", "--row", "7", "--prompt-file", "f", "--role", "improver"].map(String::from).to_vec();
         assert_eq!(parse_args(&argv).unwrap().role, "improver");
         let project = std::env::temp_dir().join(format!("dispatch-improver-{}", std::process::id()));
         fs::create_dir_all(&project).unwrap();
         assert!(LogWatch::new(&project, &[], "improver", StallLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn recorded_cli_hook_check_prevents_duplicate_verifier() {
+        let project = std::env::temp_dir().join(format!("dispatch-cli-hook-{}", std::process::id()));
+        std::fs::create_dir_all(project.join(".ai/gate")).unwrap();
+        std::fs::write(project.join(".ai/gate/860.json"), r#"{"hidden":[{"test":"env -i HOME=/home/tree PATH=/usr/bin:/bin task-complete --hook"}]}"#).unwrap();
+        assert!(super::local_cli_hook_verified_in_gate(&project, &[859, 860]));
+        assert!(!super::local_cli_hook_verified_in_gate(&project, &[859]));
+        std::fs::write(project.join(".ai/gate/860.json"), r#"{"hidden":[{"test":"cargo test -p task-complete"}]}"#).unwrap();
+        assert!(!super::local_cli_hook_verified_in_gate(&project, &[860]));
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
@@ -3501,7 +3884,25 @@ mod tests {
     fn verifier_requires_watch_source_and_late_explicit_file_is_read() {
         let project = watch_test_project();
         assert_eq!(LogWatch::new(&project, &[], "verifier", test_limits()).err().unwrap(),
-            "verifier needs --watch-log <record-log path>");
+            "verifier needs --watch-log <record-log path> or .ai/docs/role-verifier.md watch-source: dispatch-log");
+        let doc = project.join(".ai/docs/role-verifier.md");
+        fs::create_dir_all(doc.parent().unwrap()).unwrap();
+        fs::write(&doc, "watch-source: unrelated\n").unwrap();
+        assert!(LogWatch::new(&project, &[], "verifier", test_limits()).is_err());
+        fs::write(&doc, "watch-source: dispatch-log\n").unwrap();
+        let fake = project.join("test/tmp/runtime-diagnostic.log");
+        assert_eq!(LogWatch::new(&project, std::slice::from_ref(&fake), "verifier", test_limits()).err().unwrap(),
+            "verifier --watch-log must name a runtime log, not test/tmp");
+        let mut dispatch_watch = LogWatch::new(&project, &[], "verifier", test_limits()).unwrap();
+        let dispatch = project.join(".ai/dispatch/569.verify.log");
+        fs::create_dir_all(dispatch.parent().unwrap()).unwrap();
+        fs::write(&dispatch, "[verify-step] settings-action opened\n").unwrap();
+        dispatch_watch.track_dispatch_log(&dispatch);
+        assert!(dispatch_watch.poll(Duration::from_secs(4)).unwrap().is_none());
+        fs::write(&dispatch, "[verify-step] settings-action opened\n[verify-step] readback consumer=Grist value=Table8\n").unwrap();
+        assert!(dispatch_watch.poll(Duration::from_secs(5)).unwrap().is_none());
+        assert!(dispatch_watch.poll(Duration::from_secs(9)).unwrap().is_none());
+        assert!(dispatch_watch.poll(Duration::from_secs(10)).unwrap().is_some());
         let log = project.join("external.log");
         let mut watch = LogWatch::new(&project, std::slice::from_ref(&log), "verifier", test_limits()).unwrap();
         fs::write(&log, "new line\n").unwrap();
@@ -3549,5 +3950,10 @@ mod tests {
         let msg = attach_timeout_message(Duration::from_secs(10 * 60), "진행 — 624", false).unwrap();
         assert!(msg.starts_with("실패 — 10분 초과: 경과 10m, 세션을 종료했습니다."));
         assert!(msg.contains("로그를 직접 읽지 말고"));
+        let defect = super::process_stall_result("verifier", false, 860, msg);
+        assert_eq!(super::verifier_process_defect_row(&defect, &[860]).map(|(row, _)| row), Some(860));
+        assert_eq!(super::process_stall_result("verifier", true, 860, "분석".into()), "분석");
+        assert!(super::analysis_process_timeout("verifier", true, "실패 — 20분 초과: 분석 정체"));
+        assert!(!super::analysis_process_timeout("verifier", false, "실패 — 20분 초과"));
     }
 }

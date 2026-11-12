@@ -73,23 +73,23 @@ fn field(value: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn memo_line(agent: char, role: &str, conversation: &str, caller: Option<(char, &str)>) -> Result<String, String> {
-    if !AGENT_CHARS.contains(agent) { return Err("invalid agent character".into()); }
-    field(role, "role")?;
-    if role.contains(" · ") { return Err("role must not contain ' · '".into()); }
+fn short_conversation(conversation: &str) -> &str {
+    let b = conversation.as_bytes();
+    let is_uuid = b.len() == 36
+        && [8, 13, 18, 23].iter().all(|&i| b[i] == b'-')
+        && b.iter().enumerate().all(|(i, c)| [8, 13, 18, 23].contains(&i) || c.is_ascii_hexdigit());
+    if is_uuid { &conversation[..8] } else { conversation }
+}
+
+fn alloc_line(id: &str, conversation: &str) -> Result<String, String> {
+    parse_id(id)?;
     field(conversation, "conversation")?;
-    if conversation.contains(" ← ") { return Err("conversation must not contain ' ← '".into()); }
-    let mut line = format!("에이전트 {agent} : {role} · {conversation}");
-    if let Some((c, name)) = caller {
-        if !AGENT_CHARS.contains(c) { return Err("invalid caller character".into()); }
-        field(name, "caller name")?;
-        line.push_str(&format!(" ← {c} {name}"));
-    }
-    Ok(line)
+    if conversation.contains(" · ") { return Err("conversation must not contain ' · '".into()); }
+    Ok(format!("{id} · {}", short_conversation(conversation)))
 }
 
 #[derive(Debug, PartialEq)]
-struct Entry { agent: char, role: String, conversation: String, caller: Option<(char, String)> }
+struct Entry { id: String, agent: char, conversation: String }
 
 /// Asia/Seoul date as YYMMDD from Unix seconds.
 fn kst_date(unix_secs: u64) -> String {
@@ -151,39 +151,34 @@ fn filter_log(text: &str, id: &str) -> Vec<String> {
         .take(20).map(|l| l.chars().take(200).collect()).collect()
 }
 
-fn parse_memo_line(text: &str) -> Option<Entry> {
+fn parse_alloc_line(text: &str) -> Option<Entry> {
     let text = text.trim();
-    // Grist numbers memo history lines as `N. body`.
+    // Grist numbers allocation lines as `N. body`.
     let body = match text.split_once(". ") {
-        Some((n, rest)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => rest,
+        Some((n, rest)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => rest.trim(),
         _ => text,
     };
-    let rest = body.strip_prefix("에이전트 ")?;
-    let mut chars = rest.chars();
-    let agent = chars.next().filter(|c| AGENT_CHARS.contains(*c))?;
-    let (role, conversation) = chars.as_str().strip_prefix(" : ")?.split_once(" · ")?;
-    let split = conversation.rsplit_once(" ← ").and_then(|(c, tail)| {
-        let (ch, name) = tail.split_once(' ')?;
-        let mut cs = ch.chars();
-        let first = cs.next().filter(|c| AGENT_CHARS.contains(*c) && cs.next().is_none())?;
-        (!name.is_empty()).then(|| (c, (first, name.to_owned())))
-    });
-    let (conversation, caller) = match split { Some((c, who)) => (c, Some(who)), None => (conversation, None) };
-    Some(Entry { agent, role: role.to_owned(), conversation: conversation.to_owned(), caller })
+    let (id, conversation) = match body.split_once(" · ") {
+        Some((id, conv)) if !conv.is_empty() && !conv.contains(" · ") => (id.trim(), conv.trim()),
+        Some(_) => return None,
+        None => (body, ""),
+    };
+    let parsed = parse_id(id).ok()?;
+    Some(Entry { id: id.to_owned(), agent: parsed.agent, conversation: conversation.to_owned() })
 }
 
-fn entries(memo: &[String]) -> Vec<Entry> { memo.iter().filter_map(|l| parse_memo_line(l)).collect() }
+fn entries(alloc: &[String]) -> Vec<Entry> { alloc.iter().filter_map(|l| parse_alloc_line(l)).collect() }
 
-fn allocate(memo: &[String], role: &str) -> Result<char, String> {
-    let used: Vec<char> = entries(memo).iter().map(|e| e.agent).collect();
+fn allocate(alloc: &[String], role: &str) -> Result<char, String> {
+    let used: Vec<char> = entries(alloc).iter().map(|e| e.agent).collect();
     if role != "main" { return next_agent_char(&used); }
     if used.contains(&'0') { return Err("agent 0 (main) is already recorded".into()); }
     Ok('0')
 }
 
-fn resolve(memo: &[String], agent: char) -> Result<Entry, String> {
-    entries(memo).into_iter().find(|e| e.agent == agent)
-        .ok_or_else(|| format!("agent {agent} is not recorded in the row memo"))
+fn resolve(alloc: &[String], agent: char) -> Result<Entry, String> {
+    entries(alloc).into_iter().find(|e| e.agent == agent)
+        .ok_or_else(|| format!("agent {agent} is not recorded in the row 할당"))
 }
 
 fn grist() -> PathBuf {
@@ -209,8 +204,8 @@ fn memo_from_show(output: &str) -> Result<Vec<String>, String> {
     Ok(lines.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect())
 }
 
-fn read_memo(dir: &str, row: u32) -> Result<Vec<String>, String> {
-    memo_from_show(&run_grist(&["task-show", &row.to_string(), "--project", dir, "--section", "메모"])?)
+fn read_alloc(dir: &str, row: u32) -> Result<Vec<String>, String> {
+    memo_from_show(&run_grist(&["task-show", &row.to_string(), "--project", dir, "--section", "할당"])?)
 }
 
 fn project_id(dir: &str) -> Result<u32, String> {
@@ -229,15 +224,15 @@ fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
-fn start(dir: &str, row: u32, role: &str, conversation: &str, caller: Option<(char, &str)>) -> Result<String, String> {
+fn start(dir: &str, row: u32, role: &str, conversation: &str) -> Result<String, String> {
     let project = project_id(dir)?;
     // Serialize read-allocate-write per row so parallel agents cannot share a character.
     let lock_path = env::temp_dir().join(format!("record-log-{project}-{row}.lock"));
     let lock = fs::OpenOptions::new().create(true).write(true).open(lock_path).map_err(|e| format!("lock: {e}"))?;
     lock.lock().map_err(|e| format!("lock: {e}"))?;
-    let agent = allocate(&read_memo(dir, row)?, role)?;
-    let line = memo_line(agent, role, conversation, caller)?;
+    let agent = allocate(&read_alloc(dir, row)?, role)?;
     let id = make_id(project, row, agent)?;
+    let line = alloc_line(&id, conversation)?;
     let args = memo_write_args(dir, row, &line);
     run_grist(&args.each_ref().map(String::as_str))?;
     Ok(id)
@@ -387,11 +382,8 @@ fn find(id: &str, explicit: Option<&str>) -> Result<String, String> {
     let parsed = parse_id(id)?;
     let dir = project_dir(explicit, &root_paths(), parsed.project)?;
     if !changes_has_row(&dir, parsed.row) { return Err(format!("row {} is not in the project changes", parsed.row)); }
-    let e = resolve(&read_memo(&dir, parsed.row)?, parsed.agent)?;
-    let mut out = vec![match &e.caller {
-        Some((c, n)) => format!("에이전트 {} : {} · {} ← {c} {n}", e.agent, e.role, e.conversation),
-        None => format!("에이전트 {} : {} · {}", e.agent, e.role, e.conversation),
-    }];
+    let e = resolve(&read_alloc(&dir, parsed.row)?, parsed.agent)?;
+    let mut out = vec![if e.conversation.is_empty() { e.id } else { format!("{} · {}", e.id, e.conversation) }];
     let mut logs: Vec<_> = fs::read_dir(Path::new(&dir).join(".ai/logs")).into_iter().flatten().flatten()
         .map(|x| x.path()).filter(|p| p.extension().is_some_and(|x| x == "log")).collect();
     logs.sort();
@@ -406,22 +398,17 @@ fn run(args: &[String]) -> Result<String, String> {
     match args.first().map(String::as_str) {
         Some("start") if args.len() >= 3 => {
             let row = args[2].parse::<u32>().map_err(|_| "row must be a number")?;
-            let role = flag(args, "--role").ok_or("--role is required")?;
-            let conversation = flag(args, "--conversation").unwrap_or_else(|| "unknown".into());
-            let caller = args.iter().position(|a| a == "--caller").map(|i| match (args.get(i + 1), args.get(i + 2)) {
-                (Some(c), Some(n)) if c.chars().count() == 1 => Ok((c.chars().next().unwrap(), n.as_str())),
-                _ => Err("--caller needs <char> <name>"),
-            }).transpose()?;
-            start(&args[1], row, &role, &conversation, caller)
+            let role = flag(args, "--role").unwrap_or_else(|| "agent".into());
+            let conversation = flag(args, "--conversation").unwrap_or_else(|| "dispatch".into());
+            start(&args[1], row, &role, &conversation)
         }
         Some("parse") if args.len() >= 2 => {
             let parsed = parse_id(&args[1])?;
             let dir = flag(args, "--project").ok_or("--project DIR is required")?;
             if project_id(&dir)? != parsed.project { return Err("ID project does not match --project".into()); }
-            let e = resolve(&read_memo(&dir, parsed.row)?, parsed.agent)?;
-            Ok(format!("project={} | row={} | agent={} | role={} | conversation={}{}",
-                parsed.project, parsed.row, parsed.agent, e.role, e.conversation,
-                e.caller.map(|(c, n)| format!(" | caller={c} {n}")).unwrap_or_default()))
+            let e = resolve(&read_alloc(&dir, parsed.row)?, parsed.agent)?;
+            Ok(format!("project={} | row={} | agent={} | conversation={}",
+                parsed.project, parsed.row, parsed.agent, e.conversation))
         }
         Some("append") if args.len() == 5 || args.len() == 7 => append(&args[1], &args[2], &args[3], &args[4], flag(args, "--project").as_deref()),
         Some("latest") => {
@@ -444,7 +431,7 @@ fn run(args: &[String]) -> Result<String, String> {
         }
         Some("find") if args.len() == 2 || args.len() == 4 => find(&args[1], flag(args, "--project").as_deref()),
         Some("log-line") if args.len() == 5 => log_line(&args[1], &args[2], &args[3], &args[4]),
-        _ => Err("usage: record-log start PROJECT_DIR ROW --role NAME [--conversation ID] [--caller CHAR NAME] | parse ID --project DIR | log-line ID FUNCTION ATTEMPT RESULT | append ID FUNCTION ATTEMPT RESULT [--project DIR] | find ID [--project DIR] | latest [--project DIR] [--fn NAME] [--since HH:MM]".into()),
+        _ => Err("usage: record-log start PROJECT_DIR ROW [--role NAME] [--conversation ID] | parse ID --project DIR | log-line ID FUNCTION ATTEMPT RESULT | append ID FUNCTION ATTEMPT RESULT [--project DIR] | find ID [--project DIR] | latest [--project DIR] [--fn NAME] [--since HH:MM]".into()),
     }
 }
 
@@ -505,38 +492,40 @@ mod tests {
         assert!(log_line("0011980237A", "fn", "01", "failed | token").is_err());
     }
     fn lines(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
-    #[test] fn memo_line_format() {
-        assert_eq!(memo_line('1', "t26_240", "codex://thread-one", None).unwrap(),
-            "에이전트 1 : t26_240 · codex://thread-one");
-        assert!(memo_line('O', "r", "c", None).is_err());
-        assert!(memo_line('1', "a · b", "c", None).is_err());
-        assert!(memo_line('1', "r", "c\nd", None).is_err());
+    #[test] fn alloc_line_format_and_uuid_shortening() {
+        assert_eq!(alloc_line("00119802401", "31b0e172-d974-4adb-aa51-8034d281f311").unwrap(),
+            "00119802401 · 31b0e172");
+        assert_eq!(alloc_line("00119802401", "codex://thread-one").unwrap(),
+            "00119802401 · codex://thread-one");
+        assert!(alloc_line("0011980240O", "c").is_err());
+        assert!(alloc_line("00119802401", "a · b").is_err());
+        assert!(alloc_line("00119802401", "c\nd").is_err());
     }
-    #[test] fn parse_numbered_memo_line() {
-        let e = parse_memo_line("2. 에이전트 B : reviewer · codex://x · y").unwrap();
-        assert_eq!(e, Entry { agent: 'B', role: "reviewer".into(), conversation: "codex://x · y".into(), caller: None });
-        assert_eq!(parse_memo_line("1. 다른 메모"), None);
+    #[test] fn parse_numbered_alloc_line() {
+        let e = parse_alloc_line("2. 0011980240B · 31b0e172").unwrap();
+        assert_eq!(e, Entry { id: "0011980240B".into(), agent: 'B', conversation: "31b0e172".into() });
+        assert_eq!(parse_alloc_line("1. 다른 메모"), None);
     }
-    #[test] fn allocation_from_memo() {
+    #[test] fn allocation_from_alloc_section() {
         assert_eq!(allocate(&[], "t26_1").unwrap(), '1');
         assert_eq!(allocate(&[], "main").unwrap(), '0');
-        let main_only = lines(&["1. 에이전트 0 : main · c0"]);
+        let main_only = lines(&["1. 00119800010 · c0"]);
         assert_eq!(allocate(&main_only, "t26_1").unwrap(), '1');
         assert!(allocate(&main_only, "main").is_err());
-        let memo = lines(&["1. 에이전트 0 : main · c0", "2. 일반 메모", "3. 에이전트 1 : a · c1"]);
-        assert_eq!(allocate(&memo, "x").unwrap(), '2');
+        let alloc = lines(&["1. 00119800010 · c0", "2. 00119800011 · c1"]);
+        assert_eq!(allocate(&alloc, "x").unwrap(), '2');
     }
-    #[test] fn exhaustion_from_memo() {
-        let memo: Vec<String> = AGENT_CHARS.chars().enumerate()
-            .map(|(i, c)| format!("{}. 에이전트 {c} : r · c", i + 1)).collect();
-        assert_eq!(memo.len(), 34);
-        assert!(allocate(&memo, "r").is_err());
-        assert!(allocate(&memo, "main").is_err());
+    #[test] fn exhaustion_from_alloc_section() {
+        let alloc: Vec<String> = AGENT_CHARS.chars().enumerate()
+            .map(|(i, c)| format!("{}. 0011980001{c} · c", i + 1)).collect();
+        assert_eq!(alloc.len(), 34);
+        assert!(allocate(&alloc, "r").is_err());
+        assert!(allocate(&alloc, "main").is_err());
     }
-    #[test] fn resolve_from_memo() {
-        let memo = lines(&["1. 에이전트 0 : main · c0", "2. 에이전트 1 : a · c1"]);
-        assert_eq!(resolve(&memo, '1').unwrap().conversation, "c1");
-        assert!(resolve(&memo, '5').is_err());
+    #[test] fn resolve_from_alloc_section() {
+        let alloc = lines(&["1. 00119800010 · c0", "2. 00119800011 · c1"]);
+        assert_eq!(resolve(&alloc, '1').unwrap().conversation, "c1");
+        assert!(resolve(&alloc, '5').is_err());
     }
     fn tmp_project(base: &Path, name: &str, id: u32) {
         let d = base.join(name);
@@ -563,27 +552,20 @@ mod tests {
         assert!(ROOTS.contains(&"/home/tree/test") && ROOTS[0] == "/home/tree/extensions");
     }
     #[test] fn run_rejects_unknown_command() { assert!(run(&["make".into()]).is_err()); }
-    #[test] fn memo_from_task_show_json() {
-        let out = "{\n \"id\": 1,\n \"section\": \"메모\",\n \"lines\": [\"1. 에이전트 0 : main · c0\"]\n}";
-        assert_eq!(memo_from_show(out).unwrap(), vec!["1. 에이전트 0 : main · c0".to_string()]);
+    #[test] fn alloc_from_task_show_json() {
+        let out = "{\n \"id\": 1,\n \"section\": \"할당\",\n \"lines\": [\"1. 00119800010 · c0\"]\n}";
+        assert_eq!(memo_from_show(out).unwrap(), vec!["1. 00119800010 · c0".to_string()]);
         assert!(memo_from_show("not json").is_err());
     }
-    #[test] fn memo_line_with_caller() {
-        assert_eq!(memo_line('2', "t26_241", "conv-9", Some(('0', "main"))).unwrap(),
-            "에이전트 2 : t26_241 · conv-9 ← 0 main");
-        assert!(memo_line('2', "r", "c", Some(('O', "main"))).is_err());
-        assert!(memo_line('2', "r", "c", Some(('0', "a\nb"))).is_err());
-    }
     #[test] fn memo_write_uses_changes_command() {
-        let line = "에이전트 1 : codex_338 · 4910ec9c ← 0 main";
+        let line = "00119803381 · 4910ec9c";
         assert_eq!(memo_write_args("/project", 338, line),
             ["task-memo", "338", "--project", "/project", "--line", line]);
     }
-    #[test] fn parse_caller_and_legacy() {
-        let e = parse_memo_line("3. 에이전트 2 : t26_241 · conv-9 ← 0 main").unwrap();
-        assert_eq!(e, Entry { agent: '2', role: "t26_241".into(), conversation: "conv-9".into(), caller: Some(('0', "main".into())) });
-        let e = parse_memo_line("1. 에이전트 1 : a · c · d").unwrap();
-        assert_eq!((e.conversation.as_str(), e.caller), ("c · d", None));
+    #[test] fn parse_alloc_without_session() {
+        let e = parse_alloc_line("3. 00119802412").unwrap();
+        assert_eq!(e, Entry { id: "00119802412".into(), agent: '2', conversation: String::new() });
+        assert_eq!(parse_alloc_line("1. 00119802411 · c · d"), None);
     }
     #[test] fn kst_date_rolls_over_at_1500_utc() {
         assert_eq!(kst_date(1_792_565_121), "261021"); // 2026-10-21T06:45:21Z

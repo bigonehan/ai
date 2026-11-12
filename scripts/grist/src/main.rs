@@ -203,6 +203,7 @@ fn run(argv: &[String]) -> R<Value> {
                 _ => None,
             };
             let mut result = api::delete(table, row_id)?;
+            if table == TASK_TABLE { records::forget_session_row(row_id)?; }
             if let (Some(project_dir), Value::Object(map)) = (project, &mut result) {
                 map.insert("changes".into(), serde_json::json!(records::remove_task_from_changes(&project_dir, row_id)?));
             }
@@ -222,6 +223,9 @@ fn run(argv: &[String]) -> R<Value> {
         "task" => {
             let row_id = args.pos_i64(0, "row_id")?;
             let project = cache_project(args.flag_opt("project"));
+            if args.flag_opt("project").is_some() {
+                records::register_existing_session_project(&project, row_id)?;
+            }
             if args.flags.contains_key("cached") {
                 if let Some(line) = cached_row_output(&project, row_id)? {
                     println!("{line}");
@@ -359,7 +363,8 @@ fn run(argv: &[String]) -> R<Value> {
             let paths = split_csv(args.flag_opt("paths").unwrap_or(""));
             let purpose = args.flag_req("purpose")?;
             let detail = args.flag_opt("detail").unwrap_or("");
-            let agent_id = args.flag_opt("agent-id");
+            let env_agent = std::env::var("T26_AGENT_ID").ok().filter(|v| !v.trim().is_empty());
+            let agent_id = args.flag_opt("agent-id").or(env_agent.as_deref());
             gate::task_red(row_id, project, test, &paths, &tests, purpose, detail, agent_id)
         }
         "task-ready" => {
@@ -369,7 +374,8 @@ fn run(argv: &[String]) -> R<Value> {
             let tests = split_csv(args.flag_req("tests")?);
             let paths = split_csv(args.flag_req("paths")?);
             let purpose = args.flag_req("purpose")?;
-            let agent_id = args.flag_opt("agent-id");
+            let env_agent = std::env::var("T26_AGENT_ID").ok().filter(|v| !v.trim().is_empty());
+            let agent_id = args.flag_opt("agent-id").or(env_agent.as_deref());
             gate::task_ready(row_id, project, test, &paths, &tests, purpose, agent_id)
         }
         "task-hidden" => {

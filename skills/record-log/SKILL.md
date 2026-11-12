@@ -22,24 +22,19 @@ A rejection names the observed shape that failed the check, not only a label: th
 Run the prebuilt Rust CLI with `R=~/ai/skills/record-log/scripts/bin/record-log`:
 
 ```bash
-$R start PROJECT_DIR ROW --role NAME [--conversation ID] [--caller CHAR NAME]
-$R parse ID --project PROJECT_DIR
 $R log-line ID CALLING_FUNCTION ATTEMPT RESULT
 $R append ID CALLING_FUNCTION ATTEMPT RESULT [--project PROJECT_DIR]
 $R find ID [--project PROJECT_DIR]
+$R parse ID --project PROJECT_DIR
 $R latest [--project PROJECT_DIR] [--fn NAME] [--since HH:MM]
 ```
 
-`start` (the caller runs it right after spawning the subagent; the subagent does not) allocates the next free agent character from `1` (`1`-`9`, `A`-`Z` without `I`/`O`: 33 sub-agent characters; exit 2 when exhausted); `0` is issued only with `--role main` (exit 2 if an `에이전트 0 :` line already exists), records one line `에이전트 <char> : <role> · <conversation>` (plus ` ← <caller char> <caller name>` with `--caller`; main is `0 main`) in that row's changes `### 메모` through `grist task-memo ROW --line LINE` (never edits the changes file or Table26 `$D`), and prints the 11-character ID. The project digits come from the `ID :` in `PROJECT_DIR/AGENTS.md`. A per-row lock serializes parallel starts. Give the conversation's stable reference, not its message body.
+`dispatch-agent` runs `start` automatically when spawning a worker, records `N. <11-char ID> · <session>` in the row's changes `### 할당` through `grist task-memo ROW --line '<ID> · <session>'` (never touching `### 메모` or Table26 `$D`), and attaches `에이전트 ID: <ID>` to the worker prompt. Agents do not call `start` or `task-memo` directly.
 
-`grist task-red --agent-id <ID>` uses the printed ID: it skips when 메모 has that agent line and only warns otherwise; without it task-red calls `start` once and prints `agent-id: <ID>`.
-
-`parse` reads the row's `### 메모` through `grist task-show ROW --section 메모` and prints project, row, agent, role, and conversation. There is no separate state file.
+`parse` and `find` read the row's `### 할당` through `grist task-show ROW --section 할당` to resolve the 11-character ID and session identifier; `find ID` also prints up to 20 matching timestamp-prefixed `.ai/logs/*.log` lines (at most 200 characters each).
 
 `log-line` validates all four fields and prints the formatted line; it exits with code 2 and prints an error when the result starts with `{` or `[`, exceeds 120 characters, spans lines, contains a field separator, or carries common credential markers. Pass the line to the existing caller's logger. The command itself does not send it anywhere.
 
-`append` runs the `log-line` validation, adds `HH:MM:SS` from the same Asia/Seoul clock reading used for the date, and appends the line to `<project dir>/.ai/logs/YYMMDD.log` (directory created). Without `--project`, the project dir is found by the six project digits in the `### grist` `ID :` header (first 8 lines) of `AGENTS.md` under `/home/tree/extensions/*` and `/home/tree/test/*`; `--project PROJECT_DIR` skips the scan.
-
-`find ID` derives the project the same way (or from `--project`), checks the row exists in `.ai/changes`, prints the agent memo line (role, conversation, caller) via `grist task-show ROW --section 메모`, then only timestamp-prefixed `.ai/logs/*.log` lines whose ID field equals the requested ID (at most 20 lines, 200 characters each). Old lines without a time are ignored. `parse` also prints the caller when present.
+`append` runs the `log-line` validation, adds `HH:MM:SS` from the same Asia/Seoul clock reading used for the date, and appends the line to `<project dir>/.ai/logs/YYMMDD.log` (directory created). Without `--project`, the project dir is found by the six project digits in the `### grist` `ID :` header (first 8 lines) of `AGENTS.md` under `/home/tree/extensions/*` and `/home/tree/test/*`; `--project PROJECT_DIR` skips the scan. Implementers (`role-agent`) and verifiers (`role-verifier`) never block or stall their own work to write or wait on logs; log recording and inspection are delegated to an asynchronous `record-log` Skill / agent call while implementers and verifiers continue and finish their own tasks immediately.
 
 `latest` reads today's Asia/Seoul log. Without `--project`, it uses the cwd `AGENTS.md` Grist ID to locate the project. `--fn` selects one calling function and `--since HH:MM` includes lines from that local time onward. It groups by ID and function, sorts by latest time descending, and prints at most 20 lines of 200 characters. Each line is `<last time> | <ID> | <function> | last=<ok|fail> stage=<value|-> ack=<value|-> error=<value|-> last_ok=<time|-> fails=<count>`. `error=none` means success; other values mean failure. A failure without `stage` adds `warn=no_stage`. Two or more failures with the same observed `ack` and `body` tokens add `warn=fixed_ack_body`.

@@ -33,7 +33,7 @@ pub const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "task-show", required: "ROW_ID (정수) --project DIR", optional: "--section SECTION", example: "grist task-show 518 --project . --section 목표" },
     CommandHelp { name: "improve-note", required: "ROW_ID (정수) --project DIR --text 한 줄", optional: "없음", example: "grist improve-note 712 --project . --text '[2회 실패] 원인 — 착각'" },
     CommandHelp { name: "improve-done", required: "ROW_ID (정수) --project DIR --text 한 줄", optional: "없음", example: "grist improve-done 712 --project . --text 'main-edit-gate 버전 흐름 검사 추가'" },
-    CommandHelp { name: "task-memo", required: "ROW_ID (정수) --project DIR --line 한 줄", optional: "없음", example: "grist task-memo 518 --project . --line '점검 기록'" },
+    CommandHelp { name: "task-memo", required: "ROW_ID (정수) --project DIR --line '<11자리 ID> · <세션 식별자>'", optional: "없음", example: "grist task-memo 518 --project . --line '00119805181 · 4910ec9c'" },
     CommandHelp { name: "task-step", required: "ROW_ID (정수) --project DIR --step ▷|▶ --text 한 줄 --goal 목표 줄 번호", optional: "없음", example: "grist task-step 518 --project . --step ▶ --text '구현 확인' --goal 1" },
     CommandHelp { name: "task-confirm", required: "ROW_ID (정수) --project DIR --summary 한 줄 --check 한 줄 --detail 한 줄 --evidence FILE", optional: "--can 한 줄, --partial --reason 사유, --docs 쉼표 구분 .md 경로", example: "grist task-confirm 518 --project . --summary '[✒️] 입력 ⇒ 결과' --check 확인 --detail 성공 --evidence evidence.txt" },
     CommandHelp { name: "request-record", required: "--project DIR --input-file FILE --title 제목 --summary 한 줄", optional: "없음", example: "grist request-record --project . --input-file request.txt --title 도움말 --summary '요청 요약'" },

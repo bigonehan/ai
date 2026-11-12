@@ -73,9 +73,6 @@ pub fn command_event(event: &Value) -> String {
     let cwd = args.and_then(|args| args.get("Cwd")).and_then(Value::as_str).unwrap_or("");
     let mut input = Vec::new();
     obj_set(&mut input, "command", s(command));
-    if let Some(wait_ms) = args.and_then(|a| a.get("WaitMsBeforeAsync")).and_then(Value::as_i64) {
-        obj_set(&mut input, "wait_ms", Value::Num(wait_ms.to_string()));
-    }
     let mut output = Vec::new();
     obj_set(&mut output, "tool_name", s("Bash"));
     obj_set(&mut output, "tool_input", Value::Obj(input));
@@ -359,6 +356,13 @@ fn manifest_action(target: &str, id: &str, event: &Value) -> Result<String, Stri
             Ok("{}".into())
         }
         "initialization" | "completion" | "stop-notify" => {
+            if !is_gemini {
+                close_idle_dispatch_windows();
+                let reason = first_str(event, "terminationReason");
+                if reason == "USER_CANCELED" || reason == "ERROR" || event.get("fullyIdle") == Some(&Value::Bool(false)) {
+                    return Ok("{}".into());
+                }
+            }
             let name = if id == "initialization" { "initialization-gate" } else if id == "completion" { "task-complete" } else { "ask-notify" };
             let output = run(name, &[], &lifecycle("Stop"))?;
             if let Some(block) = stop_output(&output) {

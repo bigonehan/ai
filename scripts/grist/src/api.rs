@@ -239,6 +239,11 @@ pub fn quote(text: &str) -> String {
 
 pub fn get(table: &str, ids: Option<&[i64]>, filter: Option<&Map<String, Value>>, fields: Option<&[String]>) -> R<Vec<Value>> {
     let mut query = filter.cloned().unwrap_or_default();
+    for value in query.values_mut() {
+        if !value.is_array() {
+            *value = json!([value.clone()]);
+        }
+    }
     if let Some(ids) = ids {
         if !ids.is_empty() {
             query.insert("id".into(), json!(ids));

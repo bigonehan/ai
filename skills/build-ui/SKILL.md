@@ -50,6 +50,13 @@ Implement the requested visual behavior in the existing design system and verify
 - Icons come from Lucide (https://lucide.dev, ISC license). In a no-build screen, keep only the needed Lucide SVGs in the project (inline or a small module); do not depend on a runtime CDN.
 - Buttons for these functions are always icon-only, with the function name in `aria-label` and `title`: refresh `refresh-cw`, create `plus`, confirm `check`, cancel `circle-x`, close `x`, open `folder-open`, save `save`.
 
+## Settings menu
+
+- **단축키 설정 필수:** UI 등을 만들거나 고칠 때 단축키(키맵·핫키) 관련 기능은 무조건 설정 메뉴에서 수정할 수 있도록 설정 메뉴를 구축한다(사용자가 현 단계에서 명시적으로 보류한 경우만 예외).
+- **기본 구성:** 설정 메뉴 구축 시 기본 레이아웃 구성은 탭(Tab)으로 한다.
+- **파일 불러오기:** 파일·폴더 불러오기(경로 선택)는 직접 경로 문자열만 입력하게 하지 않고 OS/호스트의 native 탐색기(파일 대화상자)를 이용한다.
+- **하단 액션 배치:** 확인 버튼과 취소 버튼은 가능하면 오른쪽 아래(lower-right)에 배치한다.
+
 ## Layout contract
 
 Before changing UI code, record each requested target with:

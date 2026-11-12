@@ -1,6 +1,6 @@
 # 검증→확인 단계 (`manage-project` — Verify & Complete, 위임자)
 
-흐름의 모든 행이 `$H=검증`이면 위임자는 아래 순서만 실행한다. 흐름 실행·숨긴 사례 기록·CDP·병목 로깅은 검증자(`role-verifier`) 몫이며 이 카드에 없다. 규칙·Skill 문서만 바꾼 행은 검증자 없이 `manage-global-rules` §4 예외로 마감하며, 그 `task-confirm`의 `--check` 또는 `--detail`에 하위 `AGENTS.md` `충돌` 검사 결과(예: `충돌 0건`)를 넣는다(없으면 `task-complete`가 "conflict inspection"으로 거부).
+흐름의 모든 행이 `$H=검증`이면 위임자는 아래 순서만 실행한다. 흐름 실행·숨긴 사례 기록·CDP·병목 로깅은 검증자(`role-verifier`) 몫이며 이 카드에 없다. 단, extensions 루트의 `runtime : 없음(로컬 CLI)` 작업 도구 행은 메인이 이미 실제 훅 입력→최종 출력 경로를 확인했다면 같은 검증을 다시 위임하지 않고 해당 명령을 `task-hidden`에 기록해 마감한다. 규칙·Skill 문서만 바꾼 행은 검증자 없이 `manage-global-rules` §4 예외로 마감하며, 그 `task-confirm`의 `--check` 또는 `--detail`에 하위 `AGENTS.md` `충돌` 검사 결과(예: `충돌 0건`)를 넣는다(없으면 `task-complete`가 "conflict inspection"으로 거부).
 
 ## 마감 명령 순서 (필수 인자 포함)
 
@@ -15,9 +15,9 @@
 
 - `$D`를 쓸 때(`grist task-update <id> --project <dir> --fields '{"D": "..."}'`)는 `[🅰️|🗝|❌|⭕️|🔢|🛣|🕧|👥|🏷|🚥|🔳] <한 줄>` 형식이다.
 - 근거에는 실제로 실행한 명령·숨긴 사례·화면 값만 쓴다. 단위 테스트로만 확인한 값은 `(단위 테스트)`라고 밝힌다. J1은 근거가 목표를 덮는지만 보며 숨긴 사례·흐름 확인을 대신하지 않는다.
-- 기록은 `grist task-show <id> --project <dir> --section 검증|확인`으로만 읽고 `.ai/changes`를 열거나 쓰지 않는다.
+- 기록은 `grist task-show <id> --project <dir> --section 구현|확인`으로만 읽고 `.ai/changes`를 열거나 쓰지 않는다.
 - 사용자 전용 동작(로그인·인증, 결제·비용, 비가역 외부 전송, 브라우저 밖 OS 앱 조작)만 남으면 `$D`에 사유를 쓰고 `AskUserQuestion`으로 단일 동작을 묻는다. 브라우저 클릭·확장 재로드·Settings `Test`는 넘기지 않는다.
-- 검증자가 `실패 — <행>: …`로 끝나면 `dispatch-agent`가 그 행의 `$I`·`$H=진단`을 기록한다(결과 줄 `recorded=I:<행>`, 없을 때만 위임자가 `task-update`). 위임자는 `stage-start.md` 진단 갈림길에서 `$J`만 판단한다. 재위임은 `plan.md` §3을 따른다.
+- 검증자가 **제품 요구 결과 미동작**으로 `실패 — <행>: …`를 내면 `dispatch-agent`가 그 행의 `$I`·`$H=진단`을 기록한다(결과 줄 `recorded=I:<행>`, 없을 때만 위임자가 `task-update`). 위임자는 `stage-start.md` 진단 갈림길에서 `$J`만 판단하고 재위임은 `plan.md` §3을 따른다. 단, **제품 요구 결과는 확인됐고 작업 과정·로그 경로 결함만 있는 경우**(`과정결함 —` 또는 `process_defect=improve:<행>`)에는 `$H=진단`으로 내리거나 대행자·검증자를 재호출하지 않고 즉시 `task-confirm`·`task-complete` 후 `dispatch-agent --role improver`로 넘긴다.
 
 ## 1. 단일 릴리스 및 배포 복사 (위임자)
 

@@ -320,12 +320,11 @@ const boundaryError = (boundary, error) => new Error(`${boundary}: ${error insta
 const errorBoundary = (error) => String(error?.message || error).split(":", 1)[0];
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export async function connectAndCreate({ connect, create, refreshTarget, restartRuntime, doctor, onRetry = () => {}, onCreateDuration = () => {}, sleep = wait, createTimeoutMs = 20_000, totalTimeoutMs = 60_000, now = Date.now }) {
+export async function connectAndCreate({ connect, create, refreshTarget, restartRuntime, doctor, onRetry = () => {}, onCreateDuration = () => {}, sleep = wait, createTimeoutMs = 20_000, createSettleTimeoutMs = 65_000, totalTimeoutMs = 60_000, now = Date.now }) {
   const started = now();
   let retries = 0;
   let targetRetries = 0;
   let initRestarted = false;
-  let timeoutRestarted = false;
   let handleReconnected = false;
   let connected = false;
   let browser;
@@ -353,7 +352,16 @@ export async function connectAndCreate({ connect, create, refreshTarget, restart
         return { stagehand: result, browser, retries };
       } catch (error) {
         clearTimeout(timer);
-        if (error?.message === "stagehand-create-timeout") timer = null;
+        if (error?.message === "stagehand-create-timeout") {
+          timer = null;
+          // Promise.race does not cancel Stagehand.create. Keep the lock and do not
+          // start another create until the timed-out call has actually settled.
+          const settled = await Promise.race([
+            pending.then(() => true, () => true),
+            sleep(createSettleTimeoutMs).then(() => false),
+          ]);
+          if (!settled) throw new Error("stagehand-create-unsettled", { cause: error });
+        }
         throw error;
       } finally {
         onCreateDuration(now() - createStartedAt);
@@ -388,15 +396,7 @@ export async function connectAndCreate({ connect, create, refreshTarget, restart
         onRetry(retries);
         continue;
       }
-      if (message.startsWith("stagehand-create-timeout") && !timeoutRestarted) {
-        timeoutRestarted = true;
-        retries += 1;
-        onRetry(retries);
-        await doctor();
-        await restartRuntime();
-        continue;
-      }
-      const boundary = noTarget ? `stagehand-${phase}-target` : message.startsWith("stagehand-create-timeout") ? "stagehand-create-timeout" : /already initialized|initialization is already in progress/u.test(message) ? "runtime-already-initialized" : message.includes("already attached to a Stagehand instance") ? "browser-handle-attached" : `stagehand-${phase}-failed`;
+      const boundary = noTarget ? `stagehand-${phase}-target` : message.startsWith("stagehand-create-unsettled") ? "stagehand-create-unsettled" : message.startsWith("stagehand-create-timeout") ? "stagehand-create-timeout" : /already initialized|initialization is already in progress/u.test(message) ? "runtime-already-initialized" : message.includes("already attached to a Stagehand instance") ? "browser-handle-attached" : `stagehand-${phase}-failed`;
       throw boundaryError(boundary, error);
     }
   }
@@ -827,8 +827,101 @@ export function installRuntimeSignalHandlers(getStagehand, runtimeLock, { proces
   return remove;
 }
 
+export function enhanceStagehandPage(page) {
+  if (!page || typeof page.locator !== "function" || page.__stagehandEnhanced) return page;
+  const rawLocatorFactory = page.locator.bind(page);
+  const evalOnLocator = async (selector, nth, pageFunction, arg, all = false) => {
+    const fnSource = typeof pageFunction === "function" ? pageFunction.toString() : String(pageFunction);
+    const parts = String(selector || "").split(">>").map((piece) => piece.trim()).filter(Boolean);
+    if (typeof page.evaluate === "function") {
+      const direct = await page.evaluate(
+        ({ parts: hopParts, nthIndex, fnText, fnArg, evalAll }) => {
+          const queryAll = (root, raw) => {
+            const trimmed = raw.trim();
+            if (/^text=/i.test(trimmed)) {
+              const needle = trimmed.replace(/^text=/i, "").trim().replace(/^["']|["']$/g, "");
+              return [...root.querySelectorAll("*")].filter((el) => (el.innerText || el.textContent || "").trim().includes(needle));
+            }
+            const css = trimmed.replace(/^css=/i, "");
+            return [...root.querySelectorAll(css)];
+          };
+          let root = document;
+          for (let i = 0; i < hopParts.length - 1; i += 1) {
+            const frameEl = queryAll(root, hopParts[i])[0];
+            if (!frameEl) return { status: "missing" };
+            if (frameEl.tagName === "IFRAME") {
+              try {
+                if (!frameEl.contentDocument) return { status: "cross-origin" };
+                root = frameEl.contentDocument;
+              } catch {
+                return { status: "cross-origin" };
+              }
+            } else {
+              root = frameEl.shadowRoot || frameEl;
+            }
+          }
+          const matches = queryAll(root, hopParts[hopParts.length - 1] || "*");
+          const fn = (0, eval)(`(${fnText})`);
+          if (evalAll) return { status: "ok", value: fn(matches, fnArg) };
+          const target = matches[nthIndex];
+          if (!target) return { status: "missing" };
+          return { status: "ok", value: fn(target, fnArg) };
+        },
+        { parts, nthIndex: nth, fnText: fnSource, fnArg: arg, evalAll: all },
+      );
+      if (direct && direct.status === "ok") return direct.value;
+      if (direct && direct.status === "cross-origin" && parts.length > 1) {
+        const framePrefix = parts.slice(0, -1).join(" >> ");
+        const tailSelector = parts[parts.length - 1];
+        const bodyHtml = await rawLocatorFactory(`${framePrefix} >> body`).innerHtml();
+        return await page.evaluate(
+          ({ html, tail, nthIndex, fnText, fnArg, evalAll }) => {
+            const template = document.createElement("template");
+            template.innerHTML = html;
+            const css = tail.trim().replace(/^css=/i, "");
+            const matches = [...template.content.querySelectorAll(css)];
+            const fn = (0, eval)(`(${fnText})`);
+            if (evalAll) return fn(matches, fnArg);
+            const target = matches[nthIndex];
+            if (!target) throw new Error(`locator.evaluate: no element matching ${tail} (nth=${nthIndex})`);
+            return fn(target, fnArg);
+          },
+          { html: bodyHtml, tail: tailSelector, nthIndex: nth, fnText: fnSource, fnArg: arg, evalAll: all },
+        );
+      }
+      if (direct && direct.status === "missing") {
+        throw new Error(`locator.evaluate: no element matching ${selector} (nth=${nth})`);
+      }
+    }
+    throw new Error(`locator.evaluate is unavailable for selector: ${selector}`);
+  };
+  const wrapLocator = (loc, selector, nth = 0) => {
+    if (!loc || typeof loc !== "object") return loc;
+    if (typeof loc.evaluate !== "function") {
+      loc.evaluate = (pageFunction, arg) => evalOnLocator(loc.descriptor?.selector ?? selector, loc.descriptor?.nth ?? nth, pageFunction, arg, false);
+    }
+    if (typeof loc.evaluateAll !== "function") {
+      loc.evaluateAll = (pageFunction, arg) => evalOnLocator(loc.descriptor?.selector ?? selector, loc.descriptor?.nth ?? nth, pageFunction, arg, true);
+    }
+    if (typeof loc.first === "function") {
+      const origFirst = loc.first.bind(loc);
+      loc.first = () => wrapLocator(origFirst(), loc.descriptor?.selector ?? selector, 0);
+    }
+    if (typeof loc.nth === "function") {
+      const origNth = loc.nth.bind(loc);
+      loc.nth = (index) => wrapLocator(origNth(index), loc.descriptor?.selector ?? selector, index);
+    }
+    return loc;
+  };
+  page.locator = (selector) => wrapLocator(rawLocatorFactory(selector), selector, 0);
+  Object.defineProperty(page, "__stagehandEnhanced", { value: true, configurable: true });
+  return page;
+}
+
 export async function openStagehand({
   url,
+  waitForSelector,
+  waitForTimeoutMs = 15_000,
   extensions = [],
   port = DEFAULT_PORT,
   keepPages = false,
@@ -836,6 +929,9 @@ export async function openStagehand({
   leaseTimeoutMs = process.env.STAGEHAND_LEASE_TIMEOUT_MS ? Number(process.env.STAGEHAND_LEASE_TIMEOUT_MS) : 0,
   runtimeAdapters = {},
 } = {}) {
+  if (typeof url === "string" && /^(?:chrome|devtools):\/\//u.test(url)) {
+    throw new Error(`stagehand-internal-page-unsupported: ${new URL(url).protocol}`);
+  }
   const startedAt = Date.now();
   const metrics = emptyMetrics();
   let retries = 0;
@@ -1008,12 +1104,12 @@ export async function openStagehand({
   const originalNewPage = context.newPage.bind(context);
   context.newPage = async (...args) => {
     const before = new Set((await pageTargets()).map((target) => target.targetId));
-    const created = await originalNewPage(...args);
+    const created = enhanceStagehandPage(await originalNewPage(...args));
     for (const target of await pageTargets()) if (!before.has(target.targetId)) ownedTargets.add(target.targetId);
     persistPages();
     return created;
   };
-  const pages = await context.pages();
+  const pages = (await context.pages()).map((candidate) => enhanceStagehandPage(candidate));
   const pageUrls = await Promise.all(pages.map(async (candidate) => {
     let timer;
     try { return await Promise.race([candidate.url(), new Promise((resolve) => { timer = setTimeout(() => resolve(null), 1000); })]); }
@@ -1031,7 +1127,7 @@ export async function openStagehand({
         break;
       }
     }
-    page = page || (await stagehand.browser.context.newPage());
+    page = enhanceStagehandPage(page || (await stagehand.browser.context.newPage()));
     const currentUrl = pages.includes(page) ? pageUrls[pages.indexOf(page)] : "about:blank";
     if (currentUrl !== url && !(currentUrl && url.endsWith("/") && currentUrl.startsWith(url))) {
       await page.goto(url);
@@ -1045,7 +1141,12 @@ export async function openStagehand({
         break;
       }
     }
-    page = page || (await stagehand.browser.context.newPage());
+    page = enhanceStagehandPage(page || (await stagehand.browser.context.newPage()));
+  }
+  if (waitForSelector && page && typeof page.waitForSelector === "function") {
+    logStep("page-wait-selector-start", waitForSelector);
+    await page.waitForSelector(waitForSelector, { timeout: waitForTimeoutMs });
+    logStep("page-wait-selector-done", waitForSelector);
   }
   const version = knownVersion || await (runtimeAdapters.endpointVersion || endpointVersion)(port);
   logStep("session-ready");
