@@ -1,0 +1,49 @@
+{
+  "name": "melange",
+  "environment": {
+    "terminal": "Windows Terminal",
+    "terminalSettingsPath": "/mnt/c/Users/tende/AppData/Local/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json",
+    "cli": "Antigravity CLI (agy)",
+    "cliColorScheme": "terminal"
+  },
+  "roles": {
+    "background": "#F1F1F1",
+    "defaultText": "#54433A",
+    "parenthesesText": "#7A6C63",
+    "infoMessages": {
+      "sessionMetaAndDivider": "#767676",
+      "tokenUsageAndToolHeader": "#BC5C00",
+      "toolCompletedIndicator": "#6E9B72",
+      "userPromptLine": "#7892BD",
+      "inlineCodeAndCommand": "#465AA4",
+      "errorMessage": "#C77B8B",
+      "criticalAlert": "#BF0021"
+    },
+    "ui": {
+      "cursor": "#7D6658",
+      "selectionBackground": "#D9D3CE"
+    }
+  },
+  "palette": {
+    "background": "#F1F1F1",
+    "foreground": "#54433A",
+    "cursorColor": "#7D6658",
+    "selectionBackground": "#D9D3CE",
+    "black": "#0C0C0C",
+    "red": "#C77B8B",
+    "green": "#6E9B72",
+    "yellow": "#BC5C00",
+    "blue": "#7892BD",
+    "purple": "#BE79BB",
+    "cyan": "#739797",
+    "white": "#7A6C63",
+    "brightBlack": "#767676",
+    "brightRed": "#BF0021",
+    "brightGreen": "#3A684A",
+    "brightYellow": "#A06D00",
+    "brightBlue": "#465AA4",
+    "brightPurple": "#904180",
+    "brightCyan": "#3D6568",
+    "brightWhite": "#F2F2F2"
+  }
+}

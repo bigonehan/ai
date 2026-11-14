@@ -39,9 +39,19 @@ fn stop_message(folder: &str, reply: &str) -> Option<String> {
 }
 
 fn last_reply(transcript: &str) -> Option<String> {
-    let text = std::fs::read_to_string(transcript).ok()?;
+    let mut text = std::fs::read_to_string(transcript).ok()?;
+    if text.lines().rev().filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|entry| entry.get("type").and_then(Value::as_str) == Some("PLANNER_RESPONSE"))
+        .is_some_and(|entry| entry.get("truncated_fields").is_some()) {
+        if let Ok(full) = std::fs::read_to_string(Path::new(transcript).with_file_name("transcript_full.jsonl")) { text = full; }
+    }
     text.lines().rev().filter_map(|line| serde_json::from_str::<Value>(line).ok()).find_map(|entry| {
         match entry.get("type")?.as_str()? {
+            "response_item" if entry.pointer("/payload/role").and_then(Value::as_str) == Some("assistant") => {
+                let parts = entry.pointer("/payload/content")?.as_array()?;
+                let joined: Vec<&str> = parts.iter().filter(|p| p.get("type").and_then(Value::as_str) == Some("output_text")).filter_map(|p| p.get("text")?.as_str()).collect();
+                (!joined.is_empty()).then(|| joined.join("\n"))
+            }
             "assistant" => {
                 let parts = entry.pointer("/message/content")?.as_array()?;
                 let joined: Vec<&str> = parts.iter().filter(|part| part.get("type").and_then(Value::as_str) == Some("text")).filter_map(|part| part.get("text")?.as_str()).collect();
@@ -61,6 +71,19 @@ fn quiet_hour(epoch: u64) -> bool {
     (2..9).contains(&((epoch + 9 * 3600) / 3600 % 24))
 }
 
+/// Stop 차단이 이어지는(stop_hook_active) 동안은 세션당 한 번만 알린다: 매번 보내면 반복 알림, 아예 안 보내면
+/// 사용자가 대기를 모른다(261114 #952 차단 19회 무알림). 새 Stop(차단 아님)이 오면 표시를 지워 다음 반복에서 다시 한 번 알린다.
+fn loop_notice_due(marker: Option<&Path>, active: bool) -> bool {
+    let Some(marker) = marker else { return !active };
+    if !active {
+        let _ = std::fs::remove_file(marker);
+        return true;
+    }
+    if marker.exists() { return false; }
+    let _ = marker.parent().map(std::fs::create_dir_all);
+    std::fs::write(marker, "").is_ok()
+}
+
 fn main() {
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
@@ -76,10 +99,20 @@ fn main() {
         eprintln!("새벽 2시~9시(KST)에는 사용자에게 묻지 않습니다: 되돌릴 수 있는 안전한 기본값(사용자 데이터 보존·비파괴)을 골라 진행하고, 사용자만 할 수 있는 동작(로그인·결제·비가역 외부 전송·OS 앱 조작)만 행 $D에 [🏷] 사용자 대기로 기록하세요.");
         std::process::exit(2);
     }
-    if stop && event.get("stop_hook_active").and_then(Value::as_bool) == Some(true) { return; }
+    if stop {
+        let active = event.get("stop_hook_active").and_then(Value::as_bool) == Some(true);
+        let marker = std::env::var("HOME").ok().zip(event.get("session_id").and_then(Value::as_str).filter(|id| !id.is_empty()))
+            .map(|(home, id)| Path::new(&home).join(".local/state/ask-notify-loop").join(id));
+        if !loop_notice_due(marker.as_deref(), active) { return; }
+    }
     let text = if stop {
         let folder = event.get("cwd").and_then(Value::as_str).and_then(|cwd| Path::new(cwd).file_name()?.to_str().map(str::to_owned)).unwrap_or_default();
-        event.get("transcript_path").and_then(Value::as_str).and_then(last_reply).and_then(|reply| stop_message(&folder, &reply))
+        let fallback_tp = event.get("session_id").and_then(Value::as_str).filter(|id| !id.is_empty())
+            .and_then(|id| std::env::var("HOME").ok().map(|h| format!("{h}/.gemini/antigravity-cli/brain/{id}/.system_generated/logs/transcript.jsonl")));
+        let reply = event.get("last_assistant_message").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_owned)
+            .or_else(|| event.get("transcript_path").and_then(Value::as_str).filter(|p| !p.is_empty()).and_then(last_reply))
+            .or_else(|| fallback_tp.as_deref().and_then(last_reply));
+        reply.and_then(|r| stop_message(&folder, &r))
     } else { message(&event) };
     if let Some(text) = text {
         let now = std::time::SystemTime::now()
@@ -157,7 +190,23 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{message, quiet_hour, stop_message};
+    use super::{loop_notice_due, message, quiet_hour, stop_message};
+
+    #[test]
+    fn blocked_stop_loop_notifies_once_then_again_after_a_new_stop() {
+        let dir = std::env::temp_dir().join(format!("ask-notify-loop-{}", std::process::id()));
+        let marker = dir.join("sid");
+        let _ = std::fs::remove_dir_all(&dir);
+        // 차단 반복 4회(2~5번째 Stop): 처음 한 번만 보낸다.
+        let sent: Vec<bool> = (2..=5).map(|_| loop_notice_due(Some(&marker), true)).collect();
+        assert_eq!(sent, vec![true, false, false, false]);
+        // 새 Stop이 오면 다시 알리고, 다음 반복에서 한 번 더 알린다.
+        assert!(loop_notice_due(Some(&marker), false));
+        assert!(loop_notice_due(Some(&marker), true));
+        assert!(!loop_notice_due(Some(&marker), true));
+        let _ = std::fs::remove_dir_all(&dir);
+        println!("[verify-step] range-check start=2 mid=3 end=5");
+    }
 
     #[test]
     fn quiet_hours_are_two_to_nine_kst() {
@@ -238,5 +287,21 @@ mod tests {
             message(&event).as_deref(),
             Some("[요청] extensions 프로젝트 타입을 선택해 주세요.")
         );
+    }
+
+    #[test]
+    fn last_reply_reads_truncated_agy_full_transcript_and_codex_response_item() {
+        let dir = std::env::temp_dir().join(format!("ask-notify-tp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let tp = dir.join("transcript.jsonl");
+        std::fs::write(&tp, "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"잘림\",\"truncated_fields\":[\"content\"]}\n").unwrap();
+        std::fs::write(dir.join("transcript_full.jsonl"), "{\"type\":\"PLANNER_RESPONSE\",\"content\":\"전체 완료 보고예요.\"}\n").unwrap();
+        let reply = super::last_reply(tp.to_str().unwrap()).unwrap();
+        assert_eq!(stop_message("extensions", &reply).as_deref(), Some("[완료] extensions 전체 완료 보고예요."));
+        let codex = dir.join("codex.jsonl");
+        std::fs::write(&codex, "{\"type\":\"response_item\",\"payload\":{\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"코덱스 완료\"}]}}\n").unwrap();
+        assert_eq!(super::last_reply(codex.to_str().unwrap()).as_deref(), Some("코덱스 완료"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

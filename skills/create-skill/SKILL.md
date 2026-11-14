@@ -8,7 +8,7 @@ description: Create or edit a Skill or hook under ~/ai/skills or ~/ai/codex/hook
 ## 위치와 이름
 
 - Skill 원본은 `~/ai/skills/<name>/SKILL.md`, hook 원본은 `~/ai/codex/hooks*`에 둔다. 원본만 고친다.
-- Skill 이름과 폴더명은 `동사-명사`(예: `access-grist`)로 짓는다.
+- Skill 이름과 폴더명은 `동사_명사`(예: `access_grist`, `-` 금지)로 짓는다.
 - `SKILL.md`는 frontmatter(`name`, `description`)로 시작한다. `description`에 언제 쓰는지와 쓰지 않는 경우를 적는다.
 
 ## 심볼릭 링크

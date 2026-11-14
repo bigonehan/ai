@@ -1,14 +1,22 @@
 {
   "description": "~/ai hook source; each logical command is declared once. Target adapters translate event, matcher and JSON protocol.",
+  "mcpServers": {
+    "blender": {"command": "/mnt/c/Users/tende/.local/bin/uvx.exe", "args": ["blender-mcp"]},
+    "windows-mcp": {"command": "/mnt/c/Users/tende/.local/bin/uvx.exe", "args": ["--python", "3.13", "windows-mcp", "serve"]}
+  },
   "hooks": [
     {"id":"ensure","event":"SessionStart","command":"agent-rules ensure","timeout":120,"targets":{"claude":{},"codex":{},"gemini":{},"agy":{}}},
+    {"id":"blackbox","event":"SessionStart","command":"cli_watch_blackbox hook-session-start","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{},"agy":{}}},
+    {"id":"blackbox-end","event":"SessionEnd","command":"cli_watch_blackbox hook-session-end","timeout":20,"targets":{"claude":{}}},
     {"id":"gate","event":"PreToolUse","matcher":"Edit|Write|MultiEdit|NotebookEdit|Read|Bash|Agent|Task|Monitor","command":"main-edit-gate","timeout":20,"targets":{"claude":{},"codex":{"matcher":"Edit|Write|MultiEdit|NotebookEdit|Read|Bash|Agent|Task|exec_command|apply_patch|functions.exec_command|functions.apply_patch"},"gemini":{"event":"BeforeTool","matcher":"write_file|replace|edit_file|read_file|run_shell_command|run_command|invoke_subagent"},"agy":{"event":"PreToolUse","matcher":"run_command|read_file|view_file|edit_file|write_file|write_to_file|replace_file_content|multi_replace_file_content|invoke_subagent|define_subagent|manage_subagents"}}},
     {"id":"ask","event":"PreToolUse","matcher":"AskUserQuestion|ExitPlanMode","command":"ask-notify","timeout":45,"targets":{"claude":{},"codex":{},"gemini":{"event":"BeforeTool","matcher":"ask_question|ask_user"},"agy":{"event":"PreToolUse","matcher":"ask_question"}}},
     {"id":"architecture","event":"SessionStart","command":"architecture-context","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{},"agy":{}}},
     {"id":"snapshot","event":"SessionStart","command":"task-complete --session-start","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{},"agy":{}}},
     {"id":"prompt-architecture","event":"UserPromptSubmit","command":"architecture-context","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{"event":"BeforeAgent"},"agy":{"event":"PreInvocation"}}},
+    {"id":"blackbox-prompt","event":"UserPromptSubmit","command":"cli_watch_blackbox hook-prompt","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{"event":"BeforeAgent"},"agy":{"event":"PreInvocation"}}},
     {"id":"touch","event":"UserPromptSubmit","command":"task-complete --session-touch","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{"event":"BeforeAgent"},"agy":{"event":"PreInvocation"}}},
     {"id":"grist-sync","event":"Stop","command":"grist sync --cwd \"$PWD\" >/dev/null 2>&1 || true","timeout":60,"targets":{"claude":{},"codex":{},"gemini":{"event":"AfterAgent"},"agy":{}}},
+    {"id":"blackbox-stop","event":"Stop","command":"cli_watch_blackbox hook-stop","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{"event":"AfterAgent"},"agy":{}}},
     {"id":"initialization","event":"Stop","command":"initialization-gate","timeout":60,"targets":{"claude":{},"codex":{},"gemini":{"event":"AfterAgent"},"agy":{}}},
     {"id":"completion","event":"Stop","command":"task-complete","timeout":90,"targets":{"claude":{},"codex":{},"gemini":{"event":"AfterAgent"},"agy":{}}},
     {"id":"stop-notify","event":"Stop","command":"ask-notify","timeout":20,"targets":{"claude":{},"codex":{},"gemini":{"event":"AfterAgent"},"agy":{}}},
@@ -16,6 +24,9 @@
   ],
   "unsupported": [
     {"target":"gemini","event":"SubagentStop","reason":"Gemini CLI has no SubagentStop hook event; AfterAgent handles the parent turn."},
-    {"target":"agy","event":"SubagentStop","reason":"Antigravity exposes no subagent completion hook; its built-in subagent calls are denied."}
+    {"target":"agy","event":"SubagentStop","reason":"Antigravity exposes no subagent completion hook; its built-in subagent calls are denied."},
+    {"target":"codex","event":"SessionEnd","reason":"Codex has no SessionEnd hook event; cli_watch_blackbox daemon auto-kills on main PID exit."},
+    {"target":"gemini","event":"SessionEnd","reason":"Gemini CLI uses process exit; cli_watch_blackbox daemon auto-kills on main PID exit."},
+    {"target":"agy","event":"SessionEnd","reason":"Antigravity has no SessionEnd hook event; cli_watch_blackbox daemon auto-kills on main PID exit."}
   ]
 }

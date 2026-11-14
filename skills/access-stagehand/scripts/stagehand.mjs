@@ -17,6 +17,8 @@
 //   node stagehand.mjs open [--url URL] [--extension DIR[,DIR]] [--port 9222]
 //   node stagehand.mjs doctor [--restart-runtime] [--close-hung] [--port 9222]
 //   node stagehand.mjs stats [--last N]
+//   node stagehand.mjs serve [--detach]          resident CDP relay on RELAY_SOCKET
+//   node stagehand.mjs relay '{"op":"type","target":"input#key","text":"abc"}'
 import { appendFileSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -1220,10 +1222,411 @@ export async function openStagehand({
   }
 }
 
+// ---------------------------------------------------------------------------
+// CDP relay: one resident process holds the shared :9222 connection and one page;
+// a verifier sends a request line and gets one short result line back, instead of
+// writing and running a browser script each session.
+//   node stagehand.mjs serve --detach
+//   node stagehand.mjs relay '{"op":"open","url":"https://…"}'
+// ops: open{url} click{target} type{target,text} read{target,prop} wait{target,ms}
+//      screenshot{path} storage{area,key} eval{expr}
+// target: CSS selector, `outer >> inner` to step into an iframe or shadow root.
+// Closed shadow roots are reached through DOM.getDocument(pierce:true).
+
+export const RELAY_SOCKET = process.env.STAGEHAND_RELAY_SOCKET || join(tmpdir(), "access-stagehand-locks", "relay.sock");
+const RELAY_VALUE_LIMIT = 300;
+
+const relayText = (value) => {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
+  return text.replace(/\s+/g, " ").slice(0, RELAY_VALUE_LIMIT);
+};
+
+/** One `[verify-step] relay …` line for the verify log. */
+export function relayLine(request, result) {
+  const rawTarget = request.target ?? request.selector;
+  const target = rawTarget ? ` target=${relayText(rawTarget)}` : "";
+  const detail = result.ok ? `value=${relayText(result.value)}` : `reason=${relayText(result.reason)}`;
+  return `[verify-step] relay op=${request.op}${target} ok=${result.ok} ${detail}`;
+}
+
+/** Every root that a selector can search: documents, iframe documents and (closed) shadow roots under `node`. */
+function relayRoots(node, out = []) {
+  if (!node) return out;
+  if (node.nodeType === 9 || node.nodeType === 11) out.push(node);
+  if (node.contentDocument) relayRoots(node.contentDocument, out);
+  for (const shadow of node.shadowRoots || []) relayRoots(shadow, out);
+  for (const child of node.children || []) relayRoots(child, out);
+  return out;
+}
+
+function relayFind(tree, nodeId) {
+  if (!tree) return null;
+  if (tree.nodeId === nodeId) return tree;
+  for (const next of [tree.contentDocument, ...(tree.shadowRoots || []), ...(tree.children || [])]) {
+    const found = relayFind(next, nodeId);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function createRelay(cdp, { sleep = pause, now = Date.now, writeFile = writeFileSync } = {}) {
+  let sessionId = null;
+  const failures = new Map();
+
+  // The relay owns one tab for its lifetime; it never drives a tab someone else opened.
+  const page = async () => {
+    if (sessionId) return sessionId;
+    const created = await cdp.call("Target.createTarget", { url: "about:blank" });
+    if (created.error) throw new Error(`createTarget: ${created.error.message}`);
+    await cdp.call("Target.activateTarget", { targetId: created.result.targetId }).catch(() => {});
+    const attached = await cdp.call("Target.attachToTarget", { targetId: created.result.targetId, flatten: true });
+    if (attached.error) throw new Error(`attach: ${attached.error.message}`);
+    sessionId = attached.result.sessionId;
+    await cdp.call("Page.enable", {}, sessionId);
+    await cdp.call("DOM.enable", {}, sessionId);
+    return sessionId;
+  };
+
+  const call = async (method, params = {}) => {
+    const session = await page();
+    const reply = await cdp.call(method, params, session, { timeoutMs: 10_000 });
+    if (reply.error) throw new Error(`${method}: ${reply.error.message}`);
+    return reply.result || {};
+  };
+
+  const resolve = async (target) => {
+    const { root } = await call("DOM.getDocument", { depth: -1, pierce: true });
+    let scopes = [root];
+    let found = null;
+    for (const selector of String(target).split(">>").map((part) => part.trim()).filter(Boolean)) {
+      found = null;
+      for (const scope of scopes) {
+        for (const candidate of scope === root ? relayRoots(scope) : [scope, ...relayRoots(scope)]) {
+          const { nodeId } = await call("DOM.querySelector", { nodeId: candidate.nodeId, selector }).catch(() => ({ nodeId: 0 }));
+          if (nodeId) { found = nodeId; break; }
+        }
+        if (found) break;
+      }
+      if (!found) return null;
+      scopes = [relayFind(root, found) || { nodeId: found }];
+    }
+    return found;
+  };
+
+  const center = async (nodeId) => {
+    await call("DOM.scrollIntoViewIfNeeded", { nodeId }).catch(() => {});
+    const { model } = await call("DOM.getBoxModel", { nodeId });
+    const [x1, y1, , , x3, y3] = model.content;
+    return { x: (x1 + x3) / 2, y: (y1 + y3) / 2 };
+  };
+
+  const node = async (target) => {
+    const nodeId = await resolve(target);
+    if (!nodeId) throw new Error(`not found: ${target}`);
+    return nodeId;
+  };
+
+  const ops = {
+    async open({ url, extensions }) {
+      if (typeof url === "string" && /^(?:chrome|devtools):\/\//u.test(url)) throw new Error(`stagehand-internal-page-unsupported: ${url}`);
+      if (Array.isArray(extensions) && extensions.length) await ensureExtensions(cdp, extensions, { sleep });
+      await call("Page.navigate", { url });
+      const deadline = now() + 15_000;
+      while (now() < deadline) {
+        const { result } = await call("Runtime.evaluate", { expression: "document.readyState", returnByValue: true });
+        if (result?.value === "complete") break;
+        await sleep(200);
+      }
+      const { result } = await call("Runtime.evaluate", { expression: "location.href", returnByValue: true });
+      return String(result?.value || "").split("?")[0];
+    },
+    async click(req) {
+      const target = req.target ?? req.selector;
+      const nodeId = await node(target);
+      const { object } = await call("DOM.resolveNode", { nodeId }).catch(() => ({}));
+      if (object?.objectId) {
+        await call("Runtime.callFunctionOn", {
+          objectId: object.objectId,
+          functionDeclaration: "function () { this.__relayClicked = false; this.addEventListener('click', () => { this.__relayClicked = true; }, { once: true }); }",
+        }).catch(() => {});
+      }
+      const { x, y } = await center(nodeId);
+      for (const type of ["mousePressed", "mouseReleased"]) await call("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+      if (object?.objectId) {
+        await call("Runtime.callFunctionOn", {
+          objectId: object.objectId,
+          functionDeclaration: "function () { if (!this.__relayClicked && typeof this.click === 'function') this.click(); delete this.__relayClicked; }",
+        }).catch(() => {});
+      }
+      return "clicked";
+    },
+    async type(req) {
+      const target = req.target ?? req.selector;
+      const { text = "" } = req;
+      const nodeId = await node(target);
+      const { x, y } = await center(nodeId);
+      for (const type of ["mousePressed", "mouseReleased"]) await call("Input.dispatchMouseEvent", { type, x, y, button: "left", clickCount: 1 });
+      const { object } = await call("DOM.resolveNode", { nodeId }).catch(() => ({}));
+      if (object?.objectId) {
+        await call("Runtime.callFunctionOn", {
+          objectId: object.objectId,
+          functionDeclaration: "function () { if (typeof this.focus === 'function') this.focus(); if ('value' in this) this.value = ''; }",
+        }).catch(() => {});
+      }
+      await call("DOM.focus", { nodeId }).catch(() => {});
+      for (const char of String(text)) {
+        await call("Input.dispatchKeyEvent", { type: "keyDown", key: char, text: char, unmodifiedText: char });
+        await call("Input.dispatchKeyEvent", { type: "keyUp", key: char });
+      }
+      if (object?.objectId) {
+        await call("Runtime.callFunctionOn", {
+          objectId: object.objectId,
+          arguments: [{ value: String(text) }],
+          functionDeclaration: "function (expected) { if ('value' in this && this.value !== expected) { this.value = expected; this.dispatchEvent(new InputEvent('input', { bubbles: true, data: expected, inputType: 'insertText' })); } }",
+        }).catch(() => {});
+      }
+      return `typed ${String(text).length}`;
+    },
+    async read(req) {
+      const target = req.target ?? req.selector;
+      const prop = req.prop ?? req.field ?? "value";
+      const { object } = await call("DOM.resolveNode", { nodeId: await node(target) });
+      const { result } = await call("Runtime.callFunctionOn", { objectId: object.objectId, returnByValue: true,
+        functionDeclaration: "function (prop) { const value = this[prop]; return value === undefined ? (this.textContent || '').trim() : value; }",
+        arguments: [{ value: prop }] });
+      return result?.value ?? null;
+    },
+    async wait(req) {
+      const target = req.target ?? req.selector;
+      const { ms = 5000 } = req;
+      const deadline = now() + Number(ms);
+      while (now() < deadline) { if (await resolve(target)) return "present"; await sleep(200); }
+      throw new Error(`not found within ${ms}ms: ${target}`);
+    },
+    async screenshot({ path }) {
+      const { data } = await call("Page.captureScreenshot", { format: "png" });
+      writeFile(path, Buffer.from(data, "base64"));
+      return path;
+    },
+    async storage({ area = "local", key, keys, set, importLocalToken, extensionId, extensionDir }) {
+      if (extensionId || extensionDir) {
+        const id = extensionId || extensionIdFor(extensionDir);
+        const targets = (await cdp.call("Target.getTargets")).result?.targetInfos || [];
+        let extTarget = targets.find((item) => item.url?.startsWith(`chrome-extension://${id}/`));
+        let createdTargetId = null;
+        if (!extTarget) {
+          const created = await cdp.call("Target.createTarget", { url: `chrome-extension://${id}/manifest.json` });
+          createdTargetId = created.result?.targetId || null;
+          if (createdTargetId) extTarget = { targetId: createdTargetId };
+        }
+        if (!extTarget) throw new Error(`extension-target-absent: ${id}`);
+        const attached = await cdp.call("Target.attachToTarget", { targetId: extTarget.targetId, flatten: true });
+        const extSession = attached.result?.sessionId;
+        if (!extSession) {
+          if (createdTargetId) await cdp.call("Target.closeTarget", { targetId: createdTargetId }).catch(() => {});
+          throw new Error(`extension-attach-failed: ${id}`);
+        }
+        try {
+          for (let i = 0; i < 10 && createdTargetId; i += 1) {
+            const ready = await cdp.call("Runtime.evaluate", { expression: "Boolean(globalThis.chrome?.storage)", returnByValue: true }, extSession).catch(() => null);
+            if (ready?.result?.result?.value) break;
+            await sleep(100);
+          }
+          if (set && typeof set === "object") {
+            const setExpr = `chrome.storage[${JSON.stringify(area)}].set(${JSON.stringify(set)})`;
+            const setEval = await cdp.call("Runtime.evaluate", { expression: setExpr, awaitPromise: true, returnByValue: true }, extSession);
+            if (setEval.error || setEval.result?.exceptionDetails) throw new Error("extension-storage-set-failed");
+            return "storage-set";
+          }
+          if (importLocalToken) {
+            const restoreExpr = `(async () => {
+              const res = await fetch(chrome.runtime.getURL("grist-token.local.json"), { cache: "no-store" });
+              const data = await res.json();
+              const token = String(data?.gristApiKey || data?.token || "").trim();
+              if (!token) throw new Error("empty-local-token");
+              await chrome.storage.local.set({ saveCurrentPageSecrets: { obsidianApiKey: "", gristApiKey: token } });
+              return "local-token-restored";
+            })()`;
+            const restEval = await cdp.call("Runtime.evaluate", { expression: restoreExpr, awaitPromise: true, returnByValue: true }, extSession);
+            if (restEval.error || restEval.result?.exceptionDetails) throw new Error("extension-token-restore-failed");
+            return restEval.result?.result?.value ?? "local-token-restored";
+          }
+          const query = Array.isArray(keys) ? keys : key ? [key] : null;
+          const expr = `chrome.storage[${JSON.stringify(area)}].get(${JSON.stringify(query)})`;
+          const evaluated = await cdp.call("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, extSession);
+          if (evaluated.error || evaluated.result?.exceptionDetails) throw new Error("extension-storage-eval-failed");
+          const data = evaluated.result?.result?.value || {};
+          return key && !Array.isArray(keys) ? (data[key] ?? null) : data;
+        } finally {
+          await cdp.call("Target.detachFromTarget", { sessionId: extSession }).catch(() => {});
+          if (createdTargetId) await cdp.call("Target.closeTarget", { targetId: createdTargetId }).catch(() => {});
+        }
+      }
+      const store = area === "session" ? "sessionStorage" : "localStorage";
+      if (Array.isArray(keys)) {
+        const expr = `Object.fromEntries(${JSON.stringify(keys)}.map((k) => [k, ${store}.getItem(k)]))`;
+        const { result } = await call("Runtime.evaluate", { expression: expr, returnByValue: true });
+        return result?.value ?? {};
+      }
+      const { result } = await call("Runtime.evaluate", { expression: `${store}.getItem(${JSON.stringify(String(key))})`, returnByValue: true });
+      return result?.value ?? null;
+    },
+    async eval({ expr }) {
+      const { result, exceptionDetails } = await call("Runtime.evaluate", { expression: String(expr), returnByValue: true, awaitPromise: true });
+      if (exceptionDetails) throw new Error(exceptionDetails.exception?.description || exceptionDetails.text);
+      return result?.value ?? null;
+    },
+    async action({ extensionId, extensionDir }) {
+      const id = extensionId || extensionIdFor(extensionDir);
+      const { result: hrefRes } = await call("Runtime.evaluate", { expression: "location.href", returnByValue: true });
+      const href = String(hrefRes?.value || "");
+      const targets = (await cdp.call("Target.getTargets")).result?.targetInfos || [];
+      let extTarget = targets.find((item) => item.type === "service_worker" && item.url?.startsWith(`chrome-extension://${id}/`))
+        || targets.find((item) => item.url?.startsWith(`chrome-extension://${id}/`));
+      let createdTargetId = null;
+      if (!extTarget) {
+        const created = await cdp.call("Target.createTarget", { url: `chrome-extension://${id}/manifest.json` });
+        createdTargetId = created.result?.targetId || null;
+        if (createdTargetId) extTarget = { targetId: createdTargetId };
+      }
+      if (!extTarget) throw new Error(`extension-target-absent: ${id}`);
+      const attached = await cdp.call("Target.attachToTarget", { targetId: extTarget.targetId, flatten: true });
+      const extSession = attached.result?.sessionId;
+      if (!extSession) {
+        if (createdTargetId) await cdp.call("Target.closeTarget", { targetId: createdTargetId }).catch(() => {});
+        throw new Error(`extension-attach-failed: ${id}`);
+      }
+      try {
+        for (let i = 0; i < 10 && createdTargetId; i += 1) {
+          const ready = await cdp.call("Runtime.evaluate", { expression: "Boolean(globalThis.chrome?.tabs)", returnByValue: true }, extSession).catch(() => null);
+          if (ready?.result?.result?.value) break;
+          await sleep(100);
+        }
+        const expr = `(async () => {
+          const tabs = await chrome.tabs.query({});
+          const tab = tabs.find((t) => t.url === ${JSON.stringify(href)}) || tabs.find((t) => t.active && /^https?:/i.test(t.url || "")) || tabs.find((t) => /^https?:/i.test(t.url || "")) || tabs[0];
+          if (typeof openSettingsForTab === "function") { await openSettingsForTab(tab); return "action-triggered"; }
+          if (tab?.id) { await chrome.tabs.sendMessage(tab.id, { type: "SCP_OPEN_SETTINGS" }); return "action-triggered"; }
+          throw new Error("extension-action-unavailable");
+        })()`;
+        const evaluated = await cdp.call("Runtime.evaluate", { expression: expr, awaitPromise: true, returnByValue: true }, extSession);
+        if (evaluated.error || evaluated.result?.exceptionDetails) throw new Error("extension-action-eval-failed");
+        return evaluated.result?.result?.value ?? "action-triggered";
+      } finally {
+        await cdp.call("Target.detachFromTarget", { sessionId: extSession }).catch(() => {});
+        if (createdTargetId) await cdp.call("Target.closeTarget", { targetId: createdTargetId }).catch(() => {});
+      }
+    },
+  };
+
+  return {
+    async handle(request) {
+      const run = ops[request?.op];
+      if (!run) return { ok: false, reason: `unknown op ${request?.op}` };
+      const key = `${request.op}|${request.target || request.selector || request.url || request.expr || ""}`;
+      try {
+        const value = await run(request);
+        failures.delete(key);
+        return { ok: true, value };
+      } catch (error) {
+        if (String(error?.message).startsWith("cdp-socket")) sessionId = null;
+        const count = (failures.get(key) || 0) + 1;
+        failures.set(key, count);
+        const reason = error instanceof Error ? error.message : String(error);
+        return { ok: false, reason: count >= 2 ? `measure-failed (2회): ${reason}` : reason };
+      }
+    },
+  };
+}
+
+/** Resident relay server on RELAY_SOCKET; reconnects the browser connection when it drops. */
+export async function serveRelay({ port = DEFAULT_PORT, socketPath = RELAY_SOCKET, cdpFactory = browserCdp } = {}) {
+  mkdirSync(dirname(socketPath), { recursive: true });
+  if (existsSync(socketPath)) {
+    const alive = await relayRequest({ op: "eval", expr: "1" }, { socketPath, start: false }).then(() => true, () => false);
+    if (alive) return { started: false, socketPath };
+    unlinkSync(socketPath);
+  }
+  let relay = null;
+  const current = async () => { if (!relay) relay = createRelay(await cdpFactory(port)); return relay; };
+  const server = createServer((client) => {
+    let buffer = "";
+    client.on("data", async (chunk) => {
+      buffer += chunk;
+      const end = buffer.indexOf("\n");
+      if (end < 0) return;
+      let request;
+      try { request = JSON.parse(buffer.slice(0, end)); } catch { client.end(`${JSON.stringify({ ok: false, reason: "invalid json" })}\n`); return; }
+      let result;
+      try { result = await (await current()).handle(request); }
+      catch (error) { relay = null; result = { ok: false, reason: error instanceof Error ? error.message : String(error) }; }
+      if (!result.ok && /cdp-socket|endpoint-/.test(result.reason)) relay = null;
+      client.end(`${JSON.stringify(result)}\n`);
+    });
+  });
+  await new Promise((accept, reject) => { server.once("error", reject); server.listen(socketPath, accept); });
+  return { started: true, socketPath, server };
+}
+
+/** Send one request to the relay; starts the resident server when it is not running. */
+export async function relayRequest(request, { socketPath = RELAY_SOCKET, start = true, timeoutMs = 30_000, spawnServer = () => {
+  const log = openSync(join(tmpdir(), "stagehand-relay.log"), "a");
+  spawn(process.execPath, [fileURLToPath(import.meta.url), "serve"], { detached: true, stdio: ["ignore", log, log] }).unref();
+} } = {}) {
+  const send = () => new Promise((accept, reject) => {
+    const socket = createConnection(socketPath);
+    let data = "";
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error("relay-timeout")); }, timeoutMs);
+    socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.on("data", (chunk) => { data += chunk; });
+    socket.on("end", () => { clearTimeout(timer); try { accept(JSON.parse(data)); } catch { reject(new Error("relay-invalid-reply")); } });
+    socket.on("error", (error) => { clearTimeout(timer); reject(error); });
+  });
+  try { return await send(); }
+  catch (error) {
+    if (!start || !["ENOENT", "ECONNREFUSED"].includes(error?.code)) throw error;
+    spawnServer();
+    for (let tries = 0; tries < 50; tries += 1) {
+      await pause(100);
+      if (existsSync(socketPath)) { try { return await send(); } catch { /* not listening yet */ } }
+    }
+    throw new Error("relay-start-failed: see /tmp/stagehand-relay.log");
+  }
+}
+
 // Run as a CLI also when started through a symlinked skill path.
 const invokedPath = process.argv[1] ? realpathSync(process.argv[1]) : "";
 if (invokedPath && realpathSync(fileURLToPath(import.meta.url)) === invokedPath) {
   const [command = "status", ...rest] = process.argv.slice(2);
+  if (command === "relay") {
+    // `relay '<json>'`: one request, one `[verify-step] relay …` line; exit 1 when the step failed.
+    let request;
+    try { request = JSON.parse(rest[0] || ""); } catch { console.log(JSON.stringify({ ok: false, error: "relay needs one JSON request argument" })); process.exit(2); }
+    try {
+      const result = await relayRequest(request);
+      console.log(relayLine(request, result));
+      process.exit(result.ok ? 0 : 1);
+    } catch (error) {
+      console.log(relayLine(request, { ok: false, reason: error instanceof Error ? error.message : String(error) }));
+      process.exit(1);
+    }
+  }
+  if (command === "serve") {
+    if (rest.includes("--replace")) {
+      try { execFileSync("fuser", ["-k", RELAY_SOCKET], { stdio: "ignore" }); } catch {}
+      try { if (existsSync(RELAY_SOCKET)) unlinkSync(RELAY_SOCKET); } catch {}
+      await pause(150);
+    }
+    if (rest.includes("--detach")) {
+      const result = await relayRequest({ op: "eval", expr: "1" }).then((reply) => ({ ok: true, ready: reply.ok }), (error) => ({ ok: false, error: error.message }));
+      console.log(JSON.stringify({ ...result, socket: RELAY_SOCKET }));
+      process.exit(result.ok ? 0 : 1);
+    }
+    const served = await serveRelay();
+    if (!served.started) { console.log(JSON.stringify({ ok: true, running: true, socket: RELAY_SOCKET })); process.exit(0); }
+    process.stdout.write(`${JSON.stringify({ ok: true, serving: RELAY_SOCKET, pid: process.pid })}\n`);
+    await new Promise(() => {});
+  }
   const options = {};
   for (let index = 0; index < rest.length; index += 1) {
     const flag = rest[index];

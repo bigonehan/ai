@@ -41,25 +41,35 @@ fn hooks(source: &Value, target: &str) -> Result<Value> {
 
 fn hook_targets(p: &Paths, manifest: &Value) -> Result<Vec<(String, PathBuf, Value, bool)>> {
     let mut out = Vec::new();
+    let mcp = manifest.get("mcpServers").filter(|value| value.as_object().is_some_and(|servers| !servers.is_empty()));
     for (name, rel, merged) in [
+        ("claude-mcp", ".claude.json", true),
         ("claude-hooks", ".claude/settings.json", true),
         ("codex-hooks", "ai/codex/hooks.json", false),
         ("gemini-hooks", ".gemini/settings.json", true),
         ("antigravity-cli-hooks", ".gemini/antigravity-cli/settings.json", true),
+        ("agy-mcp", ".gemini/config/mcp_config.json", true),
         ("agy-hooks", "ai/codex/hooks.agy.json", false),
     ] {
+        if matches!(name, "agy-mcp" | "claude-mcp") && mcp.is_none() { continue; }
         let agent = match name {
             "claude-hooks" => "claude", "codex-hooks" => "codex", "agy-hooks" => "agy", _ => "gemini",
         };
-        let mut value = if name == "agy-hooks" { json!({"extensions-gates":hooks(manifest, agent)?}) }
+        let mut value = if matches!(name, "agy-mcp" | "claude-mcp") { json!({"mcpServers":mcp.unwrap()}) }
+            else if name == "agy-hooks" { json!({"extensions-gates":hooks(manifest, agent)?}) }
             else { json!({"hooks":hooks(manifest, agent)?}) };
+        if matches!(name, "gemini-hooks" | "antigravity-cli-hooks") {
+            if let Some(mcp) = mcp { value["mcpServers"] = mcp.clone(); }
+        }
         let path = p.home.join(rel);
         if merged && path.exists() {
-            let existing: Value = serde_json::from_slice(&fs::read(&path).map_err(|e| err(e.to_string()))?)
-                .map_err(|e| err(format!("{}: {e}", path.display())))?;
-            let key = "hooks";
+            let bytes = fs::read(&path).map_err(|e| err(e.to_string()))?;
+            let existing: Value = if bytes.iter().all(|byte| byte.is_ascii_whitespace()) { json!({}) }
+                else { serde_json::from_slice(&bytes).map_err(|e| err(format!("{}: {e}", path.display())))? };
             let mut existing = existing.as_object().cloned().ok_or_else(|| err(format!("{}: JSON object 아님", path.display())))?;
-            existing.insert(key.into(), value[key].take());
+            for (key, replacement) in value.as_object().unwrap() {
+                existing.insert(key.clone(), replacement.clone());
+            }
             value = Value::Object(existing);
         }
         out.push((name.into(), path, value, merged));
@@ -213,4 +223,56 @@ pub fn sync(p: &Paths) -> Result<()> {
         std::os::unix::fs::symlink(want, link).map_err(|e| err(e.to_string()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blank_agy_mcp_config_is_drift_and_sync_preserves_other_settings() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let home = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/tmp").join(format!("mcp-{}-{stamp}", std::process::id()));
+        let p = Paths::new(home.clone());
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../codex/hook-manifest.json");
+        let manifest_path = home.join("ai/codex/hook-manifest.json");
+        fs::create_dir_all(manifest_path.parent().unwrap()).unwrap();
+        fs::copy(source, &manifest_path).unwrap();
+        let claude_path = home.join(".claude.json");
+        let mcp_path = home.join(".gemini/config/mcp_config.json");
+        let gemini_path = home.join(".gemini/settings.json");
+        let agy_path = home.join(".gemini/antigravity-cli/settings.json");
+        for path in [&mcp_path, &gemini_path, &agy_path] { fs::create_dir_all(path.parent().unwrap()).unwrap(); }
+        fs::write(&claude_path, r#"{"numStartups":7,"mcpServers":{"old":{"command":"old"}}}"#).unwrap();
+        fs::write(&mcp_path, b"").unwrap();
+        fs::write(&gemini_path, r#"{"theme":"dark","hooks":{"before":"old"}}"#).unwrap();
+        fs::write(&agy_path, r#"{"ui":{"zoom":2},"mcpServers":{"old":{"command":"old"}}}"#).unwrap();
+        let drift = inspect(&p).unwrap();
+        assert!(drift.iter().any(|line| line.starts_with("agy-mcp:")), "{drift:?}");
+        assert!(drift.iter().any(|line| line.starts_with("claude-mcp:")), "{drift:?}");
+        sync(&p).unwrap();
+        assert!(inspect(&p).unwrap().is_empty());
+        for path in [&claude_path, &mcp_path, &gemini_path, &agy_path] {
+            let value: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(value["mcpServers"]["blender"]["command"], "/mnt/c/Users/tende/.local/bin/uvx.exe");
+            assert_eq!(value["mcpServers"]["blender"]["args"], json!(["blender-mcp"]));
+            assert_eq!(value["mcpServers"]["windows-mcp"]["command"], "/mnt/c/Users/tende/.local/bin/uvx.exe");
+            assert_eq!(value["mcpServers"]["windows-mcp"]["args"], json!(["--python", "3.13", "windows-mcp", "serve"]));
+        }
+        let gemini: Value = serde_json::from_slice(&fs::read(&gemini_path).unwrap()).unwrap();
+        let agy: Value = serde_json::from_slice(&fs::read(&agy_path).unwrap()).unwrap();
+        let claude: Value = serde_json::from_slice(&fs::read(&claude_path).unwrap()).unwrap();
+        assert_eq!(claude["numStartups"], 7);
+        assert_eq!(gemini["theme"], "dark");
+        assert_eq!(agy["ui"]["zoom"], 2);
+        fs::write(&mcp_path, b"  \n").unwrap();
+        fs::write(&claude_path, b"").unwrap();
+        assert!(inspect(&p).unwrap().iter().any(|line| line.starts_with("agy-mcp:")));
+        assert!(inspect(&p).unwrap().iter().any(|line| line.starts_with("claude-mcp:")));
+        sync(&p).unwrap();
+        assert!(inspect(&p).unwrap().is_empty());
+        assert_eq!(serde_json::from_slice::<Value>(&fs::read(&mcp_path).unwrap()).unwrap()["mcpServers"]["windows-mcp"]["args"][3], "serve");
+        println!("[verify-step] range-check start=303 mid=305 end=308");
+        fs::remove_dir_all(home).unwrap();
+    }
 }

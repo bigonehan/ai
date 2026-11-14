@@ -126,12 +126,25 @@ fn http_agent() -> &'static ureq::Agent {
 
 pub fn request(method: &str, path: &str, body: Option<&Value>) -> R<Value> {
     let (key, base, doc) = config()?;
+    request_with_config(method, path, body, &key, &base, &doc)
+}
+
+pub fn columns_for_doc(doc: &str, table: &str) -> R<Value> {
+    if doc.is_empty() || table.is_empty() || !doc.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return fail("schema", "invalid Grist document or table id");
+    }
+    let (key, base, _) = config()?;
+    request_with_config("GET", &format!("/tables/{table}/columns"), None, &key, &base, doc)
+}
+
+fn request_with_config(method: &str, path: &str, body: Option<&Value>, key: &str, base: &str, doc: &str) -> R<Value> {
     let connect_base = if let Some(rest) = base.strip_prefix("http://localhost:") {
         format!("http://127.0.0.1:{rest}")
     } else if base == "http://localhost" {
         "http://127.0.0.1".to_string()
     } else {
-        base.clone()
+        base.to_string()
     };
     let url = format!("{connect_base}/api/docs/{doc}{path}");
     let call = http_agent()

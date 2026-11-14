@@ -1,28 +1,37 @@
 ---
 name: run-cdp
-description: "Check the visible start action, rendered screen and authoritative consumer of a deployed web·widget·extension runtime in the shared CDP browser. Called by role-verifier for `runtime :` web·widget·extension rows."
+description: "Read network or storage values outside the visible screen of a deployed web·widget·extension runtime. Called by role-verifier only when the row goal needs those values."
 ---
 
 # Run CDP browser
 
-- 확인 범위는 시작 동작부터 화면 렌더링(`img.naturalWidth > 0`, 에러 토스트 유무 등)과 최종 소비 결과까지다(아래 Whole flow). 로거 변경이라도 `chrome.downloads` 구독, 이벤트 연결, 저장, 누락·중단 집계가 바뀌었으면 요청 ID와 최종 소비 결과를 확인한다.
+- 화면 클릭·타이핑·화면 글자·스크린샷은 windows-mcp 또는 상주 CDP 중계(`stagehand.mjs relay`)로 확인한다. 이 Skill의 화면 밖 조회(`run_cdp`, `relay storage`·`eval`·`network`)는 행 목표에 network·storage 값이 명시된 경우에만 쓴다. 확장 적재·전체 웹 흐름만으로 화면 밖 조회를 시작하지 않는다. `main-edit-gate`가 해당 조회 전에 `grist goal`로 판정한다.
 
 ## Browser and session
 
-- 브라우저·프로필·세션 열기·확장 로드와 갱신은 `access-stagehand`를 이용한다(`headless: false`, 공용 `:9222`, 전용 프로필 하나). headless는 프로젝트 `AGENTS.md`가 요구할 때만 쓴다.
+- `dispatch-agent --role verifier` 사전점검이 공용 `:9222` 브라우저와 상주 중계 데몬(`stagehand.mjs serve --detach`, 소켓 `/tmp/access-stagehand-locks/relay.sock`)을 먼저 띄운다. 검증자는 `openStagehand`나 `test/tmp/*.mjs` 스크립트를 직접 쓰지 않고(`main-edit-gate`가 거부) 아래 한 줄 요청만 보낸다:
+  ```bash
+  R=~/ai/skills/access-stagehand/scripts/stagehand.mjs
+  node $R relay '{"op":"open","url":"https://example.com","extensions":["/mnt/h/code/ext"]}'
+  node $R relay '{"op":"type","selector":"#host >> #api-key","text":"abc123"}'
+  node $R relay '{"op":"click","selector":"#host >> button.save"}'
+  node $R relay '{"op":"read","selector":"#host >> #api-key","field":"value"}'
+  node $R relay '{"op":"storage","extensionId":"<id>","keys":["obsidianApiKey","gristApiKey"]}'
+  node $R relay '{"op":"screenshot","path":"test/tmp/874.png"}'
+  ```
 - Windows Chrome 디버깅 프로필은 쓰지 않는다. Windows 호스트 프로세스·포트는 PowerShell/CIM으로 확인한다.
-- 사용자 흐름은 Stagehand로, 정확한 DOM 읽기는 `session.page`로 한다. raw CDP(`/json/version`, `/json/list`)는 endpoint·target 확인에만 쓴다.
-- `chrome://extensions` 등 브라우저 내부 페이지는 Stagehand DOM 대상이 아니다(`openStagehand`가 URL을 거부한다). 확장 적재·버전·service worker 상태는 `openStagehand({ extensions: [배포 dir], url: <일반 페이지> })`의 확장 적재 결과와 `Target.getTargets`의 `chrome-extension://<id>/` target으로 확인한다. 내부 페이지를 열어 DOM을 읽거나 실패 뒤 같은 프로세스에서 세션을 다시 열지 않는다.
+- `relay`는 `DOM.getDocument({ pierce: true })`로 닫힌(closed) Shadow DOM과 교차 출처 `iframe >> selector`를 탐색하고, `type`은 `Input.dispatchKeyEvent`로 실제 키 입력을 보낸다. 각 호출은 `[verify-step] relay op=… ok=true|false …`(300자 상한) 한 줄만 출력하며, 같은 `op`·`selector` 측정이 연속 2회 실패하면 `measure-failed (2회)`를 반환하므로 그 즉시 `[🔳]`로 종료한다.
+- `chrome://extensions` 등 브라우저 내부 페이지는 DOM 대상이 아니다(`relay` `open`이 내부 URL을 거부한다). 확장 적재·버전 상태는 `{"op":"open","url":"<일반 페이지>","extensions":["<배포 dir>"]}` 응답으로 확인한다.
 
 ## Whole flow
 
-`runtime :`·`row:` 줄과 행마다 시작 동작·요구 결과는 위임 프롬프트에 있다. `AGENTS.md`·`grist task`로 다시 찾지 않는다.
+`runtime :`·`row:` 줄과 행마다 시작 동작·요구 결과는 위임 프롬프트에 있다. `AGENTS.md`·`grist task`로 다시 찾지 않는다. 아래 절차는 행 목표가 network·storage의 전체 흐름을 요구할 때만 적용한다.
 
-1. `openStagehand({ url, waitForSelector, extensions: [배포 dir] })`로 세션을 연다. 확장 버전 비교·적재는 `openStagehand`가 하고, 맞지 않으면 그 오류 줄이 실패 경계다.
-   Grist 페이지는 초기 `page.evaluate`에서 iframe·작품 DOM이 아직 비어 있을 수 있다. 한 세션 안에서 `waitForSelector` 옵션 또는 `page.waitForSelector`로 화면의 작품 카드·위젯 iframe이 나타날 때까지 기다린 뒤 선택한다(`main-edit-gate`가 세션당 4회를 넘는 `openStagehand` 원라이너 반복 재접속을 거부). `session.page.locator`는 `enhanceStagehandPage`로 `evaluate`·`evaluateAll`(교차 출처 `iframe >> selector` 포함)과 `innerText`·`textContent`·`isVisible`·`click`을 지원한다.
-2. 시작 동작 전에 최종 소비자 상태를 읽는다.
-3. 실제 시작 동작을 하고 producer → transport/handler → 페이지·사이트 → 최종 소비자를 따라가 소비자를 다시 읽는다. 빈 페이지·target 목록·빌드·로그·ACK만으로는 런타임 결과가 아니다.
-4. 결과는 `role-verifier`의 `task-hidden`·`readback:` 줄로 남긴다. 자격 증명·쿠키·인증 헤더·비공개 쿼리 값은 기록하지 않는다.
+1. `node ~/ai/skills/access-stagehand/scripts/stagehand.mjs relay '{"op":"open","url":"…","extensions":["<배포 dir>"]}'`로 상주 중계 탭을 연다. 확장 버전 비교·적재는 `relay`가 하고, 맞지 않으면 그 `reason`이 실패 경계다.
+   Grist `/p/47`에서는 `{"op":"wait","selector":"iframe >> [data-testid=test-custom-widget-ready]"}`와 작업 카드 선택 표시(`1 OF N`)를 기다린 뒤 대상 작품을 고르고 시작 동작을 한다.
+2. 시작 동작 전에 최종 소비자 상태를 `relay` `read`·`storage`로 읽는다.
+3. 실제 시작 동작(`click`·`type`)을 하고 최종 소비자를 다시 읽는다. 빈 페이지·target 목록·빌드·로그·ACK만으로는 런타임 결과가 아니다.
+4. 결과는 `role-verifier`의 `task-hidden`(`--test`에도 `stagehand.mjs relay` 명령 사용)·`readback:` 줄로 남긴다. 자격 증명·쿠키·인증 헤더·비공개 쿼리 값은 기록하지 않는다.
 
 Grist 화면에서 테스트할 작품·행과 위젯 연결 상태는 열린 공용 CDP 페이지의 렌더된 카드·iframe으로 찾는다. `_grist_Views_section`·`_grist_Filters` CLI 조회나 `*.bundle.js` curl 조회로 UI를 역추적하지 않는다(`main-edit-gate`가 거부). `grist get Table7/Table34`는 화면 동작 뒤 저장된 값의 최종 readback에만 쓴다.
 

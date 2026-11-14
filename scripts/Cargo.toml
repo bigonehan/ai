@@ -9,6 +9,7 @@ members = [
     "task-complete",
     "initialization-gate",
     "agy-hook",
+    "cli_watch_blackbox",
     "dispatch-agent",
     "main-edit-gate",
     "ask-notify",

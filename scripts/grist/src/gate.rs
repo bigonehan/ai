@@ -146,9 +146,9 @@ fn verifier_row_from(role: Option<&str>, row: Option<&str>) -> Option<i64> {
 fn main_code_file(path: &str) -> bool {
     let path = Path::new(path);
     // The delegator owns workflow tools under ~/ai/scripts; only product code is delegated.
-    if path.starts_with("/home/tree/ai/scripts") { return false; }
+    if path.starts_with("/home/tree/ai/scripts") || path.starts_with("manage_decision/") || path.starts_with("manage_improve/") { return false; }
     if release_artifact(path) { return false; }
-    if matches!(path.file_name().and_then(|name| name.to_str()), Some("Cargo.toml" | "package.json" | "manifest.json" | "blender_manifest.toml" | "runtime-contract.js" | "tauri.conf.json")) {
+    if matches!(path.file_name().and_then(|name| name.to_str()), Some("Cargo.toml" | "Cargo.lock" | "package.json" | "manifest.json" | "blender_manifest.toml" | "runtime-contract.js" | "tauri.conf.json")) {
         return false;
     }
     let extension_source = !path.is_absolute() || records::workflow_root_of(path).is_some();
@@ -286,6 +286,14 @@ pub fn worker_update_allowed(role: Option<&str>, row: Option<i64>, raw_id: i64, 
     }))
 }
 
+/// Ids among `ids` that still exist in Table26 (one lookup, no failure on missing rows).
+fn existing_ids(ids: &[i64]) -> R<Vec<i64>> {
+    if ids.is_empty() { return Ok(Vec::new()); }
+    let raw = api::get(TASK_TABLE, Some(ids), None, Some(&["H".to_string()]))?;
+    let present: std::collections::HashSet<i64> = api::rows_by_id(&raw).into_iter().map(|(id, _)| id).collect();
+    Ok(ids.iter().copied().filter(|id| present.contains(id)).collect())
+}
+
 pub fn rows(ids: &[i64]) -> R<Vec<Row>> {
     let fields = vec!["B".into(), "H".into(), "D".into(), "I".into(), "J".into(), GOAL_FIELD.into()];
     let raw = api::get(TASK_TABLE, Some(ids), None, Some(&fields))?;
@@ -383,6 +391,8 @@ pub fn gate(cwd: &str, row: Option<i64>) -> R<Value> {
         }
         return Ok(Value::Object(out));
     };
+    // 완료 뒤 Grist에서 지워진 행이 changes 작업 목록에 남아도 프로젝트 게이트 전체를 막지 않는다(261114 루트 #614·#926 등).
+    let ids = existing_ids(&ids)?;
     let fetched = rows(&ids)?;
     let stripped: Vec<Value> = fetched.iter().map(|x| x.to_gate_json()).collect();
     Ok(json!({
@@ -580,12 +590,34 @@ pub fn goal_errors(goal: &str) -> Vec<String> {
     }
     static LINE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
     let line_re = LINE.get_or_init(|| Regex::new(r"^(\d+\.\s*)?\[(연결|기능|수정)\]\s+\S").unwrap());
-    util::splitlines(goal)
+    let mut errors: Vec<String> = util::splitlines(goal)
         .iter()
         .map(|l| util::strip(l))
         .filter(|l| !l.is_empty() && !line_re.is_match(l))
         .map(|l| format!("goal line needs `N. [연결|기능|수정] <내용>`: {l}"))
-        .collect()
+        .collect();
+    for (_, line) in goal_lines(goal) {
+        if stop_goal_denies_own_hook(&line) {
+            errors.push(format!("Stop 목표는 Stop 훅 자체의 미실행을 조건으로 삼을 수 없어요. 실행 여부 대신 훅 검증 기록 또는 판정 결과를 조건으로 쓰세요: {line}"));
+        }
+    }
+    errors
+}
+
+/// A Stop decision necessarily runs task-complete. Reject a goal whose
+/// precondition says that very execution is absent, before J3 can accept it.
+fn stop_goal_denies_own_hook(line: &str) -> bool {
+    if !line.contains("Stop") || !line.contains("없는") && !line.contains("않은") {
+        return false;
+    }
+    static DENIED_EXECUTION: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let re = DENIED_EXECUTION.get_or_init(|| {
+        Regex::new(r"(?:task-complete\s*실행|훅\s*실행)([^▷⇒]{0,140}?)(?:없는|않은)").unwrap()
+    });
+    re.captures_iter(line).any(|capture| {
+        let condition = capture.get(1).unwrap().as_str();
+        !condition.contains("기록") && !condition.contains("검증")
+    })
 }
 
 pub fn goal_of(project_dir: &Path, row: &Row) -> R<String> {
@@ -790,6 +822,26 @@ pub fn changed_since(project_dir: &Path, prepared: &str) -> BTreeSet<String> {
         .cloned().collect()
 }
 
+/// A submitted row's recorded file contents are a later baseline for other rows' outside paths.
+/// Older submit records have no snapshot, so their preparation snapshot is the last exact baseline.
+fn exclude_other_submissions(project_dir: &Path, raw_id: i64, ids: &[i64], own_allowed: &[String], changed: &mut BTreeSet<String>) {
+    let now: BTreeMap<String, String> = snapshot(project_dir)
+        .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    for &other_id in ids {
+        if other_id == raw_id { continue; }
+        let state = gate_load(project_dir, other_id);
+        let Some(submit) = state.get("submit").and_then(Value::as_object) else { continue };
+        let submitted_snapshot = submit.get("snapshot").and_then(Value::as_str)
+            .or_else(|| state.get("ready").or_else(|| state.get("red"))
+                .and_then(|prepared| prepared.get("snapshot")).and_then(Value::as_str));
+        // Keep the owned paths for this row in its change set, including changes made before
+        // another row was submitted. Only outside paths can be assigned to the other row.
+        let saved: BTreeMap<String, String> = submitted_snapshot
+            .and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+        changed.retain(|path| inside(path, own_allowed) || now.get(path) != saved.get(path));
+    }
+}
+
 /// Packages outside the project that hold the row's test files, as (git repo root, package path relative to it).
 /// The package is the nearest folder with `Cargo.toml` or `package.json` above the test file, inside its repo.
 pub fn external_scopes(project_dir: &Path, tests: &[String]) -> Vec<(PathBuf, String)> {
@@ -886,7 +938,10 @@ fn bridge_sample_boundary<'a>(
 
 fn bridge_sample_files(project_dir: &Path, row_label: &str, files: &[String], prepared: &Map<String, Value>) -> Option<Value> {
     if !row_label.starts_with("[🌍]") { return None; }
+    let changed = prepared.get("snapshot").and_then(Value::as_str).filter(|s| !s.is_empty())
+        .map(|snapshot| changed_since(project_dir, snapshot));
     let source_contents: Vec<(String, String)> = files.iter().filter(|path| !is_test_file(path))
+        .filter(|path| Path::new(path).is_absolute() || changed.as_ref().is_none_or(|set| set.contains(*path)))
         .filter_map(|path| {
             let file = if Path::new(path).is_absolute() { PathBuf::from(path) } else { project_dir.join(path) };
             let contents = if Path::new(path).is_absolute() {
@@ -921,6 +976,149 @@ fn bridge_sample_files(project_dir: &Path, row_label: &str, files: &[String], pr
     bridge_sample_boundary(row_label,
         source_contents.iter().map(|(path, contents)| (path.as_str(), contents.as_str())),
         test_contents.iter().map(String::as_str))
+}
+
+/// Compare every table used by the row against its live schema at submit time.
+fn grist_schema_boundary(project_dir: &Path, files: &[String], prepared: &Map<String, Value>) -> Option<Value> {
+    grist_schema_boundary_with(project_dir, files, prepared, api::columns_for_doc)
+}
+
+fn grist_schema_boundary_with<F>(project_dir: &Path, _files: &[String], prepared: &Map<String, Value>, fetch: F) -> Option<Value>
+where F: Fn(&str, &str) -> R<Value> {
+    let endpoint = Regex::new(r"/tables/([A-Za-z][A-Za-z0-9_]*)/(?:records|columns)").unwrap();
+    let mut tables = BTreeSet::new();
+    let mut dynamic = false;
+    let source_paths = project_source_paths(project_dir);
+    let selected = prepared.get("purpose").and_then(Value::as_str).unwrap_or_default().to_string()
+        + &prepared.get("tests").and_then(Value::as_array).into_iter().flatten()
+            .filter_map(Value::as_str).filter_map(|p| std::fs::read_to_string(project_dir.join(p)).ok())
+            .collect::<Vec<_>>().join("\n");
+    for path in &source_paths {
+        let file = if Path::new(path).is_absolute() { PathBuf::from(path) } else { project_dir.join(path) };
+        let Ok(contents) = std::fs::read_to_string(&file) else { continue };
+        for capture in endpoint.captures_iter(&contents) {
+            if selected.contains(&capture[1]) {
+                tables.insert(capture[1].to_string());
+            }
+        }
+        dynamic |= contents.contains("/tables/${") && (contents.contains("/records") || contents.contains("/columns"));
+    }
+    if tables.is_empty() && !dynamic { return None; }
+    let test_paths: Vec<&str> = prepared.get("tests").and_then(Value::as_array)
+        .into_iter().flatten().filter_map(Value::as_str).collect();
+    let tests = test_paths.iter().filter_map(|p| std::fs::read_to_string(project_dir.join(p)).ok())
+        .collect::<Vec<_>>().join("\n");
+    if dynamic && !tables.is_empty() {
+        let sample_name = Regex::new(r"grist-([A-Za-z][A-Za-z0-9_]*)-columns\.json").unwrap();
+        for capture in sample_name.captures_iter(&tests) { tables.insert(capture[1].to_string()); }
+    }
+    for table in tables {
+        let sample = format!("tests/fixtures/grist-{table}-columns.json");
+        let path = project_dir.join(&sample);
+        let error = |reason: &str| json!({"boundary":"submit", "table":table, "sample":sample, "reason":reason});
+        let Ok(raw) = std::fs::read_to_string(&path) else { return Some(error("실제 Grist columns 응답을 계약 샘플로 저장하세요")); };
+        let Ok(fixture) = serde_json::from_str::<Value>(&raw) else { return Some(error("Grist 계약 샘플 JSON 형식 오류")); };
+        let Some(doc) = fixture.get("docId").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return Some(error("계약 샘플 docId 누락")); };
+        if fixture.get("tableId").and_then(Value::as_str) != Some(table.as_str())
+            || fixture.get("capturedAt").and_then(Value::as_str).is_none_or(str::is_empty) {
+            return Some(error("계약 샘플 tableId 또는 capturedAt 누락"));
+        }
+        if !tests.contains(&sample) || !tests.contains("fields")
+            || !["assert", "expect", "equal"].iter().any(|word| tests.contains(word)) {
+            return Some(error("등록된 테스트가 Grist 계약 샘플을 읽어 실제 전송 fields를 단언해야 합니다"));
+        }
+        let Some(expected) = schema_columns(&fixture) else { return Some(error("계약 샘플 columns의 id/type 누락")); };
+        let live = match fetch(doc, &table) {
+            Ok(value) => value,
+            Err(_) => return Some(error("실제 Grist GET columns 실패")),
+        };
+        if schema_columns(&live).as_ref() != Some(&expected) { return Some(error("계약 샘플과 실제 Grist 열·타입 불일치")); }
+        let Some(fields) = fixture.pointer("/payload/records/0/fields").and_then(Value::as_object) else {
+            return Some(error("계약 샘플 payload.records[0].fields 누락"));
+        };
+        for (key, value) in fields {
+            let Some(kind) = expected.get(key) else { return Some(error("보내는 필드 키가 Grist 열에 없음")); };
+            let valid = match kind.as_str() {
+                "Int" | "Numeric" | "Date" | "DateTime" | "Ref" => value.is_number() || value.is_string(),
+                "Bool" => value.is_boolean() || value.is_number(),
+                "RefList" | "ChoiceList" => value.is_array(),
+                "Text" | "Choice" => value.is_string(),
+                _ => true,
+            };
+            if !valid { return Some(error("보내는 필드 값의 타입이 Grist 열 타입과 다름")); }
+        }
+    }
+    None
+}
+
+fn schema_columns(value: &Value) -> Option<BTreeMap<String, String>> {
+    let cols = value.get("columns")?.as_array()?;
+    let mut map = BTreeMap::new();
+    for col in cols {
+        let id = col.get("id")?.as_str()?.to_string();
+        let kind = col.pointer("/fields/type")?.as_str()?.to_string();
+        if map.insert(id, kind).is_some() { return None; }
+    }
+    if map.is_empty() { None } else { Some(map) }
+}
+
+fn project_source_paths(project_dir: &Path) -> Vec<String> {
+    // The extensions root owns workflow tooling outside this directory; children own product sources.
+    if project_dir == Path::new("/home/tree/extensions") { return Vec::new(); }
+    let Ok(output) = Command::new("rg").args(["--files", "--hidden", "-g", "!**/node_modules/**", "-g", "!**/target/**", "-g", "!**/dist/**", "-g", "!**/.git/**", "-g", "!**/.ai/**"]).current_dir(project_dir).output() else { return Vec::new() };
+    if !output.status.success() { return Vec::new(); }
+    String::from_utf8_lossy(&output.stdout).lines().filter(|path| {
+        !is_test_file(path)
+            && !path.split_once('/').is_some_and(|(child, _)| project_dir.join(child).join("AGENTS.md").is_file())
+            && matches!(Path::new(path).extension().and_then(|s| s.to_str()), Some("js" | "cjs" | "mjs" | "ts" | "tsx" | "rs" | "py" | "sql" | "go" | "java" | "cs" | "php"))
+    }).map(str::to_string).collect()
+}
+
+fn other_schema_boundary(project_dir: &Path, prepared: &Map<String, Value>) -> Option<Value> {
+    let raw_sources = project_source_paths(project_dir).iter().filter_map(|p| std::fs::read_to_string(project_dir.join(p)).ok()).collect::<Vec<_>>().join("\n");
+    let sources = raw_sources.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+    let test_paths: Vec<&str> = prepared.get("tests").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+    let tests = test_paths.iter().filter_map(|p| std::fs::read_to_string(project_dir.join(p)).ok()).collect::<Vec<_>>().join("\n");
+    let selected = format!("{}\n{tests}", prepared.get("purpose").and_then(Value::as_str).unwrap_or_default());
+    let sql = Regex::new(r#"(?i)\b(?:(?:SELECT\b[^;]{0,200}?\bFROM|DELETE\s+FROM|INSERT\s+(?:OR\s+[A-Za-z]+\s+)?INTO|(?:CREATE|ALTER)\s+TABLE)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"([A-Za-z_][A-Za-z0-9_]*)"|`([A-Za-z_][A-Za-z0-9_]*)`|([A-Za-z_][A-Za-z0-9_]*)\b)|UPDATE\s+(?:OR\s+[A-Za-z]+\s+)?(?:"([A-Za-z_][A-Za-z0-9_]*)"|`([A-Za-z_][A-Za-z0-9_]*)`|([A-Za-z_][A-Za-z0-9_]*))\s+SET\b)"#).unwrap();
+    let mut tables = BTreeSet::new();
+    for capture in sql.captures_iter(&sources) {
+        if capture[0].to_ascii_lowercase().contains("import ") { continue; }
+        if let Some(table) = (1..=6).find_map(|idx| capture.get(idx)).map(|m| m.as_str()) {
+            if selected.contains(table) && !table.eq_ignore_ascii_case("select") { tables.insert(table.to_string()); }
+        }
+    }
+    for table in tables {
+        let sample = format!("tests/fixtures/sql-{table}-columns.json");
+        let error = |reason: &str| json!({"boundary":"submit","table":table,"sample":sample,"reason":reason});
+        let Ok(raw) = std::fs::read_to_string(project_dir.join(&sample)) else { return Some(error("SQL 테이블 계약 샘플 누락")); };
+        let Ok(fixture) = serde_json::from_str::<Value>(&raw) else { return Some(error("SQL 계약 샘플 JSON 형식 오류")); };
+        if !tests.contains(&sample) { return Some(error("등록된 테스트가 SQL 계약 샘플을 읽어야 합니다")); }
+        let Some(command) = fixture.get("schemaCommand").and_then(Value::as_array).filter(|a| !a.is_empty()) else { return Some(error("SQL 실제 스키마 조회 명령 누락")); };
+        let Some(parts) = command.iter().map(Value::as_str).collect::<Option<Vec<_>>>() else { return Some(error("SQL 스키마 조회 명령 형식 오류")); };
+        let Ok(output) = Command::new(parts[0]).args(&parts[1..]).current_dir(project_dir).output() else { return Some(error("SQL 실제 스키마 조회 실패")); };
+        if !output.status.success() { return Some(error("SQL 실제 스키마 조회 실패")); }
+        let Ok(live) = serde_json::from_slice::<Value>(&output.stdout) else { return Some(error("SQL 스키마 조회 결과 JSON 형식 오류")); };
+        if schema_columns(&fixture) != schema_columns(&live) || schema_columns(&live).is_none() { return Some(error("계약 샘플과 실제 SQL 열·타입 불일치")); }
+    }
+    let api = Regex::new(r"api-([A-Za-z][A-Za-z0-9_]*)-schema\.json").unwrap();
+    let mut names = BTreeSet::new();
+    for capture in api.captures_iter(&selected) {
+        if sources.contains(&capture[1]) { names.insert(capture[1].to_string()); }
+    }
+    for name in names {
+        let sample = format!("tests/fixtures/api-{name}-schema.json");
+        let error = |reason: &str| json!({"boundary":"submit","table":name,"sample":sample,"reason":reason});
+        let Ok(raw) = std::fs::read_to_string(project_dir.join(&sample)) else { return Some(error("외부 API 계약 샘플 누락")); };
+        let Ok(fixture) = serde_json::from_str::<Value>(&raw) else { return Some(error("외부 API 계약 샘플 JSON 형식 오류")); };
+        let Some(url) = fixture.get("schemaUrl").and_then(Value::as_str) else { return Some(error("외부 API 실제 스키마 조회 URL 누락")); };
+        if !sources.contains(url) { return Some(error("외부 API 스키마 URL을 프로젝트 소스에서 참조하지 않음")); }
+        let Ok(response) = ureq::get(url).call() else { return Some(error("외부 API 실제 스키마 조회 실패")); };
+        let Ok(body) = response.into_string() else { return Some(error("외부 API 스키마 응답 읽기 실패")); };
+        let Ok(live) = serde_json::from_str::<Value>(&body) else { return Some(error("외부 API 스키마 응답 JSON 형식 오류")); };
+        if fixture.get("schema") != Some(&live) { return Some(error("계약 샘플과 실제 외부 API 스키마 불일치")); }
+    }
+    None
 }
 
 pub fn external_changed(prepared: &Map<String, Value>) -> usize {
@@ -1246,6 +1444,17 @@ pub fn task_red(
     Ok(ctx.result)
 }
 
+pub fn diagnosis_ready_error(h: &str, j: &str) -> Option<&'static str> {
+    if h != ERROR_STAGE { return None; }
+    if j.trim().is_empty() || j.contains("[추정]") {
+        return Some("H=진단 행의 원인이 비어 있거나 [추정]이면 task-ready(원인 확정)를 쓸 수 없어요; task-red로 실패 재현 테스트를 먼저 등록하세요");
+    }
+    if j.contains("단위 테스트만") || j.contains("유닛테스트만") || j.contains("유닛 테스트만") {
+        return Some("H=진단 행의 원인이 유닛테스트만으로 작성되었어요; 실제 런타임(CDP)에서 에러를 재현한 근거를 기록한 뒤 진행하세요");
+    }
+    None
+}
+
 pub fn task_ready(
     raw_id: i64,
     project_arg: &str,
@@ -1264,6 +1473,9 @@ pub fn task_ready(
             "ready",
             format!("Table26 #{raw_id} $H={}; task-ready needs 초안 or one of {}", util::val_str(&row.h), WORKING_STAGES.join(", ")),
         );
+    }
+    if let Some(reason) = diagnosis_ready_error(row.h_str(), &util::val_str(&row.j)) {
+        return api::fail("ready", reason);
     }
     let goal = goal_of(&project_dir, &row)?;
     if util::strip(&goal).is_empty() {
@@ -1344,12 +1556,13 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
     }
     let own_allowed: Vec<String> = prepared.get("paths").and_then(|v| v.as_array())
         .into_iter().flatten().filter_map(|v| v.as_str()).map(String::from).collect();
-    let changed: BTreeSet<String> = prepared.get("snapshot").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+    let mut changed: BTreeSet<String> = prepared.get("snapshot").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
         .map(|prepared_tree| changed_since(&project_dir, prepared_tree))
         .unwrap_or_default()
         .into_iter()
         .filter(|f| inside(f, &own_allowed) || !child_project_claimed(&project_dir, f))
         .collect();
+    exclude_other_submissions(&project_dir, raw_id, &ids, &own_allowed, &mut changed);
     if prepared.get("snapshot").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
         let mut allowed: Vec<String> = ALWAYS_EDITABLE.iter().map(|s| s.to_string()).collect();
         let mut test_files: Vec<String> = Vec::new();
@@ -1372,7 +1585,7 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
             !inside(f, &all_allowed)
                 // 릴리스가 만든 루트 dist/와 main.js는 재제출 때 행별 수정 범위를 막지 않는다.
                 && !release_artifact(Path::new(f))
-                && !matches!(Path::new(f).file_name().and_then(|n| n.to_str()), Some("Cargo.toml" | "package.json" | "manifest.json" | "blender_manifest.toml" | "runtime-contract.js" | "tauri.conf.json" | "main.js"))
+                && !matches!(Path::new(f).file_name().and_then(|n| n.to_str()), Some("Cargo.toml" | "Cargo.lock" | "package.json" | "manifest.json" | "blender_manifest.toml" | "runtime-contract.js" | "tauri.conf.json" | "main.js"))
         }).cloned().collect();
         if !outside.is_empty() {
             return gate_err(json!({
@@ -1387,6 +1600,12 @@ pub fn task_submit(raw_id: i64, project_arg: &str) -> R<Value> {
     let mut files: Vec<String> = changed.iter().cloned().collect();
     files.extend(external_changed_files(&prepared));
     if let Some(boundary) = bridge_sample_files(&project_dir, row.b.as_str().unwrap_or(""), &files, &prepared) {
+        return gate_err(boundary);
+    }
+    if let Some(boundary) = grist_schema_boundary(&project_dir, &files, &prepared) {
+        return gate_err(boundary);
+    }
+    if let Some(boundary) = other_schema_boundary(&project_dir, &prepared) {
         return gate_err(boundary);
     }
     let changed_count = files.len();
@@ -1481,7 +1700,7 @@ pub fn task_hidden(raw_id: i64, project_arg: &str, purpose: &str, command: &str,
     } else {
         format!("{} {}", failure_detail(&output, &project_dir), run.suffix())
     };
-    records::append_item(&project_dir, raw_id, &test_record("확인", raw_id, &purpose, ok, &rec_detail))?;
+    records::append_item(&project_dir, raw_id, &test_record("숨긴 사례", raw_id, &purpose, ok, &rec_detail))?;
     if !ok {
         return gate_err(json!({
             "boundary": "hidden",
@@ -1513,11 +1732,19 @@ fn active_flow_ids(ids: Vec<i64>, current_open: &[i64]) -> Vec<i64> {
     if current_open.is_empty() { ids } else { ids.into_iter().filter(|id| current_open.contains(id)).collect() }
 }
 
-pub fn flow_wait(project_arg: &str) -> R<Value> {
+pub fn flow_wait(project_arg: &str, only_row: Option<i64>) -> R<Value> {
     require_main("flow-wait")?;
     let (project_dir, _, ids) = records::project(project_arg)?;
+    if let Some(row_id) = only_row {
+        if !ids.contains(&row_id) {
+            return api::fail("flow", format!("#{row_id} does not belong to {}", project_dir.display()));
+        }
+    }
     let current_open = task::open_ids(&project_dir);
-    let active_ids = active_flow_ids(ids, &current_open);
+    let active_ids = match only_row {
+        Some(row_id) => vec![row_id],
+        None => active_flow_ids(ids, &current_open),
+    };
     let fetched = rows(&active_ids)?;
     let submitted_ids = flow_submitted_ids(&fetched);
     let skipped = flow_skipped(&fetched);
@@ -1639,6 +1866,125 @@ pub(crate) fn flow_wait_missing(project_dir: &Path, raw_id: i64) -> Option<&'sta
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn grist_schema_submit_rejects_missing_stale_and_wrong_payload_and_accepts_matching_live_columns() {
+        use serde_json::json;
+        let project = std::env::temp_dir().join(format!("grist-schema-{}", std::process::id()));
+        let _cleanup = Cleanup(project.clone());
+        std::fs::create_dir_all(project.join("tests/fixtures")).unwrap();
+        std::fs::write(project.join("client.js"), "fetch('/tables/Table8/records');").unwrap();
+        std::fs::write(project.join("tests/schema.test.js"), "const schema = require('tests/fixtures/grist-Table8-columns.json'); assert(fields === schema.payload.records[0].fields);").unwrap();
+        let files = vec!["client.js".to_string()];
+        let prepared = json!({"tests":["tests/schema.test.js"]}).as_object().unwrap().clone();
+        let live = json!({"columns":[{"id":"Title","fields":{"type":"Text"}},{"id":"Count","fields":{"type":"Int"}}]});
+        let check = |v: serde_json::Value| super::grist_schema_boundary_with(&project, &files, &prepared, |_, _| Ok(v.clone()));
+        assert!(check(live.clone()).is_some());
+        let sample = project.join("tests/fixtures/grist-Table8-columns.json");
+        let fixture = json!({"docId":"doc123","tableId":"Table8","capturedAt":"2026-11-12T10:00:00Z","columns":live["columns"],"payload":{"records":[{"fields":{"Title":"ok","Count":3}}]}});
+        std::fs::write(&sample, fixture.to_string()).unwrap();
+        assert!(check(json!({"columns":[{"id":"Title","fields":{"type":"Text"}}]})).is_some());
+        assert!(check(json!({"columns":[{"id":"Title","fields":{"type":"Text"}},{"id":"Count","fields":{"type":"Numeric"}}]})).is_some());
+        let wrong = json!({"docId":"doc123","tableId":"Table8","capturedAt":"2026-11-12T10:00:00Z","columns":live["columns"],"payload":{"records":[{"fields":{"Title":42}}]}});
+        std::fs::write(&sample, wrong.to_string()).unwrap();
+        assert!(check(live.clone()).is_some());
+        std::fs::write(&sample, fixture.to_string()).unwrap();
+        let result = check(live);
+        assert!(result.is_none(), "{result:?}");
+        let unchanged_files = Vec::new();
+        let unchanged = |v: serde_json::Value| super::grist_schema_boundary_with(&project, &unchanged_files, &prepared, |_, _| Ok(v.clone()));
+        assert!(unchanged(json!({"columns":[{"id":"Title","fields":{"type":"Text"}},{"id":"Count","fields":{"type":"Int"}},{"id":"Added","fields":{"type":"Bool"}}]})).is_some());
+        assert!(unchanged(json!({"columns":[{"id":"Title","fields":{"type":"Text"}}]})).is_some());
+        assert!(unchanged(json!({"columns":[{"id":"Title","fields":{"type":"Text"}},{"id":"Count","fields":{"type":"Numeric"}}]})).is_some());
+        assert!(unchanged(json!({"columns":[{"id":"Title","fields":{"type":"Text"}},{"id":"Count","fields":{"type":"Int"}}]})).is_none());
+    }
+    #[test]
+    fn schema_boundary_ignores_untracked_sources_present_before_preparation() {
+        use serde_json::json;
+        let project = std::env::temp_dir().join(format!("grist-untracked-schema-{}", std::process::id()));
+        let _cleanup = Cleanup(project.clone());
+        std::fs::create_dir_all(project.join("tests/fixtures")).unwrap();
+        std::process::Command::new("git").arg("-C").arg(&project).args(["init", "-q"]).status().unwrap();
+        std::fs::write(project.join("unrelated.js"), "fetch('/tables/Table16/records');").unwrap();
+        std::fs::write(project.join("client.js"), "fetch('/tables/Table8/records');").unwrap();
+        std::fs::write(project.join("tests/schema.test.js"), "const sample = require('tests/fixtures/grist-Table8-columns.json'); assert(fields === sample.payload.records[0].fields);").unwrap();
+        let snapshot = super::snapshot(&project).unwrap();
+        std::fs::write(project.join("client.js"), "fetch('/tables/Table8/records'); // changed").unwrap();
+        let prepared = json!({"snapshot":snapshot,"purpose":"Table8 저장", "tests":["tests/schema.test.js"]}).as_object().unwrap().clone();
+        let files = vec!["unrelated.js".into(), "client.js".into()];
+        let live = json!({"columns":[{"id":"Title","fields":{"type":"Text"}}]});
+        let check = || super::grist_schema_boundary_with(&project, &files, &prepared, |_, _| Ok(live.clone()));
+        assert_eq!(check().unwrap()["table"], "Table8", "changed Table8 still requires a sample");
+        std::fs::write(project.join("tests/fixtures/grist-Table8-columns.json"), json!({
+            "docId":"doc123","tableId":"Table8","capturedAt":"2026-11-12T10:00:00Z",
+            "columns":live["columns"],"payload":{"records":[{"fields":{"Title":"ok"}}]}
+        }).to_string()).unwrap();
+        assert!(check().is_none(), "unrelated Table16 must not require a sample");
+    }
+    #[test]
+    fn schema_sql_reads_current_database_even_without_changed_table_code() {
+        use serde_json::json;
+        let project = std::env::temp_dir().join(format!("sql-schema-{}", std::process::id()));
+        let _cleanup = Cleanup(project.clone());
+        std::fs::create_dir_all(project.join("tests/fixtures")).unwrap();
+        std::fs::write(project.join("store.sql"), "SELECT * FROM Items;").unwrap();
+        std::fs::write(project.join("build.mjs"), "import fs from \"node:fs\";\nimport { x } from \"./local.js\";\n// select a file from node and copy into dist\n").unwrap();
+        let db = project.join("current.sqlite");
+        let run = |sql: &str| std::process::Command::new("sqlite3").arg(&db).arg(sql).output().unwrap();
+        assert!(run("CREATE TABLE Items (id INTEGER, title TEXT);").status.success());
+        let query = "SELECT json_object('columns',json_group_array(json_object('id',name,'fields',json_object('type',type)))) FROM pragma_table_info('Items')";
+        let sample = "tests/fixtures/sql-Items-columns.json";
+        std::fs::write(project.join("tests/schema.test.js"), format!("const fixture = require('{sample}'); assert(fixture.columns);" )).unwrap();
+        let fixture = json!({"schemaCommand":["sqlite3", db.to_str().unwrap(), query],"columns":[{"id":"id","fields":{"type":"INTEGER"}},{"id":"title","fields":{"type":"TEXT"}}]});
+        std::fs::write(project.join(sample), fixture.to_string()).unwrap();
+        let prepared = json!({"purpose":"Items node local dist 저장", "tests":["tests/schema.test.js"]}).as_object().unwrap().clone();
+        assert!(super::other_schema_boundary(&project, &prepared).is_none());
+        assert!(run("ALTER TABLE Items ADD COLUMN extra BLOB;").status.success());
+        let rejected = super::other_schema_boundary(&project, &prepared).unwrap();
+        assert_eq!(rejected["table"], "Items");
+        assert_eq!(rejected["reason"], "계약 샘플과 실제 SQL 열·타입 불일치");
+    }
+    #[test]
+    fn schema_web_save_current_page_table8_submit_simulation() {
+        use serde_json::json;
+        let project = std::path::Path::new("/home/tree/extensions/web_save_current_page");
+        if !project.is_dir() { return; }
+        let output = std::process::Command::new("/home/tree/ai/scripts/bin/grist").args(["columns", "Table8"]).output().unwrap();
+        assert!(output.status.success(), "live Table8 columns query failed");
+        let columns: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let live = json!({"columns":columns.as_array().unwrap().iter().map(|col| json!({"id":col["id"],"fields":{"type":col["type"]}})).collect::<Vec<_>>()});
+        let prepared = json!({"purpose":"Table8 스키마 저장", "tests":["tests/core.test.cjs"]}).as_object().unwrap().clone();
+        let result = super::grist_schema_boundary_with(project, &[], &prepared, |_, _| Ok(live.clone()));
+        assert!(result.is_none(), "Table8 submit simulation: {result:?}");
+    }
+    #[test]
+    fn schema_external_api_compares_live_response_with_sample() {
+        use serde_json::json;
+        let project = std::env::temp_dir().join(format!("api-schema-{}", std::process::id()));
+        let _cleanup = Cleanup(project.clone());
+        std::fs::create_dir_all(project.join("tests/fixtures")).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/schema", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let _ = std::io::Read::read(&mut stream, &mut [0u8; 1024]);
+                let body = r#"{"columns":[{"id":"title","type":"Text"}]}"#;
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                std::io::Write::write_all(&mut stream, response.as_bytes()).unwrap();
+            }
+        });
+        std::fs::write(project.join("client.js"), format!("const FeedSchemaUrl = '{url}';")).unwrap();
+        let sample = "tests/fixtures/api-Feed-schema.json";
+        std::fs::write(project.join("tests/schema.test.js"), format!("const fixture = require('{sample}'); assert(fixture.schema);")).unwrap();
+        let fixture = json!({"schemaUrl":url,"schema":{"columns":[{"id":"title","type":"Int"}]}});
+        std::fs::write(project.join(sample), fixture.to_string()).unwrap();
+        let prepared = json!({"purpose":"Feed 스키마", "tests":["tests/schema.test.js"]}).as_object().unwrap().clone();
+        assert_eq!(super::other_schema_boundary(&project, &prepared).unwrap()["reason"], "계약 샘플과 실제 외부 API 스키마 불일치");
+        let matching = json!({"schemaUrl":url,"schema":{"columns":[{"id":"title","type":"Text"}]}});
+        std::fs::write(project.join(sample), matching.to_string()).unwrap();
+        assert!(super::other_schema_boundary(&project, &prepared).is_none());
+        server.join().unwrap();
+    }
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup { fn drop(&mut self) { let _ = std::process::Command::new("chmod").args(["-R", "u+w"]).arg(&self.0).output(); let _ = std::fs::remove_dir_all(&self.0); } }
     #[test]
@@ -1964,6 +2310,39 @@ mod tests {
     }
 
     #[test]
+    fn sequential_submissions_keep_only_changes_after_other_rows_submit() {
+        use serde_json::json;
+        let dir = std::env::temp_dir().join(format!("grist-two-submits-{}", std::process::id()));
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.join("content.js"), "before").unwrap();
+        std::fs::write(dir.join("background.js"), "before").unwrap();
+        std::fs::write(dir.join("scripts/check.cjs"), "before").unwrap();
+        let row_873_ready = super::snapshot(&dir).unwrap();
+        std::fs::write(dir.join("background.js"), "row 874").unwrap();
+        std::fs::write(dir.join("scripts/check.cjs"), "row 874").unwrap();
+        let row_874_submit = super::snapshot(&dir).unwrap();
+        let state = json!({"ready":{"paths":["background.js","scripts"],"snapshot":row_873_ready},"submit":{"snapshot":row_874_submit}});
+        super::gate_save(&dir, 874, state.as_object().unwrap()).unwrap();
+        std::fs::write(dir.join("content.js"), "row 873").unwrap();
+        let mut changed = super::changed_since(&dir, &row_873_ready);
+        super::exclude_other_submissions(&dir, 873, &[873, 874], &["content.js".into()], &mut changed);
+        assert_eq!(changed, ["content.js".to_string()].into());
+        std::fs::write(dir.join("background.js"), "row 873 after 874").unwrap();
+        let mut changed = super::changed_since(&dir, &row_873_ready);
+        super::exclude_other_submissions(&dir, 873, &[873, 874], &["content.js".into()], &mut changed);
+        assert_eq!(changed, ["background.js".to_string(), "content.js".to_string()].into());
+        std::fs::write(dir.join("background.js"), "row 874").unwrap();
+        let legacy = json!({"ready":{"paths":["content.js","tests"],"snapshot":row_874_submit},"submit":{"changed":2}});
+        super::gate_save(&dir, 874, legacy.as_object().unwrap()).unwrap();
+        let mut changed = super::changed_since(&dir, &row_873_ready);
+        super::exclude_other_submissions(&dir, 873, &[873, 874], &["content.js".into()], &mut changed);
+        assert_eq!(changed, ["content.js".to_string()].into());
+    }
+
+    #[test]
     fn origin_skips_when_agent_char_line_exists() {
         let memo = vec!["1. 00120000071 · x".to_string()];
         assert_eq!(origin_action(&memo, Some("00120000071")), Ok(OriginAction::Skip));
@@ -2015,6 +2394,9 @@ mod tests {
         assert_eq!(flow_summary_from_text("## [구현] a (#7)\n### 구현\n- 상태 : 초안\n#### 확인 (#7)\n- 요약 : [✨] 현재 입력 ⇒ 구현 결과\n", 7), None);
         assert_eq!(flow_summary_from_text("#### 확인 (#7)\n- 요약 : 입력 ⇒ 결과\n", 7), None);
         assert_eq!(flow_summary_from_text("#### 확인 (#7)\n- 요약 : 사용자 확인 대기\n", 7), None);
+        let hidden_after_confirm = "## [구현] a (#7)\n### 구현\n- 상태 : 검증\n#### 확인 (#7)\n- 요약 : [✨] 입력 ⇒ 결과\n- [x] 소비자 확인\n  결과 : 성공\n  상세 : 실제 값\n- 근거 1 : 실제 값\n#### 숨긴 사례 (#7)\n- 목적 : 추가 입력\n- 결과 : 성공\n";
+        assert_eq!(flow_summary_from_text(hidden_after_confirm, 7).as_deref(), Some("[✨] 입력 ⇒ 결과"));
+        assert!(crate::task::flow_confirmation_in_text(hidden_after_confirm, 7).unwrap().is_some());
     }
 
     #[test]
@@ -2051,6 +2433,25 @@ mod tests {
     }
 
     #[test]
+    fn stop_goal_cannot_require_its_own_hook_to_be_absent() {
+        let impossible = [
+            "3. [기능] 과정 턴에서 훅 실행(main-edit-gate·task-complete)·cargo test·--role improver 호출이 없는 Stop ▷ 차단",
+            "3. [기능] task-complete 실행이 없는 Stop ▷ 차단",
+        ];
+        for goal in impossible {
+            assert!(super::goal_errors(goal).iter().any(|e| e.contains("Stop 훅 자체")), "{goal}");
+        }
+        for goal in [
+            "3. [기능] 훅 검증 기록이 없는 Stop ▷ 차단",
+            "3. [기능] task-complete 실행 기록이 없는 Stop ▷ 차단",
+            "3. [기능] 과정 턴에서 수정과 훅 검증이 없는 Stop ▷ 차단",
+            "3. [기능] task-complete 실행이 있는 Stop ▷ 허용",
+        ] {
+            assert!(super::goal_errors(goal).is_empty(), "{goal}");
+        }
+    }
+
+    #[test]
     fn child_project_claimed_ignores_files_prepared_in_child_project() {
         let dir = std::env::temp_dir().join(format!("grist-child-claimed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2067,5 +2468,15 @@ mod tests {
         assert!(!super::child_project_claimed(&dir, "blender_bridge/unclaimed.py"));
         assert!(!super::child_project_claimed(&dir, "other/ui.py"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unverified_fix_report_and_diagnosis_ready_gate_rejects_unconfirmed_cause() {
+        println!("[verify-step] range-check start=2 mid=5 end=8");
+        assert!(super::diagnosis_ready_error("진단", "").is_some());
+        assert!(super::diagnosis_ready_error("진단", "1. [추정] 정적 코드 추정").is_some());
+        assert!(super::diagnosis_ready_error("진단", "1. [🛣] 유닛테스트만 확인").is_some());
+        assert!(super::diagnosis_ready_error("진단", "1. [🛣] 관측된 원인").is_none());
+        assert!(super::diagnosis_ready_error("초안", "").is_none());
     }
 }

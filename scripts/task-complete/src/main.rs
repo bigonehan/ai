@@ -1,7 +1,7 @@
 mod json;
-#[path = "../../process-turn.rs"]
-mod process_turn_state;
-use process_turn_state::{is_process_correction, process_turn};
+#[path = "../../prompt-decision.rs"]
+mod prompt_decision;
+use prompt_decision::{decision, Label};
 #[path = "../../runtime-kind.rs"]
 mod runtime_kind;
 use runtime_kind::{runtime_kind, RuntimeKind};
@@ -14,7 +14,8 @@ use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::path::Path;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::fd::AsRawFd;
 
 const MAIN_ALLOWED: &[&str] = &["완료", "확인"];
@@ -55,17 +56,31 @@ fn verifier_recorded(project_dir: &Path, row_id: i64) -> bool {
 }
 
 fn verifier_execution(project_dir: &Path, row_id: i64, row: &Value) -> Result<(), String> {
-    if user_action_reason(row) { return Ok(()); }
+    let n8n_marked = project_dir.join(format!(".ai/gate/{row_id}.n8n")).is_file();
+    if user_action_reason(row) && !n8n_marked { return Ok(()); }
     let kind = runtime_kind(project_dir)?;
     let log_path = project_dir.join(format!(".ai/dispatch/{row_id}.verify.log"));
     let log = std::fs::read_to_string(log_path)
         .map_err(|_| format!("검증자 #{row_id}: 이번 실행 verify.log가 없어요"))?;
     let log = log.rfind("\nOpenAI Codex v").map(|index| &log[index + 1..]).unwrap_or(&log);
     let lines: Vec<&str> = log.lines().collect();
+    if n8n_marked {
+        let latest = lines.iter().rev().find(|line| line.starts_with("[verify-step] loss-check "));
+        let result = latest.ok_or_else(|| format!("검증자 #{row_id}: 이번 verify.log에 손실 대조 줄이 없어요. ~/ai/skills/role-verifier/references/flow.md의 `[verify-step] loss-check source=<N> recorded=<N> excluded=<N> deleted=<N> unexplained=0`을 기록하세요."))?;
+        validate_loss_check_line(result).map_err(|reason| format!("검증자 #{row_id}: 손실 대조 {reason}. ~/ai/skills/role-verifier/references/flow.md의 loss-check 규칙을 확인하세요."))?;
+        validate_site_coverage(&lines).map_err(|reason| format!("검증자 #{row_id}: 사이트 대조 {reason}. 유닛 테스트·n8n 자체 수집 결과가 아니라 각 사이트 마감순 목록(사이트 응답)과 Grist API 행을 대조한 `[verify-step] site-coverage site=<사이트> listed=<N> in_grist=<N> missing=0` 줄이 필요해요(~/ai/skills/role-verifier/references/flow.md)."))?;
+    }
+    // 261114 #944: 검증자가 대행자 유닛 테스트를 다시 돌려 토큰만 쓰고 실제 누락은 못 찾았다. 유닛 테스트는 대행자 몫이다.
+    if let Some(line) = lines.iter().find(|line| (line.starts_with("/usr/sbin/bash -lc ") || line.starts_with("/bin/bash -lc "))
+        && ["vitest", "cargo test", "npm test", "npm run test", "node --test", "pytest", "jest"].iter().any(|runner| line.contains(runner))) {
+        return Err(format!("검증자 #{row_id}: 대행자 유닛 테스트를 다시 실행했어요({}). 검증자는 유닛 테스트를 돌리지 않고 실제 실행 결과와 최종 소비자(Grist API 등)만 대조해요(~/ai/skills/role-verifier/references/flow.md).", line.chars().take(80).collect::<String>()));
+    }
     let command = lines.iter().any(|line| line.starts_with("/usr/sbin/bash -lc ") || line.starts_with("/bin/bash -lc "));
     let completed = lines.iter().any(|line| line.trim_start().starts_with("succeeded in "));
     let executed = match kind {
-        RuntimeKind::Web => lines.iter().any(|line| line.starts_with("[stagehand-step] cdp-attach-done ")),
+        RuntimeKind::Web => lines.iter().any(|line| line.starts_with("[stagehand-step] cdp-attach-done "))
+            || lines.iter().any(|line| line.starts_with("[verify-step] relay op=") && line.contains(" ok=true"))
+            || lines.iter().any(|line| line.starts_with("[verify-step] screenshot=") && line.contains(".png")),
         RuntimeKind::App => command && completed && lines.iter().any(|line| line.starts_with("[verify-step] runtime-start cmd=")),
         RuntimeKind::Cli => command && completed && lines.iter().any(|line| line.starts_with("[verify-step] cli-run cmd=")),
     };
@@ -85,6 +100,44 @@ fn verifier_execution(project_dir: &Path, row_id: i64, row: &Value) -> Result<()
     if lines.iter().any(|line| valid_partial_scope_line(line)) { return Ok(()); }
     let real = lines.iter().any(|line| line.strip_prefix("[verify-step] real-flow ").is_some_and(|rest| !rest.trim().is_empty() && !mock_word(rest)));
     if real { Ok(()) } else { Err(format!("검증자 #{row_id}: 실제 데이터 흐름 기록(`[verify-step] real-flow <실제 시작 동작→외부 연동→최종 소비자>`)이 이번 verify.log에 없어요 — mock 사례만으로 통과할 수 없어요")) }
+}
+
+/// 261114: 유닛 테스트·n8n 자체 수집 결과만으로는 사이트에 있는데 빠진 공모전을 못 잡았다.
+/// n8n 표식 행은 사이트가 직접 내준 목록과 Grist API 행을 사이트마다 대조한 줄이 있어야 한다.
+fn validate_site_coverage(lines: &[&str]) -> Result<(), &'static str> {
+    let rows: Vec<&&str> = lines.iter().filter(|line| line.starts_with("[verify-step] site-coverage ")).collect();
+    if rows.is_empty() { return Err("site-coverage 줄이 없어요"); }
+    for line in rows {
+        let field = |name: &str| line.split_whitespace().find_map(|word| word.strip_prefix(name)).map(str::to_string);
+        if field("site=").filter(|site| !site.is_empty()).is_none() { return Err("site 값이 없어요"); }
+        let num = |name: &str| field(name).and_then(|value| value.parse::<u64>().ok());
+        let (Some(listed), Some(in_grist), Some(missing)) = (num("listed="), num("in_grist="), num("missing=")) else { return Err("수치 형식이 올바르지 않아요") };
+        if listed == 0 { return Err("listed가 0이에요"); }
+        if missing != 0 { return Err("missing이 0이 아니에요"); }
+        if in_grist > listed { return Err("in_grist가 listed보다 커요"); }
+    }
+    Ok(())
+}
+
+fn validate_loss_check_line(line: &str) -> Result<(), &'static str> {
+    let rest = line.strip_prefix("[verify-step] loss-check ").ok_or("형식이 올바르지 않아요")?;
+    let mut words = rest.split_whitespace();
+    let mut number = |field: &str| -> Result<u64, &'static str> {
+        words.next().and_then(|word| word.strip_prefix(field))
+            .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|value| value.parse::<u64>().ok()).ok_or("수치 형식이 올바르지 않아요")
+    };
+    let source = number("source=")?;
+    let recorded = number("recorded=")?;
+    let excluded = number("excluded=")?;
+    let deleted = number("deleted=")?;
+    let unexplained = number("unexplained=")?;
+    if words.next().is_some() { return Err("추가 필드가 있어요"); }
+    if unexplained != 0 { return Err("unexplained가 0이 아니에요"); }
+    if recorded.checked_add(excluded).and_then(|sum| sum.checked_add(deleted)) != Some(source) {
+        return Err("source와 recorded + excluded + deleted가 일치하지 않아요");
+    }
+    Ok(())
 }
 
 /// `[verify-step] scope=display|variant base=<#행 또는 vX.Y.Z> changed=<바뀐 부분>`:
@@ -144,12 +197,21 @@ fn session_row_ids(thread: &str) -> Vec<String> {
     session_row_ids_at(&state_dir().join("session_rows").join(format!("{}.json", sanitize(thread))))
 }
 
-fn process_owned_rows(owned: Vec<String>, projects: &[(String, String)], prompt: &str) -> Vec<String> {
-    if !is_process_correction(prompt) { return owned; }
+fn process_owned_rows(owned: Vec<String>, projects: &[(String, String)], process: bool) -> Vec<String> {
+    if !process { return owned; }
     owned.into_iter().filter(|id| projects.iter().any(|(row, path)| row == id && path == "/home/tree/extensions")).collect()
 }
 
+fn unfinished_process_rows(owned: &[String], rows: &[Value]) -> Vec<String> {
+    owned.iter().filter(|id| rows.iter().any(|row| {
+        row.get("id").is_some_and(|value| value.py_str() == **id)
+            && row.get("H").and_then(Value::as_str)
+                .is_some_and(|stage| !matches!(stage.trim(), "확인" | "완료"))
+    })).cloned().collect()
+}
+
 const PROCESS_BLOCK: &str = "과정 수정 미완료(manage-intervention): ";
+static PROCESS_STOP: AtomicBool = AtomicBool::new(false);
 
 /// A process turn whose only rows are ones already closed before the prompt has no evidence of its own.
 fn process_rows_only_prior_closed(rows: &[Value], owned: &[String], prior: &[String]) -> bool {
@@ -211,6 +273,27 @@ fn check_session_rows_with(rows: &[Value], projects: &[(String, String)], cwd: &
     })
 }
 
+fn check_session_requests(rows: &[Value], projects: &[(String, String)], cwd: &str) -> Result<(), String> {
+    check_session_requests_with(rows, projects, cwd, |project, ids| {
+        grist::task::check_request(project, ids).map_err(|e| grist::task::exit_message(&e))
+    })
+}
+
+fn check_session_requests_with(rows: &[Value], projects: &[(String, String)], cwd: &str, mut check: impl FnMut(&Path, &[i64]) -> Result<(), String>) -> Result<(), String> {
+    let mut by_project: std::collections::BTreeMap<String, Vec<i64>> = std::collections::BTreeMap::new();
+    for row in rows {
+        if row.get("H").and_then(Value::as_str) == Some("완료") { continue; }
+        let Some(id) = row.get("id").and_then(Value::as_i64) else { continue };
+        let project = projects.iter().find(|(registered, _)| registered == &id.to_string())
+            .map(|(_, path)| path.as_str()).unwrap_or(cwd);
+        by_project.entry(project.to_string()).or_default().push(id);
+    }
+    for (project, ids) in by_project {
+        check(Path::new(&project), &ids)?;
+    }
+    Ok(())
+}
+
 fn claude_session_path_at(state: &Path, cwd: &Path) -> PathBuf {
     let project = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     state.join("claude_project_session").join(format!("{}.json", sanitize(&project.to_string_lossy())))
@@ -267,39 +350,76 @@ fn complete_row(project: &str, row: &Value) -> Result<(), String> {
     grist::task::check(Path::new(project), raw_id)
         .map(|_| ())
         .map_err(|e| format!("#{id} {}", grist::task::exit_message(&e)))?;
-    if row.get("H").and_then(Value::as_str) != Some("완료") {
-        ensure_improve_processed(Path::new(project), raw_id).map_err(|e| format!("#{id} {e}"))?;
-    }
+    grist::records::blackbox("complete", raw_id, None);
     Ok(())
 }
 
-/// 작업 확인 뒤 `improve_process` Skill이 그 행의 changes `## 개선 요구`에 `- 처리 : [#id]` 줄을 남겨야 종료된다.
-/// 개선자(`dispatch-agent --role improver`)가 그 행으로 시작됐으면 메인은 결과를 기다리지 않고 끝난다(개선자가 `처리` 줄을 쓴다).
-fn ensure_improve_processed(project: &Path, raw_id: i64) -> Result<(), String> {
-    if project.join(".ai/dispatch").join(format!("{raw_id}.improve.started")).is_file() { return Ok(()); }
-    match improve_done(project, raw_id)? {
-        true => Ok(()),
-        false => Err(format!("개선 요구 미처리 — 2회 이상 실패·착각은 `grist improve-note {raw_id} --project <dir> --text ...`로 적고, improve_process Skill로 전역설정·Skill 개선 후 `grist improve-done {raw_id} --project <dir> --text ...`를 기록하거나, 개선을 `dispatch-agent --role improver --row {raw_id}`로 맡기세요")),
-    }
-}
-
-/// changes `## 개선 요구`에 그 행의 `- 처리 : [#id]` 줄이 있는가.
-fn improve_done(project: &Path, raw_id: i64) -> Result<bool, String> {
+/// 개선자 세션의 `improve-entry done` 완료 표시를 확인한다.
+fn improvement_entry_done(project: &Path, raw_id: i64) -> Result<bool, String> {
     let record = grist::records::item_file(project, raw_id).ok_or("changes 기록 없음")?;
     let text = std::fs::read_to_string(&record).map_err(|e| format!("changes 읽기 실패: {e}"))?;
-    let marker = format!("- 처리 : [#{raw_id}]");
-    let note = format!("- [#{raw_id}]");
-    Ok(grist::records::improve_lines(&text).and_then(|lines| lines.iter()
-        .filter(|line| line.starts_with(&marker) || line.starts_with(&note))
-        .last().map(|line| line.starts_with(&marker))).unwrap_or(false))
+    let marker = format!("- [x] [#{raw_id}] ");
+    Ok(grist::records::improve_lines(&text).is_some_and(|lines| lines.iter().any(|line| line.starts_with(&marker))))
 }
 
-/// 개선자(`T26_ROLE=improver`) Stop: 메인 판정(세션 행·파일 변경) 대신 자기 행의 `처리` 줄만 본다.
+const PROCESS_TIMEOUT_NOTE: &str = "[🚥] 과정 수정 20분 초과";
+
+/// A per-row lock makes process notes idempotent across concurrent Stop invocations.
+fn process_overdue_notes_with(
+    lock_dir: &Path, owned: &[String], prior: &[String], started: u64, now: u64,
+    mut exists: impl FnMut(i64) -> Result<bool, String>,
+    mut note: impl FnMut(i64, &str) -> Result<(), String>,
+) -> Result<usize, String> {
+    let elapsed = now.saturating_sub(started);
+    if elapsed < 20 * 60 { return Ok(0); }
+    std::fs::create_dir_all(lock_dir).map_err(|e| format!("과정 기록 잠금 디렉터리: {e}"))?;
+    let mut recorded = 0;
+    for id in owned.iter().filter(|id| !prior.contains(id)) {
+        let raw_id: i64 = id.parse().map_err(|_| format!("잘못된 과정 행 ID: {id}"))?;
+        let lock_path = lock_dir.join(format!("{raw_id}.lock"));
+        let lock = std::fs::OpenOptions::new().create(true).read(true).write(true).open(lock_path)
+            .map_err(|e| format!("과정 기록 잠금 파일: {e}"))?;
+        if unsafe { flock(lock.as_raw_fd(), 2) } != 0 { return Err(format!("과정 기록 잠금 실패: {}", std::io::Error::last_os_error())); }
+        let result: Result<bool, String> = (|| {
+            if exists(raw_id)? { return Ok(false); }
+            let message = format!("{PROCESS_TIMEOUT_NOTE} — 경과 {}m", elapsed / 60);
+            note(raw_id, &message)?;
+            Ok(true)
+        })();
+        unsafe { flock(lock.as_raw_fd(), 8); }
+        if result? { recorded += 1; }
+    }
+    Ok(recorded)
+}
+
+fn process_overdue_notes(owned: &[String], prior: &[String], started: u64, now: u64) -> Result<usize, String> {
+    let project = Path::new("/home/tree/extensions");
+    let lock_dir = state_dir().join("process_note_locks");
+    process_overdue_notes_with(&lock_dir, owned, prior, started, now,
+        |id| Ok(lock_dir.join(format!("{id}.recorded")).is_file()),
+        |id, message| {
+            let result = std::process::Command::new("/home/tree/extensions/manage_improve/scripts/bin/manage_improve")
+                .args(["note", "--from", project.to_str().unwrap(), "--row", &id.to_string(), "--target", "hook:task-complete", "--sign", "🚥", "--text", message])
+                .output();
+            match result {
+                Ok(output) if output.status.success() => {
+                    if let Err(error) = std::fs::write(lock_dir.join(format!("{id}.recorded")), "1") {
+                        eprintln!("task-complete: 개선 기록 상태 저장 실패: {error}");
+                    }
+                }
+                Ok(output) => eprintln!("task-complete: 개선 기록 실패(exit {:?})", output.status.code()),
+                Err(error) => eprintln!("task-complete: 개선 기록 실행 실패: {error}"),
+            }
+            Ok(())
+        })
+}
+
+/// 개선자(`T26_ROLE=improver`) Stop: 자기 행의 완료 항목만 본다.
 fn improver_stop(project: &Path, row: Option<&str>) -> Result<(), String> {
     let raw_id: i64 = row.and_then(|value| value.parse().ok()).ok_or("개선자 T26_ROW가 없거나 숫자가 아니에요.")?;
-    match improve_done(project, raw_id)? {
+    match improvement_entry_done(project, raw_id)? {
         true => Ok(()),
-        false => Err(format!("개선자 종료 차단: #{raw_id}의 개선(또는 개선 불필요 근거)을 `grist improve-done {raw_id} --project <dir> --text ...`로 기록하세요")),
+        false => Err(format!("개선자 종료 차단: #{raw_id}의 개선을 `grist improve-entry done {raw_id} --project <dir> --text ...`로 기록하세요")),
     }
 }
 
@@ -342,24 +462,40 @@ const MAX_STOP_STREAK: i64 = 3;
 
 static STOP_STREAK: std::sync::OnceLock<(bool, PathBuf)> = std::sync::OnceLock::new();
 
+/// 차단 사유에서 매번 바뀌는 앞쪽 `[N] ` 횟수를 뺀 비교용 키.
+fn stop_reason_key(reason: &str) -> String {
+    let trimmed = reason.trim();
+    match trimmed.strip_prefix('[').and_then(|rest| rest.split_once("] ")) {
+        Some((count, rest)) if count.chars().all(|c| c.is_ascii_digit()) => rest.to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 fn cap_stop_streak(output: Vec<(String, Value)>, stop_hook_active: bool, streak_file: &Path) -> Vec<(String, Value)> {
+    // 이미 한 번 양보한 같은 사유는 다음 턴에도 다시 막지 않는다: 매 턴 3회씩 같은 차단을 반복하던 문제(261114 #952 [17]회).
+    let yielded_file = streak_file.with_extension("yielded");
     let blocking = output.iter().any(|(k, v)| k == "decision" && v.as_str() == Some("block"));
     if !blocking {
         let _ = std::fs::remove_file(streak_file);
+        let _ = std::fs::remove_file(&yielded_file);
         return output;
+    }
+    let reason = output.iter().find(|(k, _)| k == "reason").and_then(|(_, v)| v.as_str()).unwrap_or("");
+    let key = stop_reason_key(reason);
+    if std::fs::read_to_string(&yielded_file).is_ok_and(|seen| seen == key) {
+        return vec![];
     }
     let previous = if stop_hook_active {
         std::fs::read_to_string(streak_file).ok().and_then(|t| t.trim().parse::<i64>().ok()).unwrap_or(0)
     } else {
         0
     };
-    let process_block = output.iter().any(|(k, v)| k == "reason" && v.as_str().is_some_and(|r| r.starts_with(PROCESS_BLOCK)));
-    if previous >= MAX_STOP_STREAK && !process_block {
+    if previous >= MAX_STOP_STREAK {
         let _ = std::fs::remove_file(streak_file);
-        let reason = output.iter().find(|(k, _)| k == "reason").and_then(|(_, v)| v.as_str()).unwrap_or("");
+        let _ = std::fs::write(&yielded_file, &key);
         let head: String = reason.chars().take(120).collect();
         return vec![("systemMessage".into(), s(format!(
-            "task-complete: {MAX_STOP_STREAK}회 연속 차단 뒤 종료를 허용했어요. 마지막 사유: {head}"
+            "task-complete: {MAX_STOP_STREAK}회 연속 차단 뒤 종료를 허용했어요. 같은 사유로는 다시 막지 않아요. 마지막 사유: {head}"
         )))];
     }
     if let Some(dir) = streak_file.parent() { let _ = std::fs::create_dir_all(dir); }
@@ -367,7 +503,20 @@ fn cap_stop_streak(output: Vec<(String, Value)>, stop_hook_active: bool, streak_
     output
 }
 
+fn process_stop_prefix(mut output: Vec<(String, Value)>, process: bool) -> Vec<(String, Value)> {
+    if process
+        && output.iter().any(|(key, value)| key == "decision" && value.as_str() == Some("block")) {
+        if let Some((_, reason)) = output.iter_mut().find(|(key, _)| key == "reason") {
+            if let Some(message) = reason.as_str() {
+                if !message.starts_with(PROCESS_BLOCK) { *reason = s(format!("{PROCESS_BLOCK}{message}")); }
+            }
+        }
+    }
+    output
+}
+
 fn emit(output: Vec<(String, Value)>, sync_note: &str) -> ! {
+    let output = process_stop_prefix(output, PROCESS_STOP.load(Ordering::Relaxed));
     let mut output = match STOP_STREAK.get() {
         Some((active, file)) => cap_stop_streak(output, *active, file),
         None => output,
@@ -675,22 +824,14 @@ fn main_reason(rows: &[Value], pending: &[Value], project_dir: &str) -> String {
         })
     };
     let step = if has_stage(&["진단"]) {
-        let cause_missing = pending.iter().any(|row| {
-            row.get("H").and_then(Value::as_str) == Some("진단")
-                && row.get("J").and_then(Value::as_str).is_none_or(|cause| cause.trim().is_empty())
-        });
-        if cause_missing {
-            "진단 행은 `$J`가 비어 있으므로 재현만 목표로 대행자에게 맡기세요(`task-red`·`$J` 후 종료; stage-start.md 진단 갈림길).".to_string()
-        } else {
-            "진단 행은 `$J`에 기록된 원인으로 구현을 맡기세요(`task-ready`; stage-start.md 진단 갈림길).".to_string()
-        }
+        "진단 행은 검증 실패(`$I`)를 같은 대행자 세션에 `dispatch-agent --role agent --continue`로 전달하세요(새 대행자·개선자·분석 검증자 금지). 재제출·재배포 뒤 검증자도 `--continue`로 멈춘 단계부터 이어요.".to_string()
     } else if has_stage(&["초안"]) {
         "`초안` 행의 코드 변경은 파일 수와 상관없이 `dispatch-agent` 대행자에게 맡기고, 규칙·Skill 문서 행만 메인이 직접 처리하세요(`manage-project` `references/plan.md`).".to_string()
     } else if has_stage(&["작업", "교정"]) {
         "구현자 결과를 기다리세요. 끝난 구현자의 행이 `검증`이 아니면 같은 행으로 다음 교정을 맡기세요.".to_string()
     } else {
         format!(
-            "모든 행이 `검증`이에요. 전체 흐름을 테스트하고 행마다 `{CMD} task-confirm <id> --project {project_dir} --summary \"[표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>\" --check \"<목적>\" --detail \"<실제값 한 줄>\" --evidence <파일: 목표 줄마다 \"N. <근거>\">`로 확인을 기록한 뒤 \
+            "모든 행이 `검증`이에요. 배포 뒤 검증자를 흐름에 한 번 부르고(흐름 세션이 있으면 `--continue`, 새 검증자 금지), 통과했으면 행마다 `{CMD} task-confirm <id> --project {project_dir} --summary \"[표시 기호] <입력 또는 이전 단계> ⇒ <구현 결과>\" --check \"<목적>\" --detail \"<실제값 한 줄>\" --evidence <파일: 목표 줄마다 \"N. <근거>\">`로 확인을 기록한 뒤 \
 `{CMD} flow-wait --project {project_dir}`를 실행하세요. `.ai/changes`는 직접 열거나 쓰지 않고, 기록 확인은 `{CMD} task-show <id> --project {project_dir} --section 확인`으로 하세요."
         )
     };
@@ -899,7 +1040,8 @@ fn cleanup_expired_state(state: &Path, home: &Path, tmp: &Path, thread: &str) {
 }
 
 fn git_root(dir: &Path) -> Option<PathBuf> {
-    let out = Command::new("git").arg("-C").arg(dir).args(["rev-parse", "--show-toplevel"])
+    let target = dir.ancestors().find(|p| p.exists()).unwrap_or(dir);
+    let out = Command::new("git").arg("-C").arg(target).args(["rev-parse", "--show-toplevel"])
         .stdin(Stdio::null()).output().ok().filter(|o| o.status.success())?;
     let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!root.is_empty()).then(|| PathBuf::from(root))
@@ -960,7 +1102,8 @@ fn unregistered_changes(thread: &str) -> Vec<String> {
 /// This session's own edits come from its transcript instead (`own_changes`) and block until a row exists.
 fn own_changes(transcript: &str) -> Vec<String> {
     const MUTATING: [&str; 9] = ["cp ", "mv ", "rm ", "sed -i", "tee ", "grist update", "grist add", "grist delete", ",'x'"];
-    const FREE: [&str; 5] = ["~/ai/", "/home/tree/ai/", "~/.claude/", "/home/tree/.claude/", "/tmp/"];
+    // `~/plan.md` is the Claude→Codex hand-off plan (memory claude-plans-codex-implements), not product data.
+    const FREE: [&str; 7] = ["~/ai/", "/home/tree/ai/", "~/.claude/", "/home/tree/.claude/", "/tmp/", "~/plan.md", "/home/tree/plan.md"];
     let free = |text: &str| FREE.iter().any(|prefix| text.trim_start_matches(['"', '\'']).starts_with(prefix));
     let mut changed: Vec<String> = Vec::new();
     for entry in transcript.lines().filter_map(|line| json::parse(line).ok()) {
@@ -972,23 +1115,37 @@ fn own_changes(transcript: &str) -> Vec<String> {
                 Some("Edit" | "Write" | "NotebookEdit") => Some(display_dir(&input("file_path"))).filter(|path| !path.is_empty() && !free(path)),
                 Some("Bash") => {
                     let command = input("command");
-                    let (body, cd_free) = bash_targets_text(&command, &free);
+                    let body = bash_targets_text(&command);
                     // Only segments that run a mutating command name write targets; `ls ~/.codex/x 2>/dev/null` and `ls /mnt/h/x 2>&1` read.
                     let has_redir = |s: &str| [">&1", ">&2", "2>/dev/null", ">/dev/null"].iter().fold(s.to_string(), |s, fd| s.replace(fd, "")).contains('>');
-                    let segments = body.split(['\n', ';', '|', '&']).filter(|seg| MUTATING.iter().any(|m| seg.contains(m)) || has_redir(seg));
-                    let targets = segments.flat_map(str::split_whitespace)
-                        .filter(|word| (word.contains('/') || word.starts_with("Table")) && !word.ends_with("/dev/null"))
-                        .collect::<Vec<_>>();
-                    let target_free = |word: &&str| {
-                        let bare = word.trim_matches(['"', '\'', '(', ')', ';']);
-                        let bare = match bare.split_once('=') {
-                            Some((name, value)) if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') => value.trim_matches(['"', '\'']),
-                            _ => bare,
+                    let masked = bash_unquoted(&body).replace("2>&1", "    ").replace(">&1", "   ").replace(">&2", "   ");
+                    let mut cd_free = entry.get("cwd").and_then(Value::as_str).is_some_and(|dir| free(&format!("{}/", dir.trim_end_matches('/'))));
+                    let mut changed = false;
+                    let mut start = 0;
+                    for (pos, ch) in masked.char_indices().filter(|(_, ch)| matches!(ch, '\n' | ';' | '|' | '&')).chain(std::iter::once((body.len(), '\n'))) {
+                        let segment = body[start..pos].trim();
+                        let code = masked[start..pos].trim();
+                        start = pos + ch.len_utf8();
+                        if let Some(rest) = segment.strip_prefix("cd ") {
+                            let dir = rest.split_whitespace().next().unwrap_or("").trim_matches(['"', '\'']);
+                            cd_free = free(&format!("{}/", dir.trim_end_matches('/')))
+                                || (cd_free && !dir.starts_with(['/', '~', '$']));
+                            continue;
+                        }
+                        if !MUTATING.iter().any(|m| code.contains(m)) && !has_redir(code) { continue; }
+                        let targets = segment.split_whitespace()
+                            .filter(|word| (word.contains('/') || word.starts_with("Table")) && !word.ends_with("/dev/null"));
+                        let target_free = |word: &str| {
+                            let bare = word.trim_matches(['"', '\'', '(', ')', ';']);
+                            let bare = match bare.split_once('=') {
+                                Some((name, value)) if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') => value.trim_matches(['"', '\'']),
+                                _ => bare,
+                            };
+                            free(bare) || (cd_free && !bare.starts_with(['/', '~', '$']) && !bare.starts_with("Table"))
                         };
-                        free(bare) || (cd_free && !bare.starts_with(['/', '~', '$']) && !bare.starts_with("Table"))
-                    };
-                    ((MUTATING.iter().any(|m| body.contains(m)) || has_redir(&body)) && !targets.iter().all(target_free))
-                        .then(|| format!("$ {}", command.lines().next().unwrap_or("").chars().take(80).collect::<String>()))
+                        if !targets.into_iter().all(target_free) { changed = true; break; }
+                    }
+                    changed.then(|| format!("$ {}", command.lines().next().unwrap_or("").chars().take(80).collect::<String>()))
                 }
                 _ => None,
             };
@@ -999,9 +1156,9 @@ fn own_changes(transcript: &str) -> Vec<String> {
 }
 
 /// A Bash command reduced to the text that names write targets: heredoc bodies are data, not paths,
-/// `NAME=/path`·`set NAME /path` variables are expanded, and a leading `cd <dir>` resolves relative words
+/// `NAME=/path`·`set NAME /path` variables are expanded before relative paths are resolved
 /// (261110 a `cd ~/ai/... && python3 - <<EOF` edit and `D=/tmp/...` files blocked as product changes).
-fn bash_targets_text(command: &str, free: &dyn Fn(&str) -> bool) -> (String, bool) {
+fn bash_targets_text(command: &str) -> String {
     let mut lines = Vec::new();
     let mut delimiter: Option<String> = None;
     for line in command.lines() {
@@ -1029,7 +1186,11 @@ fn bash_targets_text(command: &str, free: &dyn Fn(&str) -> bool) -> (String, boo
             }
         } else if word == "set" {
             let rest: Vec<&String> = words[i + 1..].iter().filter(|w| !w.is_empty()).take(2).collect();
-            if let [name, value] = rest[..] { vars.push((name.clone(), value.trim_matches(['"', '\'']).to_string())); }
+            if let [name, value] = rest[..] {
+                if !name.starts_with('-') && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    vars.push((name.clone(), value.trim_matches(['"', '\'']).to_string()));
+                }
+            }
         }
     }
     for (name, value) in &vars {
@@ -1048,10 +1209,34 @@ fn bash_targets_text(command: &str, free: &dyn Fn(&str) -> bool) -> (String, boo
             None => start,
         };
     }
-    let cd_free = body.trim_start().strip_prefix("cd ")
-        .and_then(|rest| rest.split(|c: char| c.is_whitespace() || c == ';' || c == '&').next())
-        .is_some_and(|dir| free(&format!("{}/", dir.trim_matches(['"', '\'']).trim_end_matches('/'))));
-    (body, cd_free)
+    body
+}
+
+/// Keep byte offsets so command operators can be located without interpreting quoted data as code.
+fn bash_unquoted(body: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in body.chars() {
+        if escaped {
+            out.extend(std::iter::repeat_n(' ', ch.len_utf8()));
+            escaped = false;
+        } else if ch == '\\' {
+            out.push(' ');
+            escaped = true;
+        } else if quote == Some(ch) {
+            out.push(' ');
+            quote = None;
+        } else if quote.is_some() {
+            out.extend(std::iter::repeat_n(' ', ch.len_utf8()));
+        } else if ch == '\'' || ch == '"' {
+            out.push(' ');
+            quote = Some(ch);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn own_change_reason(changed: &[String]) -> Option<String> {
@@ -1182,9 +1367,8 @@ fn suppressed_explanation_reason(message: &str) -> Option<&'static str> {
     } else { None }
 }
 
-fn dismissed_fix_reason(prompt: &str, message: &str) -> Option<&'static str> {
-    let correction = ["고쳐", "고치", "수정", "개선", "바꿔", "바꾸", "규칙", "지키"]
-        .iter().any(|term| prompt.contains(term));
+fn dismissed_fix_reason(thread: &str, prompt: &str, message: &str) -> Option<&'static str> {
+    let correction = matches!(decision(thread, prompt).label, Some(Label::Improvement | Label::Feature | Label::Resolution));
     let response = unquoted(message);
     (correction && ["그럴 필요 없", "할 필요 없", "고칠 필요 없", "수정할 필요 없", "필요 없습니다", "불필요해요"]
         .iter().any(|term| response.contains(term)))
@@ -1192,7 +1376,7 @@ fn dismissed_fix_reason(prompt: &str, message: &str) -> Option<&'static str> {
 }
 
 fn last_turn_had_fix_action(event: &Value) -> bool {
-    last_turn_fix_action(event).unwrap_or(true)
+    last_turn_fix_action(event).unwrap_or(false)
 }
 
 /// Whether the latest user turn edited something; None when the turn cannot be read from the transcript.
@@ -1266,6 +1450,58 @@ fn last_turn_fix_action(event: &Value) -> Option<bool> {
     after_user.then_some(fixed)
 }
 
+/// A hook execution or focused Rust test in the latest user turn verifies a process edit.
+/// An improver handoff owns this verification and also counts as evidence.
+fn last_turn_hook_verification_action(event: &Value) -> Option<bool> {
+    let path = event.get("transcript_path").and_then(Value::as_str)?;
+    let transcript = read_transcript_for_user(path)?;
+    let mut after_user = false;
+    let mut verified = false;
+    let command_verifies = |command: &str| {
+        ["bin/main-edit-gate", "bin/task-complete", "cargo test", "--role improver"]
+            .iter().any(|needle| command.contains(needle))
+    };
+    for entry in transcript.lines().filter_map(|line| json::parse(line).ok()) {
+        if codex_user_prompt(&entry).is_some()
+            || (entry.get("type").and_then(Value::as_str) == Some("USER_INPUT")
+                && entry.get("content").and_then(Value::as_str).and_then(extract_user_prompt_text).is_some())
+            || (entry.get("type").and_then(Value::as_str) == Some("user")
+                && !matches!(entry.get("message").and_then(|m| m.get("content")), Some(Value::Arr(parts))
+                    if !parts.is_empty() && parts.iter().all(|part| part.get("type").and_then(Value::as_str) == Some("tool_result")))) {
+            after_user = true;
+            verified = false;
+            continue;
+        }
+        if !after_user { continue; }
+        match entry.get("type").and_then(Value::as_str) {
+            Some("response_item") if entry.get("payload").and_then(|p| p.get("type")).and_then(Value::as_str) == Some("custom_tool_call") => {
+                let input = entry.get("payload").and_then(|p| p.get("input")).map(json::dumps).unwrap_or_default();
+                if command_verifies(&input) { verified = true; }
+            }
+            Some("assistant") => {
+                if let Some(Value::Arr(parts)) = entry.get("message").and_then(|m| m.get("content")) {
+                    for part in parts.iter().filter(|p| p.get("type").and_then(Value::as_str) == Some("tool_use")) {
+                        if part.get("name").and_then(Value::as_str) == Some("Bash") {
+                            let command = part.get("input").and_then(|input| input.get("command")).and_then(Value::as_str).unwrap_or("");
+                            if command_verifies(command) { verified = true; }
+                        }
+                    }
+                }
+            }
+            Some("PLANNER_RESPONSE") => {
+                if let Some(Value::Arr(calls)) = entry.get("tool_calls") {
+                    for call in calls {
+                        let name = call.get("name").or_else(|| call.get("tool_name")).and_then(Value::as_str);
+                        if name == Some("run_command") && command_verifies(&json::dumps(call)) { verified = true; }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    after_user.then_some(verified)
+}
+
 fn session_had_any_fix_action(event: &Value) -> bool {
     let Some(path) = event.get("transcript_path").and_then(Value::as_str) else { return true };
     let Some(text) = read_transcript_for_user(path) else { return true };
@@ -1312,58 +1548,13 @@ fn session_had_any_fix_action(event: &Value) -> bool {
     false
 }
 
-fn is_stop_or_waste_complaint(prompt: &str) -> bool {
-    const STOP_PATTERNS: [&str; 7] = [
-        "중지", "중단", "정지", "바로 쳐닫", "kill로 쳐닫", "쳐닫으라",
-        "기다리고 자빠졌",
-    ];
-    STOP_PATTERNS.iter().any(|k| prompt.contains(k))
+fn status_question_stop_allowed(thread: &str, prompt: &str, work_in_progress: bool) -> bool {
+    status_question_stop_allowed_at(&state_dir(), thread, prompt, work_in_progress)
 }
 
-fn kill_running_dispatch_agents() {
-    if let Ok(panes) = std::process::Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{pane_id}\t#{@dispatch-agent}"])
-        .output()
-    {
-        for line in String::from_utf8_lossy(&panes.stdout).lines() {
-            if let Some((pane_id, tag)) = line.split_once('\t') {
-                if !pane_id.trim().is_empty() && !tag.trim().is_empty() {
-                    let _ = std::process::Command::new("tmux").args(["kill-pane", "-t", pane_id.trim()]).output();
-                }
-            }
-        }
-    }
-    if let Ok(windows) = std::process::Command::new("tmux")
-        .args(["list-windows", "-a", "-F", "#{window_id}\t#{window_name}"])
-        .output()
-    {
-        for line in String::from_utf8_lossy(&windows.stdout).lines() {
-            if let Some((win_id, name)) = line.split_once('\t') {
-                if !win_id.trim().is_empty() && (name.starts_with("dispatch-") || name.starts_with("starting-")) {
-                    let _ = std::process::Command::new("tmux").args(["kill-window", "-t", win_id.trim()]).output();
-                }
-            }
-        }
-    }
-    let _ = std::process::Command::new("pkill").args(["-f", "\\.ai/dispatch/.*\\.sh"]).output();
-    let _ = std::process::Command::new("pkill").args(["-f", "ai/scripts/bin/dispatch-agent"]).output();
-}
-
-fn is_pure_status_question(prompt: &str) -> bool {
-    const STATUS_PATTERNS: [&str; 16] = [
-        "시간이 오래", "오래 걸", "오래 처걸", "왜 진행", "어디까지", "뭐하고 있",
-        "이유가 뭐", "왜 아직도", "바로 대답", "언제 끝나", "언제 끝", "안 끝나", "다 됐", "끝났",
-        "대답을 먼저", "대답 먼저",
-    ];
-    const FIX_DEMANDS: [&str; 15] = ["바꾸라고", "쳐바꾸라고", "바꿔", "수정", "고쳐", "고치", "넣어", "삭제", "아무행동을 안", "작업을 쳐하지", "개선", "개선자", "불러", "처불러", "지키라고"];
-    let answer_first = prompt.contains("대답을 먼저") || prompt.contains("대답 먼저") || prompt.contains("바로 대답");
-    let why_question = (prompt.contains('왜') || prompt.contains("이유가 뭐")) && prompt.trim_end().ends_with('?');
-    is_stop_or_waste_complaint(prompt) || answer_first || ((STATUS_PATTERNS.iter().any(|k| prompt.contains(k)) || why_question) && !FIX_DEMANDS.iter().any(|k| prompt.contains(k)))
-}
-
-fn status_question_stop_allowed(thread: &str, prompt: &str) -> bool {
-    if !is_pure_status_question(prompt) { return false; }
-    let marker = state_dir().join("session_start").join(format!("{}.statusq", sanitize(thread)));
+fn status_question_stop_allowed_at(state: &Path, thread: &str, prompt: &str, work_in_progress: bool) -> bool {
+    if !work_in_progress || prompt_decision::decision_at(state, thread, prompt).label != Some(Label::Question) { return false; }
+    let marker = state.join("session_start").join(format!("{}.statusq", sanitize(thread)));
     if std::fs::read_to_string(&marker).ok().as_deref() == Some(prompt) { return false; }
     if let Some(parent) = marker.parent() { let _ = std::fs::create_dir_all(parent); }
     let _ = std::fs::write(&marker, prompt);
@@ -1372,28 +1563,20 @@ fn status_question_stop_allowed(thread: &str, prompt: &str) -> bool {
 
 const FIX_OFFERS: [&str; 10] = ["원하시면", "드릴까요", "할까요", "드릴게요", "드리면", "고칠 수 있어요", "수정할 수 있어요", "만들 수 있어요", "정해 주", "알려 주"];
 
-/// "왜 ~ 안/못 ~" or an explicit complaint about missing action is a fix request: finish the fix instead of offering or talking only.
-fn offer_instead_of_fix_reason(thread: &str, prompt: &str, message: &str) -> Option<String> {
-    offer_or_talk_only_reason(thread, prompt, message, true)
-}
-
-fn offer_or_talk_only_reason(thread: &str, prompt: &str, message: &str, had_fix: bool) -> Option<String> {
-    let why_neg = prompt.contains('왜') && ['안', '못', '않'].iter().any(|word| prompt.contains(*word));
-    let action_complaint = ["아무행동을 안", "바꾸라고", "쳐바꾸라고", "수정을 하라고", "수정을 쳐하라고", "그 지랄"]
-        .iter().any(|word| prompt.contains(*word));
-    let complaint = why_neg || action_complaint;
-    if !complaint { return None; }
+fn offer_or_talk_only_reason(thread: &str, prompt: &str, message: &str, had_fix: bool, process: bool) -> Option<String> {
+    let fix_requested = matches!(decision(thread, prompt).label, Some(Label::Improvement | Label::Feature | Label::Resolution));
+    if !fix_requested { return None; }
     let offered = FIX_OFFERS.iter().any(|offer| message.contains(offer));
     let talk_only = !had_fix && !message.contains("실행한 수정");
     if !offered && !talk_only { return None; }
     let marker = state_dir().join("session_start").join(format!("{}.offer", sanitize(thread)));
-    let unfixed_process = talk_only && is_process_correction(prompt);
-    if !unfixed_process && std::fs::read_to_string(&marker).ok().as_deref() == Some(prompt) { return None; }
+    if !process && std::fs::read_to_string(&marker).ok().as_deref() == Some(prompt) { return None; }
     if let Some(parent) = marker.parent() { let _ = std::fs::create_dir_all(parent); }
     let _ = std::fs::write(&marker, prompt);
-    Some("종료 차단: 오동작·무행동 지적은 설명·인정이 아니라 수정 요청인데 실제 코드·규칙·hook 수정 없이 제안하거나 응답만 하고 끝내려 해요. \
+    let reason = "종료 차단: 오동작·무행동 지적은 설명·인정이 아니라 수정 요청인데 실제 코드·규칙·hook 수정 없이 제안하거나 응답만 하고 끝내려 해요. \
 원인 규칙·Skill·hook·코드를 지금 고치고 `실행한 수정 → 검증 결과 → 남은 경계`로 보고하세요. \
-결과가 정말 갈리는 결정만 남았으면 AskUserQuestion으로 물으세요. 같은 요청으로는 다시 막지 않아요.".to_string())
+결과가 정말 갈리는 결정만 남았으면 AskUserQuestion으로 물으세요.";
+    Some(if process { format!("{PROCESS_BLOCK}{reason}") } else { format!("{reason} 같은 요청으로는 다시 막지 않아요.") })
 }
 
 /// Quoted text ("…", `…`) cites a phrase instead of saying it.
@@ -1446,6 +1629,17 @@ fn early_apply_reason(rows: &[Value], message: &str) -> Option<String> {
     ))
 }
 
+fn unverified_fix_report_reason(rows: &[Value], message: &str, process: bool) -> Option<String> {
+    let said = message.lines().map(unquoted).collect::<Vec<_>>().join("\n");
+    if process && !said.contains("복귀 #") { return None; }
+    if !said.contains("실행한 수정") { return None; }
+    let open = rows.iter().filter(|row| {
+        matches!(row.get("H").and_then(Value::as_str), Some("진단" | "작업" | "교정"))
+            && !row.get("D").and_then(Value::as_str).unwrap_or("").trim().starts_with("[⏸]")
+    }).filter_map(|row| row.get("id").map(Value::py_str)).collect::<Vec<_>>();
+    (!open.is_empty()).then(|| format!("종료 차단: 런타임 검증이 통과하지 않은 행(#{})이 있는데 완료된 수정처럼 `실행한 수정`으로 보고해요. 검증을 통과시키거나 미검증·검증 실패 상태로만 보고하세요.", open.join(", #")))
+}
+
 fn main() {
     let session_start = std::env::args().any(|a| a == "--session-start");
     let session_touch = std::env::args().any(|a| a == "--session-touch");
@@ -1457,12 +1651,6 @@ fn main() {
                     eprintln!("task-complete: Claude session pointer: {error}");
                     std::process::exit(1);
                 }
-            }
-        }
-        if session_touch {
-            let prompt = last_user_prompt_from(&event);
-            if is_stop_or_waste_complaint(&prompt) {
-                kill_running_dispatch_agents();
             }
         }
         if session_start || (session_touch && !session_start_path(&hook_session_id(&event).unwrap_or_else(|| "unknown".into())).exists()) {
@@ -1572,8 +1760,27 @@ fn main() {
         _ => vec![],
     };
     let hook_main = agent_path.is_empty() && worker_row.is_none() && cli_cwd.is_none() && cli_row.is_none();
+    let session_id = hook_session_id(&event).unwrap_or_else(|| thread.to_string());
+    let session_owned = if hook_main { session_row_ids(&session_id) } else { vec![] };
+    let projects = if hook_main { session_project_map(&session_id) } else { vec![] };
+    let user_prompt = last_user_prompt_from(&event);
+    let turn = if hook_main { Some(decision(&session_id, &user_prompt)) } else { None };
+    let user_wait = main_asked_user(&event) || last_assistant_message_from(&event).contains(USER_ONLY);
+    let turn_is_process = turn.as_ref().is_some_and(|turn| turn.process);
+    let process_turn = turn_is_process && !user_wait;
+    PROCESS_STOP.store(process_turn, Ordering::Relaxed);
+    let owned = process_owned_rows(session_owned, &projects, turn_is_process);
+    if process_turn {
+        let prior = turn.as_ref().map(|turn| turn.prior_rows.as_slice()).unwrap_or_default();
+        let started = turn.as_ref().map(|turn| turn.started).unwrap_or_default();
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or_default();
+        let unfinished = unfinished_process_rows(&owned, &gate_rows);
+        if let Err(error) = process_overdue_notes(&unfinished, prior, started, now) {
+            emit(vec![("decision".into(), s("block")), ("reason".into(), s(error))], &sync_note);
+        }
+    }
     if hook_main {
-        if let Some(reason) = dismissed_fix_reason(&last_user_prompt_from(&event), &last_assistant_message_from(&event)) {
+        if let Some(reason) = dismissed_fix_reason(&session_id, &user_prompt, &last_assistant_message_from(&event)) {
             emit(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], &sync_note);
         }
     }
@@ -1582,17 +1789,11 @@ fn main() {
             emit(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], &sync_note);
         }
     }
-    let session_id = hook_session_id(&event).unwrap_or_else(|| thread.to_string());
-    let session_owned = if hook_main { session_row_ids(&session_id) } else { vec![] };
-    let projects = if hook_main { session_project_map(&session_id) } else { vec![] };
-    let user_prompt = last_user_prompt_from(&event);
-    let turn = if hook_main { Some(process_turn(&session_id, &user_prompt)) } else { None };
-    // A turn waiting only on the user (question asked, `[🏷]` line) is not an unfinished process fix.
-    let user_wait = main_asked_user(&event) || last_assistant_message_from(&event).contains(USER_ONLY);
-    let process_turn = turn.as_ref().is_some_and(|turn| turn.process) && !user_wait;
-    let owned = process_owned_rows(session_owned, &projects, &user_prompt);
     if process_turn && last_turn_fix_action(&event) != Some(true) {
         emit(vec![("decision".into(), s("block")), ("reason".into(), s(format!("{PROCESS_BLOCK}과정 수정 요청 뒤 이번 턴의 실제 수정(규칙·Skill·hook·스크립트 편집 또는 개선자 호출)이 확인되지 않았어요. 조회·테스트·이전 확인 행만으로 완료하지 말고 현재 지적을 고치세요.")))], &sync_note);
+    }
+    if process_turn && last_turn_hook_verification_action(&event) != Some(true) {
+        emit(vec![("decision".into(), s("block")), ("reason".into(), s(format!("{PROCESS_BLOCK}훅 검증 없음. 이번 턴에 main-edit-gate·task-complete 훅 또는 cargo test를 실행해 수정 결과를 확인하세요.")))], &sync_note);
     }
     if process_turn && owned.is_empty() {
         emit(vec![("decision".into(), s("block")), ("reason".into(), s(format!("{PROCESS_BLOCK}과정 수정 행과 실제 훅 검증이 확인되지 않았어요. 작업관리기 행을 기록하고 개선자를 호출하세요.")))], &sync_note);
@@ -1611,6 +1812,9 @@ fn main() {
             emit(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], &sync_note);
         }
         if let Some(reason) = unverified_report_reason(&last_assistant_message_from(&event)) {
+            emit(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], &sync_note);
+        }
+        if let Some(reason) = unverified_fix_report_reason(&initial_rows, &last_assistant_message_from(&event), turn_is_process) {
             emit(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], &sync_note);
         }
     }
@@ -1648,7 +1852,8 @@ fn main() {
         emit(vec![], &sync_note);
     }
     let mut completion_error = if completion_checked {
-        check_session_rows_with(&initial_rows, &projects, project_dir, complete_row).err()
+        check_session_rows_with(&initial_rows, &projects, project_dir, complete_row)
+            .and_then(|()| check_session_requests(&initial_rows, &projects, project_dir)).err()
     } else { None };
     let rows_completed = completion_checked && completion_error.is_none();
     let mut rows = initial_rows;
@@ -1683,8 +1888,9 @@ fn main() {
     if process_turn {
         for row in &rows {
             let id = row.get("id").and_then(Value::as_i64).unwrap_or_default();
-            if !matches!(row.get("H").and_then(Value::as_str), Some("확인" | "완료")) || !improve_done(Path::new("/home/tree/extensions"), id).unwrap_or(false) {
-                emit(vec![("decision".into(), s("block")), ("reason".into(), s(format!("과정 수정 검증·개선 기록 미완료(manage-intervention): #{id}. 실제 훅 차단·허용 확인과 grist improve-done을 마치세요.")))], &sync_note);
+            let confirmed = matches!(row.get("H").and_then(Value::as_str), Some("확인" | "완료"));
+            if !confirmed {
+                emit(vec![("decision".into(), s("block")), ("reason".into(), s(format!("#{id} 과정 수정 검증이 미완료예요.")))], &sync_note);
             }
         }
     }
@@ -1730,8 +1936,10 @@ fn main() {
         }
     }
 
-    if hook_main && !process_turn && uninitialized.is_empty() && !pending.is_empty()
-        && (main_asked_user(&event) || status_question_stop_allowed(&session_id, &last_user_prompt_from(&event)))
+    let active_work = !pending.is_empty() || running_dispatch(Path::new(project_dir))
+        || projects.iter().any(|(_, path)| running_dispatch(Path::new(path)));
+    if hook_main && !process_turn && uninitialized.is_empty() && active_work
+        && (main_asked_user(&event) || status_question_stop_allowed(&session_id, &user_prompt, active_work))
     {
         let _ = std::fs::remove_file(&state_file);
         emit(vec![], &sync_note);
@@ -1744,6 +1952,7 @@ fn main() {
             &last_user_prompt_from(&event),
             &last_msg,
             last_turn_had_fix_action(&event),
+            turn_is_process,
         ) {
             emit(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], &sync_note);
         }
@@ -1853,8 +2062,43 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn request_check_groups_split_rows_once_and_skips_user_done() {
+        let row = |id: i64, stage: &str| super::Value::Obj(vec![
+            ("id".into(), super::Value::Num(id.to_string())),
+            ("H".into(), super::s(stage)),
+        ]);
+        let rows = vec![row(7, "검증"), row(8, "검증"), row(9, "완료"), row(10, "검증")];
+        let projects = vec![("7".into(), "/p".into()), ("8".into(), "/p".into()),
+            ("9".into(), "/p".into()), ("10".into(), "/q".into())];
+        let mut seen = Vec::new();
+        super::check_session_requests_with(&rows, &projects, "/default", |path, ids| {
+            seen.push((path.to_string_lossy().into_owned(), ids.to_vec()));
+            Ok(())
+        }).unwrap();
+        assert_eq!(seen, vec![("/p".into(), vec![7, 8]), ("/q".into(), vec![10])]);
+    }
+    #[test]
+    fn question_stop_gate_requires_active_work_and_label() {
+        let dir = std::path::PathBuf::from("/home/tree/extensions/test/tmp").join(format!("tc-question-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prompt = "상태를 알려줘";
+        for (session, label, active, blocked) in [
+            ("q23", Some(super::Label::Question), false, false),
+            ("q45", Some(super::Label::Question), true, true),
+            ("q67", Some(super::Label::Feature), true, false),
+            ("q89", None, true, false),
+        ] {
+            super::prompt_decision::decision_with(&dir, session, prompt, |_| label);
+            assert_eq!(super::status_question_stop_allowed_at(&dir, session, prompt, active), blocked);
+            if blocked { assert!(!super::status_question_stop_allowed_at(&dir, session, prompt, active)); }
+        }
+        eprintln!("[verify-step] range-check start=23 mid=45 end=67");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     struct Cleanup(std::path::PathBuf);
     impl Drop for Cleanup { fn drop(&mut self) { if self.0.is_dir() { let _ = std::fs::remove_dir_all(&self.0); } else { let _ = std::fs::remove_file(&self.0); } } }
+
 
     #[test]
     fn session_start_sweeps_old_state_but_keeps_current_and_locked_files() {
@@ -1892,44 +2136,15 @@ mod tests {
     }
 
     #[test]
-    fn improve_processed_requires_done_line_for_row() {
-        let dir = std::env::temp_dir().join(format!("tc-improve-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join(".ai/changes")).unwrap();
-        let record = dir.join(".ai/changes/261107.a.md");
-        std::fs::write(&record, "# 진행\n\n## [구현] [🌍] x (#9001)\n- 유형 : 개선\n").unwrap();
-        assert!(super::ensure_improve_processed(&dir, 9001).is_err());
-        std::fs::write(&record, "# 진행\n\n## [구현] [🌍] x (#9001)\n\n## 개선 요구\n- [#9001] 실패 2회\n").unwrap();
-        assert!(super::ensure_improve_processed(&dir, 9001).is_err());
-        std::fs::write(&record, "# 진행\n\n## [구현] [🌍] x (#9001)\n\n## 개선 요구\n- [#9001] 실패 2회\n- 처리 : [#9001] gate 추가\n").unwrap();
-        assert!(super::ensure_improve_processed(&dir, 9001).is_ok());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn improver_stop_needs_its_own_done_line() {
         let dir = std::env::temp_dir().join(format!("tc-improver-stop-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".ai/changes")).unwrap();
         let record = dir.join(".ai/changes/261109.a.md");
         std::fs::write(&record, "# 진행\n\n## [구현] [✒️] x (#9004)\n\n## 개선 요구\n- [#9004] 실패 2회\n").unwrap();
-        std::fs::create_dir_all(dir.join(".ai/dispatch")).unwrap();
-        std::fs::write(dir.join(".ai/dispatch/9004.improve.started"), "1").unwrap();
-        assert!(super::improver_stop(&dir, Some("9004")).unwrap_err().contains("improve-done 9004"));
+        assert!(super::improver_stop(&dir, Some("9004")).unwrap_err().contains("improve-entry done 9004"));
         assert!(super::improver_stop(&dir, None).is_err());
-        std::fs::write(&record, "# 진행\n\n## [구현] [✒️] x (#9004)\n\n## 개선 요구\n- [#9004] 실패 2회\n- 처리 : [#9004] gate 추가\n").unwrap();
+        std::fs::write(&record, "# 진행\n\n## [구현] [✒️] x (#9004)\n\n## 개선 요구\n- [x] [#9004] 실패 2회\n").unwrap();
         assert!(super::improver_stop(&dir, Some("9004")).is_ok());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn improve_handed_to_improver_lets_the_main_session_end() {
-        let dir = std::env::temp_dir().join(format!("tc-improver-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join(".ai/changes")).unwrap();
-        std::fs::write(dir.join(".ai/changes/261109.a.md"), "# 진행\n\n## [구현] [✒️] x (#9002)\n\n## 개선 요구\n- [#9002] 실패 2회\n").unwrap();
-        assert!(super::ensure_improve_processed(&dir, 9002).unwrap_err().contains("--role improver --row 9002"));
-        std::fs::create_dir_all(dir.join(".ai/dispatch")).unwrap();
-        std::fs::write(dir.join(".ai/dispatch/9002.improve.started"), "1").unwrap();
-        assert!(super::ensure_improve_processed(&dir, 9002).is_ok());
-        assert!(super::ensure_improve_processed(&dir, 9003).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2030,6 +2245,8 @@ mod tests {
         // 표시·변형만 바뀐 행: 기존 정상 근거와 바뀐 부분이 있으면 real-flow 없이 통과, 근거가 없으면 거부.
         std::fs::write(&log, "[stagehand-step] cdp-attach-done +20ms (mode=attach)\n[verify-step] scope=display base=#853 changed=저장버튼라벨\n[verify-step] readback consumer=화면 value=저장하기\n").unwrap();
         assert!(super::verifier_execution(&dir, 629, &row).is_ok());
+        std::fs::write(&log, "[verify-step] screenshot=/tmp/settings.png\n[verify-step] scope=display base=#853 changed=선택칸\n[verify-step] readback consumer=화면 value=선택칸 있음\n").unwrap();
+        assert!(super::verifier_execution(&dir, 629, &row).is_ok());
         std::fs::write(&log, "[stagehand-step] cdp-attach-done +20ms (mode=attach)\n[verify-step] scope=variant base=v0.0.32 changed=종류선택지\n[verify-step] readback consumer=Table16 value=장면\n").unwrap();
         assert!(super::verifier_execution(&dir, 629, &row).is_ok());
         for weak in ["scope=display changed=라벨", "scope=display base=이전 changed=라벨", "scope=display base=#853", "scope=flow base=#853 changed=라벨"] {
@@ -2046,12 +2263,58 @@ mod tests {
         assert!(super::verifier_execution(&dir, 629, &row).is_ok());
         set_runtime("없음(로컬 CLI)");
         assert!(super::verifier_execution(&dir, 629, &row).is_err());
-        std::fs::write(&log, "/usr/sbin/bash -lc 'cargo test' in /tmp\n succeeded in 20ms:\n[verify-step] cli-run cmd=cargo test\n[verify-step] readback consumer=x value=1\n[verify-step] real-flow 명령 실행 → 실제 API → x\n").unwrap();
+        std::fs::write(&log, "/usr/sbin/bash -lc '~/ai/scripts/bin/grist get Table7' in /tmp\n succeeded in 20ms:\n[verify-step] cli-run cmd=grist get Table7\n[verify-step] readback consumer=x value=1\n[verify-step] real-flow 명령 실행 → 실제 API → x\n").unwrap();
         assert!(super::verifier_execution(&dir, 629, &row).is_ok());
+        // 261114 #944: 검증자가 대행자 유닛 테스트를 다시 돌리면 거부한다.
+        std::fs::write(&log, "/usr/sbin/bash -lc 'npx vitest run test/a.test.ts' in /tmp\n succeeded in 20ms:\n[verify-step] cli-run cmd=grist get Table7\n[verify-step] readback consumer=x value=1\n[verify-step] real-flow 명령 실행 → 실제 API → x\n").unwrap();
+        assert!(super::verifier_execution(&dir, 629, &row).unwrap_err().contains("유닛 테스트"));
         set_runtime("알 수 없는 방식");
         assert!(super::verifier_execution(&dir, 629, &row).is_err());
         let waiting = Value::Obj(vec![("D".into(), s("[🏷] 로그인 사용자 입력 대기"))]);
         assert!(super::verifier_execution(&dir, 629, &waiting).is_ok());
+    }
+
+    #[test]
+    fn loss_check_requires_current_marked_row_log_with_complete_accounting() {
+        let dir = dispatch_fixture();
+        let _cleanup = Cleanup(dir.clone());
+        std::fs::create_dir_all(dir.join(".ai/gate")).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "# 상태\n### 실행\nruntime : http://localhost:5175\n").unwrap();
+        let row = Value::Obj(vec![("D".into(), s(""))]);
+        let base = "[stagehand-step] cdp-attach-done +20ms (mode=attach)\n[verify-step] readback consumer=Grist value=12\n[verify-step] real-flow n8n → Grist\n";
+        let log = dir.join(".ai/dispatch/934.verify.log");
+        std::fs::write(&log, base).unwrap();
+        assert!(super::verifier_execution(&dir, 934, &row).is_ok()); // unmarked rows retain their behavior
+        std::fs::write(dir.join(".ai/gate/934.n8n"), "261114\n").unwrap();
+        let missing = super::verifier_execution(&dir, 934, &row).unwrap_err();
+        assert!(missing.contains("flow.md") && missing.contains("loss-check"));
+        for (line, expected) in [
+            ("[verify-step] loss-check source=12 recorded=3 excluded=7 deleted=2 unexplained=1", "unexplained"),
+            ("[verify-step] loss-check source=13 recorded=3 excluded=7 deleted=2 unexplained=0", "일치하지"),
+            ("[verify-step] loss-check source=12 recorded=3 excluded=x deleted=2 unexplained=0", "수치 형식"),
+            ("[verify-step] loss-check source=12 recorded=3 excluded=7 deleted=2", "수치 형식"),
+        ] {
+            std::fs::write(&log, format!("{base}{line}\n")).unwrap();
+            let reason = super::verifier_execution(&dir, 934, &row).unwrap_err();
+            assert!(reason.contains(expected) && reason.contains("flow.md"), "{reason}");
+        }
+        let valid = "[verify-step] loss-check source=12 recorded=3 excluded=7 deleted=2 unexplained=0";
+        // 261114 #943: 손실 대조만으로는 부족하고 CDP로 연 사이트 목록 대조가 있어야 한다.
+        std::fs::write(&log, format!("{base}{valid}\n")).unwrap();
+        assert!(super::verifier_execution(&dir, 934, &row).unwrap_err().contains("site-coverage"));
+        let site_missing = "[verify-step] site-coverage site=linkareer listed=30 in_grist=29 missing=1";
+        std::fs::write(&log, format!("{base}{valid}\n{site_missing}\n")).unwrap();
+        assert!(super::verifier_execution(&dir, 934, &row).unwrap_err().contains("missing"));
+        let no_cdp = "[verify-step] cli-run cmd=x\n[verify-step] readback consumer=Grist value=12\n[verify-step] real-flow n8n → Grist\n";
+        let site_ok = "[verify-step] site-coverage site=linkareer listed=30 in_grist=30 missing=0";
+        std::fs::write(&log, format!("{no_cdp}{valid}\n{site_ok}\n")).unwrap();
+        assert!(!super::verifier_execution(&dir, 934, &row).unwrap_err().contains("사이트 대조")); // 사이트 대조는 CDP 기록을 요구하지 않음(남은 오류는 웹 런타임 실행 기록)
+        let valid = format!("{valid}\n{site_ok}\n[verify-step] site-coverage site=gomlab listed=50 in_grist=41 missing=0");
+        std::fs::write(&log, format!("{base}{valid}\n")).unwrap();
+        assert!(super::verifier_execution(&dir, 934, &row).is_ok());
+        std::fs::write(&log, format!("{base}{valid}\n[verify-step] loss-check source=12 recorded=3 excluded=7 deleted=2 unexplained=1\n")).unwrap();
+        assert!(super::verifier_execution(&dir, 934, &row).unwrap_err().contains("unexplained"));
+        println!("[verify-step] range-check start=3 mid=7 end=12");
     }
 
     #[test]
@@ -2082,10 +2345,20 @@ mod tests {
         let allowed = super::cap_stop_streak(block(), true, &file);
         assert!(allowed.iter().all(|(k, _)| k != "decision"));
         assert!(!file.exists());
-        // A fresh stop (not hook-forced) restarts the count, and an allow clears it.
-        assert_eq!(super::cap_stop_streak(block(), false, &file).len(), 2);
+        // 양보한 같은 사유는 다음 턴(새 Stop)에도 막지 않고, 횟수 [N]만 다른 사유도 같은 사유로 본다.
+        let yielded = file.with_extension("yielded");
+        let _yielded_cleanup = Cleanup(yielded.clone());
+        assert!(super::cap_stop_streak(block(), false, &file).is_empty());
+        let counted = |n: u32| vec![("decision".into(), s("block")), ("reason".into(), s(format!("[{n}] 미완료")))];
+        assert!(super::stop_reason_key("[17] 미완료") == "미완료");
+        assert!(super::cap_stop_streak(counted(18), true, &file).is_empty());
+        // 다른 사유는 다시 막고, 차단이 없는 Stop은 양보 기록을 지운다.
+        let other = vec![("decision".into(), s("block")), ("reason".into(), s("다른 사유"))];
+        assert_eq!(super::cap_stop_streak(other, false, &file).len(), 2);
         assert!(super::cap_stop_streak(vec![], false, &file).is_empty());
-        assert!(!file.exists());
+        assert!(!file.exists() && !yielded.exists());
+        assert_eq!(super::cap_stop_streak(block(), false, &file).len(), 2);
+        println!("[verify-step] range-check start=2 mid=3 end=18");
     }
 
     #[test]
@@ -2541,8 +2814,55 @@ mod tests {
         let projects = vec![("860".into(), "/home/tree/extensions".into()),
             ("853".into(), "/home/tree/extensions/web_save_current_page".into())];
         let owned = vec!["860".into(), "853".into()];
-        assert_eq!(super::process_owned_rows(owned.clone(), &projects, "작업 과정 오류를 왜 안 고쳤어?"), vec!["860"]);
-        assert_eq!(super::process_owned_rows(owned.clone(), &projects, "이전 작업 계속해"), owned);
+        assert_eq!(super::process_owned_rows(owned.clone(), &projects, true), vec!["860"]);
+        assert_eq!(super::process_owned_rows(owned.clone(), &projects, false), owned);
+    }
+
+    #[test]
+    fn process_timeout_only_uses_unfinished_rows() {
+        let owned = vec!["2".into(), "5".into(), "9".into()];
+        let row = |id: &str, stage: &str| Value::Obj(vec![
+            ("id".into(), Value::Str(id.into())),
+            ("H".into(), Value::Str(stage.into())),
+        ]);
+        let rows = vec![row("2", "확인"), row("5", "작업"), row("9", "완료")];
+        assert_eq!(super::unfinished_process_rows(&owned, &rows), vec!["5"]);
+        assert_eq!(super::unfinished_process_rows(&owned, &[row("2", "확인"), row("9", "완료")]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn prompt_label_overrides_previous_row_state() {
+        let projects = vec![("860".into(), "/home/tree/extensions".into()),
+            ("853".into(), "/home/tree/extensions/product".into())];
+        let owned = vec!["860".into(), "853".into()];
+        // The classifier can reject a keyword match or accept wording without a keyword.
+        assert_eq!(super::process_owned_rows(owned.clone(), &projects, false), owned);
+        assert_eq!(super::process_owned_rows(owned, &projects, true), vec!["860"]);
+    }
+
+    #[test]
+    fn process_turn_requires_latest_turn_fix_and_hook_verification() {
+        let dir = PathBuf::from("/home/tree/extensions/test/tmp").join(format!("tc-process-evidence-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("transcript.jsonl");
+        let event = Value::Obj(vec![("transcript_path".into(), Value::Str(transcript.to_string_lossy().into_owned()))]);
+        assert!(!super::last_turn_had_fix_action(&event));
+        assert_eq!(super::last_turn_hook_verification_action(&event), None);
+        let user = "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"과정 수정\"}]}}\n";
+        let call = |input: &str| format!("{{\"type\":\"response_item\",\"payload\":{{\"type\":\"custom_tool_call\",\"input\":{}}}}}\n", super::json::dumps(&Value::Str(input.into())));
+        std::fs::write(&transcript, format!("{user}{}", call("await tools.apply_patch(patch)"))).unwrap();
+        assert_eq!(super::last_turn_fix_action(&event), Some(true));
+        assert_eq!(super::last_turn_hook_verification_action(&event), Some(false));
+        std::fs::write(&transcript, format!("{user}{}{}", call("await tools.apply_patch(patch)"), call("cargo test -p task-complete process_turn_"))).unwrap();
+        assert_eq!(super::last_turn_hook_verification_action(&event), Some(true));
+        std::fs::write(&transcript, format!("{user}{}{}{}", call("await tools.apply_patch(patch)"), call("cargo test"), user)).unwrap();
+        assert_eq!(super::last_turn_hook_verification_action(&event), Some(false));
+        std::fs::write(&transcript, format!("{user}{}", call("dispatch-agent --role improver --detach"))).unwrap();
+        assert_eq!(super::last_turn_fix_action(&event), Some(true));
+        assert_eq!(super::last_turn_hook_verification_action(&event), Some(true));
+        let row = |id: &str, stage: &str| Value::Obj(vec![("id".into(), Value::Str(id.into())), ("H".into(), Value::Str(stage.into()))]);
+        assert!(!super::process_rows_only_prior_closed(&[row("860", "확인"), row("910", "확인")], &["910".into()], &["860".into()]));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -2569,6 +2889,7 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+
     #[test]
     fn process_turn_rejects_prior_closed_rows_and_keeps_blocking() {
         let row = |id: &str, stage: &str| Value::Obj(vec![("id".into(), Value::Str(id.into())), ("H".into(), Value::Str(stage.into()))]);
@@ -2581,36 +2902,82 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let streak = dir.join("streak");
         let block = |reason: String| vec![("decision".to_string(), Value::Str("block".into())), ("reason".to_string(), Value::Str(reason))];
-        for _ in 0..6 {
-            let out = super::cap_stop_streak(block(format!("{}수정 없음", super::PROCESS_BLOCK)), true, &streak);
-            assert!(out.iter().any(|(k, v)| k == "decision" && v.as_str() == Some("block")));
-        }
+        // 과정 수정 미완료도 같은 상한(3회) 뒤 종료를 허용한다(261114 무한 차단).
+        let mut outs = vec![];
+        for _ in 0..=super::MAX_STOP_STREAK { outs.push(super::cap_stop_streak(block(format!("{}수정 없음", super::PROCESS_BLOCK)), true, &streak)); }
+        assert!(outs[..3].iter().all(|out| out.iter().any(|(k, v)| k == "decision" && v.as_str() == Some("block"))));
+        assert!(!outs[3].iter().any(|(k, _)| k == "decision"));
+        std::fs::remove_file(streak.with_extension("yielded")).ok();
         std::fs::remove_file(&streak).ok();
         let mut last = vec![];
         for _ in 0..4 { last = super::cap_stop_streak(block("다른 사유".into()), true, &streak); }
         assert!(!last.iter().any(|(k, _)| k == "decision"));
         std::env::set_var("TASK_COMPLETE_STATE_DIR", &dir);
         let prompt = "작업과정 결함을 왜 안 고쳤어?";
-        for _ in 0..3 { assert!(super::offer_or_talk_only_reason("tp1", prompt, "원인은 이래요.", false).is_some()); }
+        super::prompt_decision::decision_with(&dir, "tp1", prompt, |_| Some(super::Label::Improvement));
+        for _ in 0..3 { assert!(super::offer_or_talk_only_reason("tp1", prompt, "원인은 이래요.", false, true).is_some()); }
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn codex_final_dismissal_of_requested_fix_is_blocked() {
-        let dir = PathBuf::from("/home/tree/extensions/test/tmp").join(format!("tc-codex-dismissal-{}", std::process::id()));
+    fn process_stop_repeated_block_and_offer_keep_process_prefix() {
+        let dir = PathBuf::from("/home/tree/extensions/test/tmp").join(format!("tc-process-stop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let transcript = dir.join("transcript.jsonl");
-        std::fs::write(&transcript, concat!(
-            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"응답 방식 고쳐\"}]}}\n",
-            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"그럴 필요 없어요.\"}]}}\n"
-        )).unwrap();
-        let event = Value::Obj(vec![("transcript_path".into(), Value::Str(transcript.to_string_lossy().into_owned()))]);
-        let message = super::last_assistant_message_from(&event);
-        assert_eq!(message, "그럴 필요 없어요.");
-        assert!(super::dismissed_fix_reason(&super::last_user_prompt_from(&event), &message).is_some());
-        assert!(super::dismissed_fix_reason("응답 방식 고쳐", "'그럴 필요 없어요'라는 답을 막았어요.").is_none());
+        let streak = dir.join("streak");
+        for reason in ["제안만", "설명만", "개선 기록 미완료"] {
+            let output = super::process_stop_prefix(vec![("decision".into(), s("block")), ("reason".into(), s(reason))], true);
+            let output = super::cap_stop_streak(output, true, &streak);
+            assert_eq!(output.iter().find(|(key, _)| key == "decision").and_then(|(_, value)| value.as_str()), Some("block"));
+            assert!(output.iter().find(|(key, _)| key == "reason").and_then(|(_, value)| value.as_str()).unwrap().starts_with(super::PROCESS_BLOCK));
+        }
+        // 4번째 연속 차단은 상한(3회)에 걸려 종료를 허용한다.
+        let fourth = super::cap_stop_streak(super::process_stop_prefix(vec![("decision".into(), s("block")), ("reason".into(), s("개선자 호출"))], true), true, &streak);
+        assert!(!fourth.iter().any(|(key, _)| key == "decision"));
+        std::fs::remove_file(streak.with_extension("yielded")).ok();
+        let thread = format!("tc-process-repeat-{}", std::process::id());
+        super::prompt_decision::decision_with(&super::state_dir(), &thread, "왜 규칙을 안 고쳤어?", |_| Some(super::Label::Improvement));
+        for _ in 0..2 {
+            let reason = super::offer_or_talk_only_reason(&thread, "왜 규칙을 안 고쳤어?", "원하시면 고칠게요.", false, true).unwrap();
+            assert!(reason.starts_with(super::PROCESS_BLOCK));
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn process_stop_overdue_note_is_once_across_order_and_competing_stops() {
+        use std::sync::{Arc, Mutex};
+        let dir = PathBuf::from("/home/tree/extensions/test/tmp").join(format!("tc-process-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let noted = Arc::new(Mutex::new(Vec::<(i64, String)>::new()));
+        let owned = vec!["910".into(), "911".into()];
+        let prior = vec!["910".into()];
+        let run = |now: u64| {
+            let read_notes = Arc::clone(&noted);
+            let write_notes = Arc::clone(&noted);
+            super::process_overdue_notes_with(&dir, &owned, &prior, 1_000, now,
+                move |id| {
+                    Ok(read_notes.lock().unwrap().iter().any(|(row, _)| *row == id))
+                },
+                move |id, note| {
+                    write_notes.lock().unwrap().push((id, note.to_string()));
+                    Ok(())
+                })
+        };
+        assert_eq!(run(2_199).unwrap(), 0);
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| run(2_200));
+            let second = scope.spawn(|| run(2_260));
+            assert_eq!(first.join().unwrap().unwrap() + second.join().unwrap().unwrap(), 1);
+        });
+        assert_eq!(run(2_320).unwrap(), 0);
+        let notes = noted.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, 911);
+        assert!(notes[0].1.starts_with("[🚥] 과정 수정 20분 초과 — 경과 "));
+        drop(notes);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 
     #[test]
     fn j2_rejects_missing_or_malformed_judgment() {
@@ -2649,22 +3016,16 @@ mod tests {
         assert!(msg.contains("task-confirm <id>") && msg.contains("--section 확인") && !msg.contains("당일 `.ai/changes`에"));
         assert!(!msg.contains("`$H=확인`과"));
         assert!(msg.contains("Grist에서 `완료`로 처리하면 종료돼요"));
+        assert!(msg.contains("--continue") && !msg.contains("전체 흐름을 테스트"));
     }
 
     #[test]
-    fn diagnosis_stop_reason_branches_on_cause() {
+    fn diagnosis_stop_reason_sends_failure_to_the_same_agent_session() {
         let row = Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단"))]);
         let msg = main_reason(&[row.clone()], &[row], "/home/tree/extensions");
-        assert!(msg.contains("재현만 목표로 대행자에게 맡기세요(`task-red`·`$J` 후 종료"));
-        assert!(msg.contains("stage-start.md 진단 갈림길"));
-        assert!(!msg.contains("구현자 결과를 기다리세요"));
-        let known = Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단")), ("J".into(), s("[🛣] 원인"))]);
-        let known_msg = main_reason(&[known.clone()], &[known], "/home/tree/extensions");
-        assert!(known_msg.contains("`$J`에 기록된 원인으로 구현을 맡기세요(`task-ready`"));
-        assert!(!known_msg.contains("재현만 목표로"));
-        let draft = Value::Obj(vec![("id".into(), Value::Num("501".into())), ("H".into(), s("초안"))]);
-        let mixed = main_reason(&[draft.clone(), Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단"))])], &[draft, Value::Obj(vec![("id".into(), Value::Num("500".into())), ("H".into(), s("진단"))])], "/home/tree/extensions");
-        assert!(mixed.contains("재현만 목표로 대행자에게"));
+        assert!(msg.contains("dispatch-agent --role agent --continue"), "{msg}");
+        assert!(msg.contains("개선자") && msg.contains("금지"));
+        assert!(!msg.contains("재현만 목표로"));
     }
 
     #[test]
@@ -2683,12 +3044,21 @@ mod tests {
         std::env::set_var("TASK_COMPLETE_STATE_DIR", &base);
         let complaint = "이걸 보고, 왜 새로 추가되는게 그걸 안지키고 있는지 확인해봐";
         let offer = "2일 처리가 없어요. 정해 주시면 JSON을 만들어 드릴게요.";
-
-        assert!(super::offer_instead_of_fix_reason("o1", complaint, "고쳤어요. 검증 결과는 통과예요.").is_none());
-        assert!(super::offer_instead_of_fix_reason("o1", "이 명령어 뜻이 뭐야", offer).is_none());
-        assert!(super::offer_instead_of_fix_reason("o1", complaint, offer).unwrap().contains("수정 요청"));
-        assert!(super::offer_instead_of_fix_reason("o1", complaint, offer).is_none());
-        assert!(super::offer_instead_of_fix_reason("o1", "왜 또 안 고쳤어", offer).is_some());
+        super::prompt_decision::decision_with(&base, "o1", complaint, |_| Some(super::Label::Resolution));
+        assert!(super::offer_or_talk_only_reason("o1", complaint, "고쳤어요. 검증 결과는 통과예요.", true, false).is_none());
+        super::prompt_decision::decision_with(&base, "o1", "이 명령어 뜻이 뭐야", |_| Some(super::Label::Question));
+        assert!(super::offer_or_talk_only_reason("o1", "이 명령어 뜻이 뭐야", offer, true, false).is_none());
+        super::prompt_decision::decision_with(&base, "o1", complaint, |_| Some(super::Label::Resolution));
+        assert!(super::offer_or_talk_only_reason("o1", complaint, offer, true, false).unwrap().contains("수정 요청"));
+        assert!(super::offer_or_talk_only_reason("o1", complaint, offer, true, false).is_none());
+        super::prompt_decision::decision_with(&base, "o1", "왜 또 안 고쳤어", |_| Some(super::Label::Resolution));
+        assert!(super::offer_or_talk_only_reason("o1", "왜 또 안 고쳤어", offer, true, false).is_some());
+        super::prompt_decision::decision_with(&base, "o2", "왜 중단되는지에 대한 질문을 먼저 하고 있잖아", |_| Some(super::Label::Question));
+        assert!(super::offer_or_talk_only_reason("o2", "왜 중단되는지에 대한 질문을 먼저 하고 있잖아", "로그에서 중단 요청을 확인했어요.", false, false).is_none());
+        super::prompt_decision::decision_with(&base, "o3", "왜 중단되는지 대답을 먼저 해", |_| Some(super::Label::Question));
+        assert!(super::offer_or_talk_only_reason("o3", "왜 중단되는지 대답을 먼저 해", "로그에서 중단 요청을 확인했어요.", false, false).is_none());
+        super::prompt_decision::decision_with(&base, "o4", "왜 중단되는지 대답을 먼저 하고 코드도 고쳐", |_| Some(super::Label::Resolution));
+        assert!(super::offer_or_talk_only_reason("o4", "왜 중단되는지 대답을 먼저 하고 코드도 고쳐", "원인을 설명했어요.", false, false).is_some());
         std::fs::remove_dir_all(&base).unwrap();
     }
 
@@ -2720,6 +3090,7 @@ mod tests {
             + &tool("Bash", "command", "set d /tmp/claude-1000/s; mkdir -p $d; rm -f $d/x.md")
             + &tool("Bash", "command", "cd /tmp; d=$(mktemp -d); printf '{}' > $d/a.json; rm -rf $d")
             + &tool("Bash", "command", "cd /home/tree/ai/x && python3 - <<'EOF'\\nprint(1)\\nEOF\\nrm -f /tmp/claude-1000/a.md; ls -la ~/.codex/skills/x 2>/dev/null | head -2")
+            + &tool("Write", "file_path", "/home/tree/plan.md")
             + &tool("Bash", "command", "ls -la /mnt/h/code/x 2>&1 | head; rg -n version /mnt/h/code/x/manifest.json 2>&1")
             + &tool("Bash", "command", "cd ~/ai/scripts/x/src; sed -i 's|a > b|`ls /mnt/h/x 2>&1` read|' main.rs; sed -i -e 's#x#/home/tree/extensions/y#' main.rs");
         assert!(super::own_changes(&free).is_empty(), "{:?}", super::own_changes(&free));
@@ -2733,6 +3104,24 @@ mod tests {
         let changed = super::own_changes(&product);
         assert_eq!(changed.len(), 6, "{changed:?}");
         assert!(super::own_change_reason(&changed).unwrap().contains("--role verifier"));
+    }
+
+    #[test]
+    fn own_changes_ignores_quoted_search_text_and_tracks_intermediate_cd() {
+        let bash = |command: &str| {
+            let escaped = command.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+            format!("{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{{\"command\":\"{escaped}\"}}}}]}}}}\n")
+        };
+        let scratch = "set -e; S=/tmp/claude-1000/x/scratchpad/tokstat; mkdir -p $S/src; cat > $S/Cargo.toml <<'EOF'\n[package]\nname = 'test'\nEOF\ncd $S && cargo build --release --offline 2>&1 | tail -n 5; cd $S && sed -i 's/a/b/' src/main.rs";
+        let free = bash("rg -n \"let tee|tee = \" dispatch-agent/src/main.rs | head -3")
+            + &bash("awk 'NR>3' /tmp/claude-1000/x/data.txt")
+            + &bash(scratch);
+        assert!(super::own_changes(&free).is_empty(), "{:?}", super::own_changes(&free));
+        assert!(super::bash_targets_text("set -e; S=/tmp/claude-1000/x; cd $S && sed -i 's/a/b/' src/main.rs").contains("cd /tmp/claude-1000/x"));
+        let cwd_entry = "{\"type\":\"assistant\",\"cwd\":\"/tmp/claude-1000/x/scratchpad\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"sed -i 's/a/b/' src/main.rs\"}}]}}\n";
+        assert!(super::own_changes(cwd_entry).is_empty());
+        let external = free + &bash("cd /tmp/claude-1000/x && cp src/main.rs /mnt/c/Users/tende/Desktop/main.rs");
+        assert_eq!(super::own_changes(&external).len(), 1);
     }
 
     #[test]
@@ -2821,27 +3210,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+
     #[test]
-    fn agy_user_input_and_talk_only_complaint_block_once_while_status_question_allows_reply() {
-        let base = std::env::temp_dir().join(format!("tc-talkonly-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&base);
-        std::env::set_var("TASK_COMPLETE_STATE_DIR", base.join("state"));
-        let tp = base.join("transcript.jsonl");
-        std::fs::write(&tp, "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n응답만 쳐하고 아무행동을 안하니까 바꾸라고 수정을 쳐하라고\\n</USER_REQUEST>\"}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"제 잘못이에요.\"}\n").unwrap();
-        let event = Value::Obj(vec![("transcript_path".into(), s(tp.to_string_lossy()))]);
-        let prompt = super::last_user_prompt_from(&event);
-        assert!(prompt.contains("아무행동을 안하니까"));
-        assert!(!super::last_turn_had_fix_action(&event));
-        assert!(super::offer_or_talk_only_reason("tk1", &prompt, "제 잘못이에요.", false).is_some());
-        assert!(super::offer_or_talk_only_reason("tk1", &prompt, "제 잘못이에요.", false).is_none());
-        assert!(super::offer_or_talk_only_reason("tk2", &prompt, "실행한 수정 → 검증 결과 → 남은 경계", true).is_none());
-        assert!(super::status_question_stop_allowed("sq1", "뭐가 이렇게 시간이 오래 처걸리고 있지?"));
-        assert!(!super::status_question_stop_allowed("sq1", "뭐가 이렇게 시간이 오래 처걸리고 있지?"));
-        assert!(!super::status_question_stop_allowed("sq2", "응답만 쳐하고 아무행동을 안하니까 바꾸라고"));
-        assert!(!super::is_pure_status_question("왜 개선자를 안 부르고 냅두지?"));
-        assert!(!super::is_pure_status_question("토큰낭비는 쳐하면서 왜 규칙은 안 따르냐"));
-        assert!(!super::is_stop_or_waste_complaint("토큰낭비는 쳐하면서 왜 규칙은 안 따르냐"));
-        let _ = std::fs::remove_dir_all(&base);
+    fn unverified_fix_report_and_diagnosis_ready_blocks_open_row_fix_claim() {
+        println!("[verify-step] range-check start=3 mid=6 end=9");
+        let diag = vec![Value::Obj(vec![("id".into(), s("865")), ("H".into(), s("진단")), ("D".into(), s("[🏷] 사용자 대기 — 865"))])];
+        let paused = vec![Value::Obj(vec![("id".into(), s("865")), ("H".into(), s("진단")), ("D".into(), s("[⏸] 개입 #926"))])];
+        let verified = vec![Value::Obj(vec![("id".into(), s("865")), ("H".into(), s("확인")), ("D".into(), s("[⌨️] 확인"))])];
+        assert!(super::unverified_fix_report_reason(&diag, "- **실행한 수정**: 고침", false).is_some());
+        assert!(super::unverified_fix_report_reason(&diag, "- **검증 결과**: 실패 [🏷]", false).is_none());
+        assert!(super::unverified_fix_report_reason(&paused, "- **실행한 수정**: 개입 수정", false).is_none());
+        assert!(super::unverified_fix_report_reason(&diag, "- **실행한 수정**: 개입 수정", true).is_none());
+        assert!(super::unverified_fix_report_reason(&diag, "- **실행한 수정**: 고침\n개입: #938 → 복귀 #865", true).is_some());
+        assert!(super::unverified_fix_report_reason(&verified, "- **실행한 수정**: 고침", false).is_none());
     }
 
 }

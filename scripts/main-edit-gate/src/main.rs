@@ -1,10 +1,11 @@
-#[path = "../../process-turn.rs"]
-mod process_turn_state;
-use process_turn_state::{is_process_correction, process_turn};
+#[path = "../../prompt-decision.rs"]
+mod prompt_decision;
+use prompt_decision::{decision, decision_at, Label};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 const EXTENSIONS: &str = "/home/tree/extensions";
 
@@ -44,6 +45,7 @@ fn target(event: &Value) -> Option<PathBuf> {
         return None;
     }
     workflow_relative(&file)?;
+    if file.starts_with("/home/tree/extensions/manage_decision") { return None; }
     if name == "AGENTS.md" || file.extension().and_then(|ext| ext.to_str()) == Some("md")
         || file.components().any(|c| c.as_os_str() == ".ai") { return None; }
     Some(file)
@@ -147,9 +149,6 @@ fn off_project_search(event: &Value) -> bool {
                 return true;
             }
             if let Some(proj) = subproject {
-                if path == "/home/tree/extensions/.ai/changes" || path == "../.ai/changes" {
-                    return true;
-                }
                 if let Some(rest) = path.strip_prefix("/mnt/h/code/") {
                     let target_proj = rest.split('/').next().unwrap_or("");
                     if !target_proj.is_empty() && target_proj != proj {
@@ -166,7 +165,7 @@ fn pre_worker_denial(event: &Value) -> Option<&'static str> {
     if direct_nf(event) { return Some("nf 알림은 ask-notify hook이 자동 전송합니다. nf를 직접 실행하지 마세요."); }
     if direct_blender(event) { return Some("blender.exe를 직접 실행하면 세션이 닫히지 않고 멈춥니다. ~/ai/scripts/bin/win-smoke --project <dir> --script <py>로 실행하세요."); }
     if structure_search(event) { return Some("extensions 구조는 read-architecture 출력의 .ai/docs/architecture.md로 고르세요. ls -R·find로 다시 찾지 않습니다."); }
-    if off_project_search(event) { return Some("조회 경로가 현재 프로젝트의 허용 범위 밖입니다. 현재 프로젝트 AGENTS.md의 `runtime :` 두 번째 경로를 읽고, 방금 거부된 명령의 배포 경로를 그 경로로 바꿔 한 번만 다시 실행하세요. 브라우저 프로필·Downloads·다른 프로젝트·루트 .ai/changes는 조회하지 마세요. 경로를 바꿀 필요가 없다면 이 조회를 건너뛰고 run-cdp 흐름 검증을 계속하세요."); }
+    if off_project_search(event) { return Some("조회 경로가 현재 프로젝트의 허용 범위 밖입니다. 현재 프로젝트 AGENTS.md의 `runtime :` 두 번째 경로를 읽고, 방금 거부된 명령의 배포 경로를 그 경로로 바꿔 한 번만 다시 실행하세요. Windows Chrome 프로필·Windows Downloads는 조회하지 마세요(공용 Chromium 다운로드는 ~/Downloads). 경로를 바꿀 필요가 없다면 이 조회를 건너뛰고 run-cdp 흐름 검증을 계속하세요."); }
     None
 }
 
@@ -196,13 +195,15 @@ fn without_heredoc_bodies(command: &str) -> String {
 }
 
 fn heavy_log_path(s: &str) -> bool {
-    (s.contains(".ai/dispatch/") && s.contains(".log"))
-        || (s.contains("/background/task-") && s.contains(".log"))
-        || s.contains("transcript.jsonl")
-        || s.contains("transcript_full.jsonl")
-        || s.contains(".gemini/antigravity-cli/brain")
-        || s.contains(".codex/sessions")
-        || s.contains(".claude/projects")
+    let path = s.trim_matches(['\'', '"', '(', ')', ';']);
+    (path.contains(".ai/dispatch/") && path.ends_with(".log"))
+        || (path.contains("/background/task-") && path.ends_with(".log"))
+        || path.ends_with("transcript.jsonl")
+        || path.ends_with("transcript_full.jsonl")
+        || [".gemini/antigravity-cli/brain", ".codex/sessions", ".claude/projects"]
+            .iter().any(|root| path.contains(root)
+                && ((path.ends_with(root) || path.ends_with('/')) && !path.contains("/memory/")
+                    || path.ends_with(".log") || path.ends_with(".jsonl")))
 }
 
 fn main_heavy_work(event: &Value) -> bool {
@@ -231,10 +232,13 @@ fn main_heavy_work(event: &Value) -> bool {
 const SOURCE_READ_REASON: &str = "위임자는 제품 소스를 20줄 넘게 읽지 않습니다: 런타임 실패는 ① runtime-fresh 결과 ② record-log 한 줄 ③ 재현 위임 순서로 보고, 위치는 rg -n으로 찾아 20줄 이하만 읽으세요.";
 
 fn product_source(path: &str, cwd: &Path) -> bool {
-    let raw = Path::new(path);
-    let file = normalize(&if raw.is_absolute() { raw.to_path_buf() } else { cwd.join(raw) });
+    let home = std::env::var("HOME").unwrap_or_default();
+    let expanded = match path.strip_prefix("~/") { Some(rest) if !home.is_empty() => Path::new(&home).join(rest), _ => PathBuf::from(path) };
+    let file = normalize(&if expanded.is_absolute() { expanded } else { cwd.join(expanded) });
     let Some(relative) = workflow_relative(&file) else { return false };
     if relative.components().count() < 2 { return false; }
+    // manage_decision is the hooks' own judgment tool, not a product
+    if file.starts_with("/home/tree/extensions/manage_decision") { return false; }
     if relative.components().any(|c| matches!(c.as_os_str().to_str(), Some("test" | "tests" | "dist" | "node_modules" | ".ai"))) { return false; }
     let Some(name) = file.file_name().and_then(|s| s.to_str()) else { return false };
     if name.contains(".test.") { return false; }
@@ -331,6 +335,49 @@ fn browser_work(event: &Value) -> bool {
     })
 }
 
+/// 화면 조작용 relay는 유지하고, 화면 밖 CDP 값 조회만 행 목표로 제한한다.
+fn hidden_cdp_call(event: &Value) -> bool {
+    if event.get("tool_name").and_then(Value::as_str) != Some("Bash") { return false; }
+    let Some(command) = event.pointer("/tool_input/command").and_then(Value::as_str) else { return false };
+    segments(&without_heredoc_bodies(command)).iter().any(|segment| {
+        let words = execution_words(segment);
+        if words.is_empty() { return false; }
+        let program = words[0].trim_matches(['\'', '"']).rsplit('/').next().unwrap_or("");
+        if matches!(program, "run_cdp" | "run-cdp") { return true; }
+        let compact: String = segment.chars().filter(|c| !c.is_whitespace()).collect();
+        program == "node" && words.iter().any(|word| *word == "relay")
+            && ["\"op\":\"storage\"", "\"op\":\"eval\"", "\"op\":\"network\"",
+                "\\\"op\\\":\\\"storage\\\"", "\\\"op\\\":\\\"eval\\\"", "\\\"op\\\":\\\"network\\\""].iter().any(|op| compact.contains(op))
+    })
+}
+
+fn goal_needs_hidden_cdp(goal: &str) -> bool {
+    goal.lines().any(|line| {
+        let lower = line.to_lowercase();
+        let subject = ["네트워크", "스토리지", "저장소", "network", "storage", "localstorage", "sessionstorage", "indexeddb"]
+            .iter().any(|word| lower.contains(word));
+        let value = ["값", "응답", "요청", "헤더", "상태", "데이터", "value", "response", "request", "header", "status", "cookie", "key"]
+            .iter().any(|word| lower.contains(word));
+        subject && value && !["값이 없는 행", "값이 없는데", "값 요구가 없는 행"].iter().any(|phrase| lower.contains(phrase))
+    })
+}
+
+fn hidden_cdp_denial_with(event: &Value, role: Option<&str>, goal: impl Fn(&str, &str) -> Option<String>) -> Option<String> {
+    if !matches!(role, None | Some("verifier")) || !hidden_cdp_call(event) { return None; }
+    let row = std::env::var("T26_ROW").ok().filter(|value| value.parse::<u64>().is_ok());
+    let project = event.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let allowed = row.as_deref().and_then(|id| goal(id, project)).is_some_and(|text| goal_needs_hidden_cdp(&text));
+    (!allowed).then(|| "run-cdp 화면 밖 network·storage 값 조회는 현재 행 목표에 그 관측값이 있을 때만 허용됩니다. 화면 확인은 stagehand.mjs relay read·click·type 또는 windows-mcp를 쓰세요.".into())
+}
+
+fn hidden_cdp_denial(event: &Value, role: Option<&str>) -> Option<String> {
+    hidden_cdp_denial_with(event, role, |row, project| {
+        let output = Command::new("/home/tree/ai/scripts/bin/grist")
+            .args(["goal", row, "--project", project]).output().ok()?;
+        output.status.success().then(|| String::from_utf8(output.stdout).ok()).flatten()
+    })
+}
+
 const IMPROVER_BROWSER_REASON: &str = "개선자는 규칙·Skill·hook·~/ai/scripts만 고칩니다. CDP·stagehand 실행은 검증자 몫입니다.";
 const IMPROVER_PRODUCT_REASON: &str = "개선자는 제품 코드를 고치지 않습니다. 제품 결함은 개선 요구에 적고 위임자가 대행자에게 맡깁니다.";
 
@@ -347,6 +394,47 @@ const WORKER_BROWSER_REASON: &str = "CDP·stagehand 실행과 런타임 검증�
 const MAIN_HEAVY_REASON: &str = "메인은 판단·지시만 합니다. CDP·stagehand 실행은 검증자(--role verifier)에게, 위임 로그 읽기는 구현자에게 맡기고, dispatch-agent의 exit·last 한 줄과 grist task-show --section 구현으로 판정하고, 원인은 --resume으로 구현자에게 한 줄로 받으세요.";
 const GRIST_UI_PROBE_REASON: &str = "Grist 스키마·행 조회는 grist 제공 함수(grist tables, grist columns <TABLE>, grist get <TABLE> --id/--filter/--fields)나 CDP window.grist 함수를 바로 쓰세요. _grist_* 내부 메타데이터 조회, grist get 파이프 스크립트(python3/node), localhost:8484/*.js curl 역추적은 거부합니다.";
 const MAIN_INTERPRETER_REASON: &str = "작업 도구 스크립트는 Rust만 씁니다. python·node 즉석 실행 대신 Edit·sed -i·rg·grist get --fields를 쓰고, 반복 작업은 ~/ai/scripts Rust 하위 명령으로 추가하세요.";
+const VERIFIER_SCRIPT_REASON: &str = "검증자는 CDP 스크립트(test/tmp/*.mjs·openStagehand)를 직접 작성·실행하지 않습니다. node ~/ai/skills/access-stagehand/scripts/stagehand.mjs relay '<json>' 한 줄 요청이나 screen-evidence를 쓰세요.";
+const VERIFIER_WINDOWS_SHELL_REASON: &str = "Codex 검증자 셸에서 Windows exe·PowerShell·WebView2 CDP 19339 직접 실행은 120초 무진행을 만듭니다. Windows 배포본은 위임자의 win-smoke 출력으로 확인하고, 그 증거가 없으면 검증 실패로 보고하세요.";
+
+fn verifier_windows_shell_denied(event: &Value) -> bool {
+    if event.get("tool_name").and_then(Value::as_str) != Some("Bash") { return false; }
+    let Some(command) = event.pointer("/tool_input/command").and_then(Value::as_str) else { return false };
+    segments(&without_heredoc_bodies(command)).iter().any(|segment| {
+        let words = execution_words(segment);
+        let Some(program) = words.first() else { return false };
+        let program = program.trim_matches(['\'', '"']).rsplit(['/', '\\']).next().unwrap_or(program).to_ascii_lowercase();
+        program.ends_with(".exe")
+            || (segment.contains("19339") && matches!(program.as_str(), "curl" | "wget" | "nc" | "ncat" | "socat"))
+    })
+}
+
+fn is_adhoc_tmp_js(path: &str) -> bool {
+    let clean = path.trim_matches(['\'', '"', ';', ')', ',']);
+    clean.contains("test/tmp/")
+        && [".mjs", ".js", ".cjs", ".ts"].iter().any(|ext| clean.ends_with(ext))
+}
+
+fn verifier_adhoc_cdp_denied(event: &Value) -> bool {
+    match event.get("tool_name").and_then(Value::as_str) {
+        Some("Write" | "Edit") => event
+            .pointer("/tool_input/file_path")
+            .and_then(Value::as_str)
+            .is_some_and(is_adhoc_tmp_js),
+        Some("Bash") => event
+            .pointer("/tool_input/command")
+            .and_then(Value::as_str)
+            .is_some_and(|cmd| {
+                let head = without_heredoc_bodies(cmd);
+                cmd.contains("openStagehand")
+                    || head.split_whitespace().any(|w| {
+                        let w = w.trim_start_matches(['>', '<']);
+                        is_adhoc_tmp_js(w)
+                    })
+            }),
+        _ => false,
+    }
+}
 
 fn project_for_script(path: &Path) -> Option<PathBuf> {
     let relative = path.strip_prefix(EXTENSIONS).ok()?;
@@ -444,10 +532,48 @@ fn grist_ui_probe(event: &Value) -> bool {
     })
 }
 
+const LOG_BEFORE_CHANGES_REASON: &str = "과거 작업·원인 조사 시 원본 기록(.ai/logs·.ai/dispatch 로그·n8n DB·Grist 동작 이력·docker logs·에이전트 세션 기록)을 뒤지기 전에 먼저 관련 프로젝트 .ai/changes 날짜별 기록(rg -n <키워드> <프로젝트>/.ai/changes/<yymmdd>.*.md 또는 grist task-show)부터 대조하세요.";
+
+/// 261114 #949: 햇반 공모전 조사에서 changes 기록은 보지 않고 n8n DB·Grist 이력·docker 로그·Codex 세션만 뒤졌다.
+/// `.ai/logs`뿐 아니라 이 원본 기록 전부를 changes 선행 대조 대상으로 본다.
+const RAW_HISTORY_MARKERS: [&str; 9] = [".ai/logs/", ".ai/dispatch/", "n8n/data/database.sqlite", "_gristsys_actionhistory",
+    "docker logs", ".codex/sessions", ".claude/projects/", "n8neventlog", "execution_data"];
+
+/// A changes record counts as read only when a tool call actually opened it (Bash command or Read path),
+/// not when `.ai/changes` merely appears in git status or prose.
+fn transcript_read_changes(transcript: &str) -> bool {
+    ["\"command\":\"", "\"file_path\":\"", "\"CommandLine\":\"", "\"Path\":\""].iter().any(|key| {
+        transcript.match_indices(key).any(|(start, _)| {
+            let rest = &transcript[start + key.len()..];
+            let end = rest.find("\",\"").or_else(|| rest.find("\"}")).unwrap_or(rest.len().min(600));
+            let value = &rest[..end.min(rest.len())];
+            value.contains(".ai/changes/") || value.contains("grist task-show") || value.contains("bin/grist task-show")
+        })
+    })
+}
+
+fn log_before_changes_denial(event: &Value) -> bool {
+    let text = match event.get("tool_name").and_then(Value::as_str) {
+        Some("Read") => event.pointer("/tool_input/file_path").and_then(Value::as_str),
+        Some("Bash") => event.pointer("/tool_input/command").and_then(Value::as_str),
+        _ => None,
+    };
+    let Some(text) = text else { return false };
+    let bodyless = without_heredoc_bodies(text);
+    let lower = bodyless.to_ascii_lowercase();
+    let raw = RAW_HISTORY_MARKERS.iter().any(|marker| lower.contains(&marker.to_ascii_lowercase()))
+        && !lower.contains("memory/");
+    if !raw || bodyless.contains(".ai/changes") || bodyless.contains("task-show") { return false; }
+    let tp = event.get("transcript_path").and_then(Value::as_str).unwrap_or("");
+    !std::fs::read_to_string(tp).ok().is_some_and(|t| transcript_read_changes(&t))
+}
+
 fn role_denial(event: &Value, role: Option<&str>) -> Option<&'static str> {
     if let Some(reason) = pre_worker_denial(event) { return Some(reason); }
     if source_read_denied(event, role) { return Some(SOURCE_READ_REASON); }
     if matches!(role, None | Some("verifier")) && grist_ui_probe(event) { return Some(GRIST_UI_PROBE_REASON); }
+    if role == Some("verifier") && verifier_adhoc_cdp_denied(event) { return Some(VERIFIER_SCRIPT_REASON); }
+    if role == Some("verifier") && verifier_windows_shell_denied(event) { return Some(VERIFIER_WINDOWS_SHELL_REASON); }
     if role_exempt(role) { return None; }
     if role == Some("worker") { return browser_work(event).then_some(WORKER_BROWSER_REASON); }
     if role == Some("improver") { return None; }
@@ -463,6 +589,7 @@ fn role_denial(event: &Value, role: Option<&str>) -> Option<&'static str> {
         }
     }
     main_heavy_work(event).then_some(MAIN_HEAVY_REASON)
+        .or_else(|| (role.is_none() && log_before_changes_denial(event)).then_some(LOG_BEFORE_CHANGES_REASON))
 }
 
 /// 따옴표 밖의 `; & | ( 줄바꿈`에서만 명령 구간을 나눈다.
@@ -550,6 +677,18 @@ fn row_closed(project: &Path, id: &str) -> bool {
     cached_row_closed(project, id)
 }
 
+/// Release versions belong after every active row has reached the submit gate.
+fn row_submitted(project: &Path, id: &str) -> bool {
+    let path = project.join(format!(".ai/gate/{id}.row"));
+    let read = || std::fs::read_to_string(&path).unwrap_or_default();
+    let mut state = read();
+    if !["H=검증", "H=확인", "H=완료"].iter().any(|stage| state.starts_with(stage)) {
+        refresh_row_cache(project, id);
+        state = read();
+    }
+    ["H=검증", "H=확인", "H=완료"].iter().any(|stage| state.starts_with(stage))
+}
+
 fn version_in_file(file: &Path) -> Option<String> {
     let content = std::fs::read_to_string(file).ok()?;
     content.lines().find_map(|line| {
@@ -581,6 +720,11 @@ fn version_bump_denial(event: &Value) -> Option<String> {
         // same shell. That creation does not consume the flow's release bump.
         if !file.is_file() { continue; }
         let Some(project) = owning_project(&file) else { continue };
+        let unsubmitted: Vec<String> = flow_rows(&project).into_iter()
+            .filter(|id| !row_submitted(&project, id)).collect();
+        if !unsubmitted.is_empty() {
+            return Some(format!("{} 버전 변경은 작업 행 #{}의 task-submit 후에 하세요. 먼저 모든 행을 $H=검증으로 제출하세요.", file.display(), unsubmitted.join(",#")));
+        }
         let relative = file.strip_prefix(&project).unwrap_or(&file).to_string_lossy().replace('/', "_");
         let state = project.join(format!(".ai/gate/version-flow-{relative}"));
         let version = version_in_file(&file).unwrap_or_default();
@@ -608,9 +752,7 @@ fn version_bump_denial(event: &Value) -> Option<String> {
 
 const IMAGE_LIMIT: usize = 2;
 const SOURCE_SLICE_LIMIT: usize = 2;
-const VERIFIER_CDP_LIMIT: usize = 4;
 const SOURCE_SLICE_REASON: &str = "위임자는 같은 제품 소스 파일을 20줄씩 쪼개 3번 이상 연속 탐색하지 않습니다. 진입점 함수 확인이 끝났으면 내부 구현 탐색은 대행자(dispatch-agent)에게 맡기세요.";
-const VERIFIER_CDP_REASON: &str = "검증자는 짧은 CDP 원라이너를 반복 재접속(실행당 4회 초과)하지 않습니다. 한 openStagehand 세션 안에서 page.waitForSelector로 렌더링을 기다리고 클릭·DOM·iframe 확인을 한 번에 마친 뒤 close() 하세요.";
 
 /// 메인 세션의 이미지 Read를 세션당 IMAGE_LIMIT장까지만 허용한다.
 fn image_read_denied(event: &Value, state_dir: &Path) -> bool {
@@ -651,23 +793,6 @@ fn source_slice_denied(event: &Value, state_dir: &Path) -> bool {
     seen.insert(key);
     let _ = std::fs::create_dir_all(state_dir);
     let _ = std::fs::write(&state, serde_json::to_vec(&seen).unwrap_or_default());
-    false
-}
-
-/// 검증자(T26_ROLE=verifier)가 같은 검증 세션에서 openStagehand 원라이너를 VERIFIER_CDP_LIMIT회 넘게 반복 실행하면 거부한다.
-fn verifier_cdp_reconnect_denied(event: &Value, state_dir: &Path) -> bool {
-    if event.get("tool_name").and_then(Value::as_str) != Some("Bash") { return false; }
-    let Some(cmd) = event.pointer("/tool_input/command").and_then(Value::as_str) else { return false };
-    let opens_session = cmd.contains("openStagehand")
-        || (cmd.contains("stagehand.mjs") && execution_words(cmd).contains(&"open"));
-    if !opens_session { return false; }
-    let Some(session) = event.get("session_id").and_then(Value::as_str) else { return false };
-    if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return false; }
-    let state = state_dir.join(format!("verifier-cdp-{session}.json"));
-    let count: usize = std::fs::read(&state).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(0);
-    if count >= VERIFIER_CDP_LIMIT { return true; }
-    let _ = std::fs::create_dir_all(state_dir);
-    let _ = std::fs::write(&state, serde_json::to_vec(&(count + 1)).unwrap_or_default());
     false
 }
 
@@ -857,81 +982,23 @@ fn last_turn_prompt_and_replied(transcript: &str) -> Option<(String, bool)> {
     last_prompt.map(|p| (p, replied))
 }
 
-fn is_stop_or_kill_demand(prompt: &str) -> bool {
-    const RESUME_PATTERNS: [&str; 6] = [
-        "계속", "이어서", "재개", "실수로 정지", "실수로 중지", "실수로 중단",
-    ];
-    if RESUME_PATTERNS.iter().any(|k| prompt.contains(k)) {
-        return false;
-    }
-    const STOP_PATTERNS: [&str; 7] = [
-        "중지", "중단", "정지", "바로 쳐닫", "kill로 쳐닫", "쳐닫으라",
-        "기다리고 자빠졌",
-    ];
-    STOP_PATTERNS.iter().any(|k| prompt.contains(k))
-}
-
-fn kill_running_dispatch_agents() {
-    if let Ok(panes) = std::process::Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{pane_id}\t#{@dispatch-agent}"])
-        .output()
-    {
-        for line in String::from_utf8_lossy(&panes.stdout).lines() {
-            if let Some((pane_id, tag)) = line.split_once('\t') {
-                if !pane_id.trim().is_empty() && !tag.trim().is_empty() {
-                    let _ = std::process::Command::new("tmux").args(["kill-pane", "-t", pane_id.trim()]).output();
-                }
-            }
-        }
-    }
-    if let Ok(windows) = std::process::Command::new("tmux")
-        .args(["list-windows", "-a", "-F", "#{window_id}\t#{window_name}"])
-        .output()
-    {
-        for line in String::from_utf8_lossy(&windows.stdout).lines() {
-            if let Some((win_id, name)) = line.split_once('\t') {
-                if !win_id.trim().is_empty() && (name.starts_with("dispatch-") || name.starts_with("starting-")) {
-                    let _ = std::process::Command::new("tmux").args(["kill-window", "-t", win_id.trim()]).output();
-                }
-            }
-        }
-    }
-    let _ = std::process::Command::new("pkill").args(["-f", "\\.ai/dispatch/.*\\.sh"]).output();
-    let _ = std::process::Command::new("pkill").args(["-f", "ai/scripts/bin/dispatch-agent"]).output();
-    let _ = std::process::Command::new("pkill").args(["-f", "ai/scripts/bin/win-smoke"]).output();
-    let _ = std::process::Command::new("pkill").args(["-f", "/Blender [^/]*/blender\\.exe"]).output();
-}
-
-fn is_process_complaint(prompt: &str) -> bool {
-    const COMPLAINT_PATTERNS: [&str; 16] = [
-        "시간이 오래", "오래 걸", "오래 처걸", "왜 진행", "어디까지", "뭐하고 있",
-        "몇년을", "몇년 걸", "쳐걸려", "처걸려", "비교분석하라고", "언제 끝나", "언제 끝", "안 끝나", "다 됐", "끝났",
-    ];
-    COMPLAINT_PATTERNS.iter().any(|k| prompt.contains(k)) || is_stop_or_kill_demand(prompt)
-}
-
-fn fix_without_explanation(prompt: &str) -> bool {
-    let no_explanation = ["설명하지", "설명 말", "설명 그만", "이유설명", "설명은 필요", "문제가 뭔지는 나도"]
-        .iter().any(|word| prompt.contains(word));
-    let fix_first = ["먼저", "우선", "바로"].iter().any(|word| prompt.contains(word))
-        && ["고쳐", "고치", "수정", "바꾸"].iter().any(|word| prompt.contains(word));
-    no_explanation && fix_first
-}
-
-fn is_pure_status_question(prompt: &str) -> bool {
-    if is_process_correction(prompt) { return false; }
-    const FIX_DEMANDS: [&str; 15] = ["바꾸라고", "쳐바꾸라고", "바꿔", "수정", "고쳐", "고치", "넣어", "삭제", "아무행동을 안", "작업을 쳐하지", "개선", "개선자", "불러", "처불러", "지키라고"];
-    const PROCESS_ERRORS: [&str; 10] = ["재위임", "다시 위임", "중복 위임", "반복 출력", "검증 정체", "조기 종료", "잘못 종료", "이미 확인한", "이미 검증한", "과정 오류"];
-    if PROCESS_ERRORS.iter().any(|word| prompt.contains(word)) { return false; }
-    let why_question = (prompt.contains('왜') || prompt.contains("이유가 뭐")) && prompt.trim_end().ends_with('?');
-    is_stop_or_kill_demand(prompt) || ((is_process_complaint(prompt) || why_question) && !FIX_DEMANDS.iter().any(|k| prompt.contains(k)))
+fn intervention_confirmed_at(state: &Path, root: &Path, session: &str, prior: &[String]) -> bool {
+    let safe: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+    let rows: Vec<String> = std::fs::read_to_string(state.join("session_rows").join(format!("{safe}.json")))
+        .ok().and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+        .unwrap_or_default().iter().map(|v| v.to_string().trim_matches('"').to_string()).collect();
+    let projects: serde_json::Map<String, Value> = std::fs::read_to_string(state.join("session_projects").join(format!("{safe}.json")))
+        .ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let open = flow_rows(root);
+    rows.iter().any(|id| !prior.contains(id) && projects.get(id).and_then(Value::as_str) == Some("/home/tree/extensions") && !open.contains(id))
 }
 
 fn process_correction_denial(event: &Value) -> Option<String> {
     let transcript = std::fs::read_to_string(event.get("transcript_path")?.as_str()?).ok()?;
     let (prompt, _) = last_turn_prompt_and_replied(&transcript)?;
     let session = event.get("session_id").and_then(Value::as_str).unwrap_or("unknown");
-    if !process_turn(session, &prompt).process { return None; }
+    let turn = decision(session, &prompt);
+    if !turn.process || intervention_confirmed_at(&prompt_decision::decision_state_dir(), Path::new("/home/tree/extensions"), session, &turn.prior_rows) { return None; }
     let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let cwd = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or("/home/tree/extensions"));
     let product_path = |path: &str| {
@@ -940,9 +1007,15 @@ fn process_correction_denial(event: &Value) -> Option<String> {
         let path = path.trim_matches(['\'', '"', ';', ',', '(', ')', '|']);
         if path.is_empty() || path.starts_with('~') || path.starts_with('$') { return false; }
         let resolved = if Path::new(path).is_absolute() { normalize(Path::new(path)) } else { normalize(&cwd.join(path)) };
+        // A relative word that names nothing on disk (a sed script `s/=.*/x/`, a URL `localhost:11434/api/tags`)
+        // is not a product path; only existing files and folders are.
+        if !Path::new(path).is_absolute() && !resolved.exists() { return false; }
         resolved.to_str().and_then(|path| path.strip_prefix("/home/tree/extensions/"))
             .and_then(|rest| rest.split_once('/'))
-            .is_some_and(|(project, _)| !project.starts_with('.') && project != "test"
+            .is_some_and(|(project, rel)| !project.starts_with('.') && project != "test"
+                // manage_decision and manage_improve are workflow tools, not products
+                && project != "manage_decision" && project != "manage_improve"
+                && rel != ".ai" && !rel.starts_with(".ai/")
                 // a search pattern like `codex/hooks/` is not a product path; only real project folders are
                 && Path::new("/home/tree/extensions").join(project).is_dir())
     };
@@ -957,20 +1030,37 @@ fn process_correction_denial(event: &Value) -> Option<String> {
             || (command_head.split(['|', ';', '&', '\n']).filter_map(|segment| segment.split_whitespace().next()).any(|word| {
                 let word = word.trim_matches(['\'', '"', ';', '(']);
                 word == "dispatch-agent" || word.ends_with("/bin/dispatch-agent")
-            }) && !command_head.contains("--role improver"))
+            }) && !command_head.contains("--role improver") && !command_head.contains("--agent codex"))
     } else { false };
     product_call.then(|| "현재 요청은 작업 과정 수정이에요(manage-intervention). 제품 파일 탐색·제품 행 재개를 멈추고 과정 수정·개선자 호출과 훅 검증을 마친 뒤 [⏸] 원래 행으로 복귀하세요.".into())
 }
 
 fn ai_write_before_intervention_row(event: &Value) -> Option<String> {
-    ai_write_before_intervention_row_at(event, &process_turn_state::process_state_dir())
+    ai_write_before_intervention_row_at(event, &prompt_decision::decision_state_dir())
+}
+
+fn ai_write_before_root_row(event: &Value) -> Option<String> {
+    ai_write_before_root_row_at(event, &prompt_decision::decision_state_dir())
+}
+
+fn ai_write_before_root_row_at(event: &Value, state: &Path) -> Option<String> {
+    if !writes_ai(event) { return None; }
+    let session = event.get("session_id").and_then(Value::as_str)?;
+    let safe_session: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+    let rows: Vec<String> = std::fs::read_to_string(state.join("session_rows").join(format!("{safe_session}.json")))
+        .ok().and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok())
+        .unwrap_or_default().iter().map(|v| v.to_string().trim_matches('"').to_string()).collect();
+    let projects: serde_json::Map<String, Value> = std::fs::read_to_string(state.join("session_projects").join(format!("{safe_session}.json")))
+        .ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    if rows.iter().any(|id| projects.get(id).and_then(Value::as_str) == Some("/home/tree/extensions")) { return None; }
+    Some("작업관리기 행을 기록하기 전에는 ~/ai를 수정할 수 없어요. /home/tree/extensions에 grist request-record → task-add로 이번 세션의 Table26 행을 만든 뒤 다시 실행하세요.".into())
 }
 
 fn ai_write_before_intervention_row_at(event: &Value, state: &Path) -> Option<String> {
     let transcript = std::fs::read_to_string(event.get("transcript_path")?.as_str()?).ok()?;
     let (prompt, _) = last_turn_prompt_and_replied(&transcript)?;
     let session = event.get("session_id").and_then(Value::as_str)?;
-    let turn = process_turn_state::process_turn_at(state, session, &prompt);
+    let turn = prompt_decision::decision_at(state, session, &prompt);
     if !turn.process || !writes_ai(event) { return None; }
     let safe_session: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
     let rows: Vec<String> = std::fs::read_to_string(state.join("session_rows").join(format!("{safe_session}.json")))
@@ -983,11 +1073,104 @@ fn ai_write_before_intervention_row_at(event: &Value, state: &Path) -> Option<St
     Some("개입 수정 전에 이번 세션의 작업관리기 행이 필요해요(manage-intervention §2). ~/ai 쓰기를 멈추고 /home/tree/extensions에 grist request-record → task-add로 개입 행을 만든 뒤 다시 실행하세요.".into())
 }
 
+/// 메인은 작업 도구(~/ai/scripts src·Skill scripts·~/.config/fish/functions·hooks)에 새 기능을 직접 구현하지 않는다:
+/// 새 파일이나 30줄 이상 추가는 Codex 위임이고, 결함 수정(작은 패치)만 직접 고친다.
+const MAIN_TOOL_FEATURE_REASON: &str = "메인은 작업 도구(~/ai/scripts·Skill scripts·~/.config/fish/functions·hooks)의 새 기능 구현(새 파일·30줄 이상 추가)을 직접 쓰지 않습니다. 계획을 ~/plan.md에 쓰고 dispatch-agent --agent codex로 맡기세요. 기존 도구의 결함 수정(10줄 미만 패치)만 직접 고칩니다.";
+const MAIN_TOOL_FEATURE_LINES: usize = 30;
+
+fn tool_source_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
+    let raw = raw.trim_matches(['\'', '"', ',', ';', '(', ')']);
+    if raw.is_empty() || raw.starts_with('$') { return None; }
+    let expanded = raw.strip_prefix('~').map(|rest| format!("/home/tree{rest}")).unwrap_or_else(|| raw.to_string());
+    let path = Path::new(&expanded);
+    let resolved = normalize(&if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) });
+    let text = resolved.to_str()?;
+    if text.ends_with(".md") { return None; }
+    let tool = (text.starts_with("/home/tree/ai/scripts/") && text.contains("/src/"))
+        || text.starts_with("/home/tree/ai/scripts/") && text.ends_with(".rs")
+        || (text.starts_with("/home/tree/ai/skills/") && text.contains("/scripts/"))
+        || text.starts_with("/home/tree/.config/fish/functions/")
+        || text.starts_with("/home/tree/ai/codex/hooks");
+    tool.then_some(resolved)
+}
+
+fn main_tool_feature_denial(event: &Value) -> Option<&'static str> {
+    let cwd = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or("/"));
+    let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
+    let lines = |s: &str| s.lines().count();
+    let file_lines = |path: &Path| std::fs::read_to_string(path).map(|s| lines(&s)).unwrap_or(0);
+    let added = match tool {
+        "Write" => {
+            let path = tool_source_path(event.pointer("/tool_input/file_path")?.as_str()?, cwd)?;
+            let content = event.pointer("/tool_input/content").and_then(Value::as_str).unwrap_or("");
+            if path.exists() { lines(content).saturating_sub(file_lines(&path)) } else { usize::MAX }
+        }
+        "Edit" => {
+            let path = tool_source_path(event.pointer("/tool_input/file_path")?.as_str()?, cwd)?;
+            if !path.exists() { return Some(MAIN_TOOL_FEATURE_REASON); }
+            let new = event.pointer("/tool_input/new_string").and_then(Value::as_str).unwrap_or("");
+            let old = event.pointer("/tool_input/old_string").and_then(Value::as_str).unwrap_or("");
+            lines(new).saturating_sub(lines(old))
+        }
+        "MultiEdit" => {
+            let path = tool_source_path(event.pointer("/tool_input/file_path")?.as_str()?, cwd)?;
+            if !path.exists() { return Some(MAIN_TOOL_FEATURE_REASON); }
+            event.pointer("/tool_input/edits").and_then(Value::as_array).map(|edits| edits.iter().map(|edit| {
+                lines(edit.get("new_string").and_then(Value::as_str).unwrap_or(""))
+                    .saturating_sub(lines(edit.get("old_string").and_then(Value::as_str).unwrap_or("")))
+            }).sum()).unwrap_or(0)
+        }
+        "Bash" => {
+            let command = event.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("");
+            if command.contains("*** Begin Patch") {
+                let mut path = None;
+                let mut additions = 0;
+                for line in command.lines() {
+                    if let Some(raw) = line.strip_prefix("*** Add File: ") {
+                        path = tool_source_path(raw, cwd);
+                        if path.is_some() { return Some(MAIN_TOOL_FEATURE_REASON); }
+                    } else if let Some(raw) = line.strip_prefix("*** Update File: ") {
+                        path = tool_source_path(raw, cwd);
+                    } else if line.starts_with("*** ") {
+                        if additions >= MAIN_TOOL_FEATURE_LINES { return Some(MAIN_TOOL_FEATURE_REASON); }
+                        additions = 0;
+                    } else if path.is_some() && line.starts_with('+') && !line.starts_with("+++") {
+                        additions += 1;
+                    }
+                }
+                if additions >= MAIN_TOOL_FEATURE_LINES { return Some(MAIN_TOOL_FEATURE_REASON); }
+            }
+            let head = without_heredoc_bodies(command);
+            let body_lines = lines(command).saturating_sub(head.lines().filter(|line| !line.is_empty()).count());
+            let words: Vec<&str> = head.split_whitespace().collect();
+            let mut target = None;
+            for (index, word) in words.iter().enumerate() {
+                let candidate = match *word {
+                    ">" | ">>" => words.get(index + 1).copied(),
+                    "tee" => words[index + 1..].iter().find(|w| !w.starts_with('-')).copied(),
+                    w if w.starts_with('>') => Some(w.trim_start_matches('>')),
+                    _ => None,
+                };
+                if let Some(path) = candidate.and_then(|c| tool_source_path(c, cwd)) { target = Some(path); break; }
+            }
+            let path = target?;
+            if path.exists() { body_lines } else { usize::MAX }
+        }
+        _ => return None,
+    };
+    (added >= MAIN_TOOL_FEATURE_LINES).then_some(MAIN_TOOL_FEATURE_REASON)
+}
+
 fn writes_ai(event: &Value) -> bool {
     let cwd = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or("/"));
     let ai_path = |raw: &str, base: &Path| {
+        let double_quoted_home = raw.starts_with('"');
         let raw = raw.trim_matches(['\'', '"', ',', ';']);
-        let expanded = raw.strip_prefix('~').map(|rest| format!("/home/tree{rest}")).unwrap_or_else(|| raw.to_string());
+        let expanded = if double_quoted_home && raw.starts_with("$HOME/") {
+            format!("{}{rest}", std::env::var("HOME").unwrap_or_else(|_| "/home/tree".into()), rest = &raw[5..])
+        } else {
+            raw.strip_prefix('~').map(|rest| format!("/home/tree{rest}")).unwrap_or_else(|| raw.to_string())
+        };
         let path = Path::new(&expanded);
         let resolved = normalize(&if path.is_absolute() { path.to_path_buf() } else { base.join(path) });
         resolved.starts_with("/home/tree/ai")
@@ -1014,7 +1197,17 @@ fn writes_ai(event: &Value) -> bool {
             }
             continue;
         }
-        for (idx, _) in segment.match_indices('>') {
+        let mut quote = None;
+        let mut escaped = false;
+        for (idx, ch) in segment.char_indices() {
+            if escaped { escaped = false; continue; }
+            if ch == '\\' && quote != Some('\'') { escaped = true; continue; }
+            if let Some(delimiter) = quote {
+                if ch == delimiter { quote = None; }
+                continue;
+            }
+            if ch == '\'' || ch == '"' { quote = Some(ch); continue; }
+            if ch != '>' { continue; }
             let target = segment[idx + 1..].trim_start_matches(['>', '|', '&']).trim_start().split_whitespace().next().unwrap_or("");
             if ai_path(target, &active) { return true; }
         }
@@ -1069,7 +1262,11 @@ fn deferred_only_tokens(prompt: &str) -> BTreeSet<String> {
     let (deferred, current) = if let Some((at, len)) = future {
         let tail = &prompt[at + len..];
         let end = tail.find("먼저").or_else(|| tail.find(['.', '\n', '。'])).unwrap_or(tail.len());
-        (&tail[..end], &tail[end..])
+        let clause = &tail[..end];
+        if (clause.contains("할때") || clause.contains("할 때")) && !tail.contains("먼저") {
+            return BTreeSet::new();
+        }
+        (clause, &tail[end..])
     } else if let Some(end) = prompt.find("하기 이전에").or_else(|| prompt.find("하기 전에 먼저")) {
         (&prompt[..end], &prompt[end..])
     } else {
@@ -1125,66 +1322,210 @@ fn deferred_grist_denial(event: &Value) -> Option<String> {
     None
 }
 
-fn is_first_prompt(transcript: &str) -> bool {
-    transcript.lines().filter(|line| last_turn_prompt_and_replied(line).is_some()).count() <= 1
-}
-
-fn is_read_only_call(tool: &str, event: &Value) -> bool {
-    match tool {
-        "Read" | "Grep" | "Glob" => true,
-        "Bash" => {
-            let cmd = event.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("");
-            ![">", "dispatch-agent", "task-add", "request-record", "task-confirm", "task-update", "task-complete", "flow-wait", "cargo", "win-smoke", "rm ", "mv ", "cp ", "sed -i", "perl -pi", "perl -0pi", "git commit", "git push"]
-                .iter().any(|k| cmd.replace("2>/dev/null", "").contains(k))
-        }
-        _ => false,
+fn work_in_progress(state: &Path, session: &str, project: &Path) -> bool {
+    let safe_session: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect();
+    let session_rows: Vec<String> = std::fs::read_to_string(state.join("session_rows").join(format!("{safe_session}.json")))
+        .ok().and_then(|s| serde_json::from_str::<Vec<Value>>(&s).ok()).unwrap_or_default()
+        .iter().map(|v| v.to_string().trim_matches('"').to_string()).collect();
+    let projects: serde_json::Map<String, Value> = std::fs::read_to_string(state.join("session_projects").join(format!("{safe_session}.json")))
+        .ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    let mut paths = vec![project.to_path_buf()];
+    for path in projects.values().filter_map(Value::as_str).map(PathBuf::from) {
+        if !paths.contains(&path) { paths.push(path); }
     }
+    paths.iter().any(|path| {
+        let open = flow_rows(path);
+        if session_rows.iter().any(|id| open.contains(id)
+            && projects.get(id).and_then(Value::as_str).is_none_or(|owner| Path::new(owner) == path)) { return true; }
+        std::fs::read_dir(path.join(".ai/dispatch")).ok().is_some_and(|entries| entries.flatten().any(|entry| {
+            let path = entry.path();
+            path.extension().is_some_and(|ext| ext == "sh") && !path.with_extension("exit").exists()
+                && path.with_extension("log").metadata().and_then(|m| m.modified()).ok()
+                    .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+                    .is_some_and(|age| age <= std::time::Duration::from_secs(3600))
+        }))
+    })
 }
 
-fn status_question_denial(event: &Value, _state_dir: &Path) -> Option<String> {
+fn status_question_denial(event: &Value, state_dir: &Path) -> Option<String> {
     let tp = event.get("transcript_path").and_then(Value::as_str).unwrap_or("");
     if tp.is_empty() { return None; }
     let text = std::fs::read_to_string(tp).ok()?;
     let (prompt, replied) = last_turn_prompt_and_replied(&text)?;
-    let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("");
-    if is_stop_or_kill_demand(&prompt) {
-        kill_running_dispatch_agents();
-    }
-    if tool == "Bash" {
-        let cmd = event.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("");
-        if is_process_complaint(&prompt) && cmd.contains("dispatch-agent") && cmd.contains("--attach") {
-            return Some("사용자가 지연·불필요한 과정을 지적했어요. 기존 위임에 dispatch-agent --attach(계속 대기)를 걸지 말고 바로 답하세요.".into());
+    let session = event.get("session_id").and_then(Value::as_str).unwrap_or("unknown");
+    let project = Path::new(event.get("cwd").and_then(Value::as_str).unwrap_or(EXTENSIONS));
+    ( !replied && decision_at(state_dir, session, &prompt).label == Some(Label::Question)
+        && work_in_progress(state_dir, session, project))
+        .then(|| "작업 과정 중 질문이 들어왔어요. 먼저 질문에 답하세요. 답변 전 도구 호출은 차단됐어요.".into())
+}
+
+fn n8n_write_command(command: &str) -> bool {
+    segments(&without_heredoc_bodies(command)).iter().any(|segment| {
+        let words = execution_words(segment);
+        let lower = segment.to_ascii_lowercase();
+        let program = words.first().map(|word| word.rsplit('/').next().unwrap_or(word)).unwrap_or("");
+        let n8n_cli = program == "n8n" || (program == "docker" && words.get(1) == Some(&"exec")
+            && words.iter().skip(3).any(|word| *word == "n8n" || word.ends_with("/n8n")));
+        if lower.contains("import:workflow") || lower.contains("update:workflow") {
+            return n8n_cli;
         }
-    }
-    if !replied && is_stop_or_kill_demand(&prompt) {
-        return Some("실행 중이던 백그라운드 에이전트·프로세스는 훅이 즉시 강제 정지시켰어요. 정지 명령이나 다른 도구를 호출하지 말고 지금 바로 텍스트로만 대답하세요.".into());
-    }
-    if fix_without_explanation(&prompt) { return None; }
-    if !replied && is_process_complaint(&prompt) && tool == "Bash"
-        && event.pointer("/tool_input/command").and_then(Value::as_str).is_some_and(|cmd| cmd.contains("win-smoke")) {
-        return Some("사용자의 과정 지적에 먼저 답하세요. 답변 전 win-smoke 재실행은 차단됐어요.".into());
-    }
-    if replied || !is_pure_status_question(&prompt) { return None; }
-    // a fresh session has no delayed work yet, so its first question may read code to answer
-    if is_first_prompt(&text) && is_read_only_call(tool, event) { return None; }
-    if matches!(tool, "Edit" | "Read") {
-        return Some("사용자가 진행 지연·현황 이유를 물었어요. 파일 읽기·수정으로 응답을 미루지 말고 먼저 현황·이유부터 바로 답하세요.".into());
-    }
-    if tool == "Bash" {
-        let cmd = event.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("").trim();
-        let allowed_status_read = (cmd.contains("grist gate") || cmd.contains("grist task ") || cmd.contains("grist task-show"))
-            && !["dispatch-agent", "task-add", "request-record", "task-confirm", "flow-wait", "task-hidden", "task-complete", "task-update", "cargo", "rg ", "tmux", "stat ", "ls "].iter().any(|k| cmd.contains(k));
-        if !allowed_status_read {
-            return Some("사용자가 진행 지연·현황 이유를 물었어요. 위임·마감·빌드·탐색으로 응답을 미루지 말고(단일 grist 상태 조회 외 도구 호출 금지) 먼저 이유부터 답하세요.".into());
+        if matches!(program, "curl" | "wget") {
+            let method = ["post", "put", "patch", "delete"].iter().any(|method| {
+                lower.contains(&format!("-x {method}")) || lower.contains(&format!("-x{method}"))
+                    || lower.contains(&format!("--request {method}")) || lower.contains(&format!("--request={method}"))
+                    || lower.contains(&format!("--method {method}")) || lower.contains(&format!("--method={method}"))
+            }) || lower.contains("--post-data") || lower.contains("--post-file") || lower.contains("--data") || lower.contains("-d ");
+            // Webhook calls (/webhook/…) run a workflow; only workflow definition endpoints change it.
+            return method && (lower.contains("/rest/workflows") || lower.contains("/api/v1/workflows"));
         }
+        program == "sqlite3" && lower.contains("database.sqlite")
+            && ["insert", "update", "delete", "replace"].iter().any(|verb| {
+                lower.contains(&format!(" {verb} ")) || lower.contains(&format!("\"{verb} "))
+                    || lower.contains(&format!("'{verb} "))
+            })
+    })
+}
+
+/// 261114 #948: 에이전트가 Grist 데이터 행(공모전 등)을 API로 지울 때도 열린 행과 당일 백업을 요구한다.
+/// 작업관리 표(Table26) 정리는 grist 명령의 자체 기록 흐름이라 대상에서 뺀다.
+fn grist_data_delete_command(command: &str) -> bool {
+    segments(&without_heredoc_bodies(command)).iter().any(|segment| {
+        let words = execution_words(segment);
+        let lower = segment.to_ascii_lowercase();
+        let program = words.first().map(|word| word.rsplit('/').next().unwrap_or(word)).unwrap_or("");
+        if program == "grist" && words.get(1) == Some(&"delete") {
+            return words.get(2).is_some_and(|table| *table != "Table26");
+        }
+        if matches!(program, "curl" | "wget") && lower.contains("/api/docs/") && !lower.contains("/tables/table26/") {
+            let delete = lower.contains("-x delete") || lower.contains("--request delete") || lower.contains("--request=delete");
+            let post_delete = lower.contains("/records/delete");
+            let apply_remove = lower.contains("/apply") && lower.contains("removerecord");
+            return delete || post_delete || apply_remove;
+        }
+        false
+    })
+}
+
+#[cfg(test)]
+mod grist_delete_tests {
+    #[test]
+    fn grist_data_delete_commands_are_detected_but_task_rows_and_reads_are_not() {
+        assert!(super::grist_data_delete_command("~/ai/scripts/bin/grist delete Table7 --id 1405"));
+        assert!(super::grist_data_delete_command("curl -s -X POST http://localhost:8484/api/docs/au1/tables/Table7/records/delete -d '[1405]'"));
+        assert!(super::grist_data_delete_command("curl -s -X POST http://localhost:8484/api/docs/au1/apply -d '[[\"BulkRemoveRecord\",\"Table7\",[1405]]]'"));
+        assert!(!super::grist_data_delete_command("~/ai/scripts/bin/grist delete Table26 --id 690 --project ."));
+        assert!(!super::grist_data_delete_command("~/ai/scripts/bin/grist get Table7 --fields C"));
+        assert!(!super::grist_data_delete_command("curl -s http://localhost:8484/api/docs/au1/tables/Table7/records"));
+    }
+}
+
+fn n8n_kst_date(unix_seconds: i64) -> String {
+    let days = (unix_seconds + 9 * 3600).div_euclid(86400);
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 { year += 1; }
+    format!("{:02}{month:02}{day:02}", year.rem_euclid(100))
+}
+
+fn n8n_denial_at(event: &Value, state: &Path, backup_dir: &Path, unix_seconds: i64) -> Option<String> {
+    if event.get("tool_name").and_then(Value::as_str) != Some("Bash") { return None; }
+    let command = event.pointer("/tool_input/command").and_then(Value::as_str)?;
+    let grist_delete = grist_data_delete_command(command);
+    if !n8n_write_command(command) && !grist_delete { return None; }
+    let session = event.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let safe: String = session.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' }).collect();
+    let rows: Vec<Value> = std::fs::read_to_string(state.join("session_rows").join(format!("{safe}.json")))
+        .ok().and_then(|body| serde_json::from_str(&body).ok()).unwrap_or_default();
+    let projects: serde_json::Map<String, Value> = std::fs::read_to_string(state.join("session_projects").join(format!("{safe}.json")))
+        .ok().and_then(|body| serde_json::from_str(&body).ok()).unwrap_or_default();
+    let active = rows.iter().rev().find_map(|value| {
+        let id = value.as_str().map(str::to_owned).or_else(|| value.as_i64().map(|n| n.to_string()))?;
+        let project = PathBuf::from(projects.get(&id)?.as_str()?);
+        let cached = project.join(format!(".ai/gate/{id}.row"));
+        refresh_row_cache(&project, &id);
+        let row = std::fs::read_to_string(cached).unwrap_or_default();
+        ["H=작업", "H=교정", "H=진단", "H=검증"].iter().any(|stage| row.starts_with(stage)).then_some((id, project))
+    });
+    let Some((id, project)) = active else {
+        if grist_delete {
+            return Some("Grist 데이터 행 삭제는 이 세션에 $H=작업·교정·진단·검증인 열린 행이 있어야 해요. 먼저 grist task-ready로 행을 여세요.".into());
+        }
+        return Some("n8n 워크플로 쓰기는 이 세션에 $H=작업·교정·진단·검증(배포)인 열린 행이 있어야 해요. 먼저 grist task-ready로 행을 여세요.".into());
+    };
+    let today = n8n_kst_date(unix_seconds);
+    if grist_delete {
+        let grist_backup = std::fs::read_dir(backup_dir).ok().into_iter().flatten().filter_map(Result::ok).any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            entry.path().is_file() && name.starts_with(&format!("{today}-grist-")) && name.ends_with(".json")
+        });
+        if !grist_backup {
+            return Some(format!("Grist 행 삭제 전에 오늘(KST) 대상 테이블 백업이 필요해요. ~/ai/scripts/bin/grist get <Table> > {}/{today}-grist-<Table>.json", backup_dir.display()));
+        }
+        return None;
+    }
+    let backup = std::fs::read_dir(backup_dir).ok().into_iter().flatten().filter_map(Result::ok).any(|entry| {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        entry.path().is_file() && name.starts_with(&format!("{today}-")) && name.ends_with(".json")
+    });
+    if !backup {
+        return Some(format!("n8n 쓰기 전에 오늘(KST) 워크플로 export 백업이 필요해요. n8n export:workflow --id=<workflowId> --output={}/{today}-<workflowId>.json", backup_dir.display()));
+    }
+    let marker = project.join(format!(".ai/gate/{id}.n8n"));
+    if let Err(error) = std::fs::write(&marker, format!("{today}\n")) {
+        return Some(format!("n8n 검증 표식 {} 생성 실패: {error}", marker.display()));
     }
     None
+}
+
+fn stop_command(command: &str) -> bool {
+    segments(&without_heredoc_bodies(command)).iter().any(|segment| {
+        let words = execution_words(segment);
+        let Some(first) = words.first() else { return false };
+        let exe = first.rsplit('/').next().unwrap_or(first);
+        if ["kill", "pkill", "killall"].contains(&exe) { return true; }
+        if exe != "tmux" { return false; }
+        words.iter().any(|word| ["kill-pane", "kill-window", "kill-session"].contains(word))
+            || (words.iter().any(|word| *word == "send-keys")
+                && words.iter().any(|word| *word == "C-c" || *word == "SIGINT"))
+    })
+}
+
+fn mark_external_stop(event: &Value) {
+    if event.get("tool_name").and_then(Value::as_str) != Some("Bash") { return; }
+    let Some(command) = event.pointer("/tool_input/command").and_then(Value::as_str) else { return };
+    if !stop_command(command) { return; }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    let binary = PathBuf::from(home).join("ai/scripts/bin/cli_watch_blackbox");
+    if !binary.is_file() { return; }
+    let actor = event.get("session_id").and_then(Value::as_str).unwrap_or("");
+    let _ = Command::new(binary).args(["mark", "--cause", "other_session", "--actor", actor, "--detail", command])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
 }
 
 fn run() -> Result<(), String> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input).map_err(|e| e.to_string())?;
     let event: Value = normalize_codex_event(serde_json::from_str(&input).map_err(|e| e.to_string())?);
+    let state = prompt_decision::decision_state_dir();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?.as_secs() as i64;
+    if let Some(reason) = n8n_denial_at(&event, &state, Path::new("/mnt/d/n8n/backup"), now) {
+        println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
+        return Ok(());
+    }
+    if let Some(reason) = hidden_cdp_denial(&event, std::env::var("T26_ROLE").ok().as_deref()) {
+        println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
+        return Ok(());
+    }
     if claude_agent_denied(&event) {
         println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"토큰 절감: 메인은 Claude 서브에이전트를 부르지 않습니다. 조사·구현은 dispatch-agent --agent codex로 맡기세요."}}));
         return Ok(());
@@ -1204,13 +1545,12 @@ fn run() -> Result<(), String> {
         }
         return Ok(());
     }
-    if std::env::var("T26_ROLE").ok().as_deref() == Some("verifier") {
-        if verifier_cdp_reconnect_denied(&event, &state_dir) {
-            println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":VERIFIER_CDP_REASON}}));
-        }
+    if std::env::var("T26_ROLE").ok().as_deref() == Some("verifier") { return Ok(()); }
+    if std::env::var("T26_ROLE").ok().as_deref() == Some("worker") { return Ok(()); }
+    if let Some(reason) = main_tool_feature_denial(&event) {
+        println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
         return Ok(());
     }
-    if std::env::var("T26_ROLE").ok().as_deref() == Some("worker") { return Ok(()); }
     if let Some(reason) = sibling_grist_creation_denial(&event) {
         println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
         return Ok(());
@@ -1223,11 +1563,15 @@ fn run() -> Result<(), String> {
         println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":format!("생성본은 직접 수정할 수 없습니다. 원본 {source}을 고친 뒤 agent-rules sync를 실행하세요.")}}));
         return Ok(());
     }
-    if let Some(reason) = status_question_denial(&event, &state_dir) {
+    if let Some(reason) = status_question_denial(&event, &prompt_decision::decision_state_dir()) {
         println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
         return Ok(());
     }
     if let Some(reason) = ai_write_before_intervention_row(&event) {
+        println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
+        return Ok(());
+    }
+    if let Some(reason) = ai_write_before_root_row(&event) {
         println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}));
         return Ok(());
     }
@@ -1250,6 +1594,7 @@ fn run() -> Result<(), String> {
     if target(&event).is_some() {
         println!("{}", json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"코드 구현은 대행자(dispatch-agent)가 합니다. 메인은 규칙·Skill 문서만 직접 고칩니다."}}));
     }
+    mark_external_stop(&event);
     Ok(())
 }
 
@@ -1260,6 +1605,97 @@ fn main() {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn question_blocks_tools_only_during_active_work() {
+        let dir = std::path::PathBuf::from("/home/tree/extensions/test/tmp").join(format!("meg-question-{}", std::process::id()));
+        let state = dir.join("state");
+        let project = dir.join("project");
+        std::fs::create_dir_all(state.join("session_rows")).unwrap();
+        std::fs::create_dir_all(project.join(".ai/changes")).unwrap();
+        std::fs::write(state.join("session_rows/s.json"), "[23,45,67]").unwrap();
+        std::fs::write(project.join(".ai/changes/261114.task.md"), "# 작업\n- [⌨️] 진행 (#45)\n").unwrap();
+        let transcript = dir.join("transcript.jsonl");
+        let prompt = "진행 상황을 알려줘";
+        let write_prompt = |reply: bool| std::fs::write(&transcript,
+            format!("{}{}", serde_json::json!({"type":"USER_INPUT","content":prompt}),
+                if reply { "\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"진행 중이에요.\"}\n" } else { "\n" })).unwrap();
+        write_prompt(false);
+        let event = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"rg -n foo src"},"session_id":"s","cwd":project,"transcript_path":transcript});
+        for (index, label) in [Some(super::Label::Question), Some(super::Label::Improvement), Some(super::Label::Feature), Some(super::Label::Resolution), None].into_iter().enumerate() {
+            let prompt = format!("case-{index}");
+            std::fs::write(&transcript, format!("{}\n", serde_json::json!({"type":"USER_INPUT","content":prompt}))).unwrap();
+            super::prompt_decision::decision_with(&state, "s", &prompt, |_| label);
+            assert_eq!(super::status_question_denial(&event, &state).is_some(), label == Some(super::Label::Question));
+        }
+        super::prompt_decision::decision_with(&state, "s", prompt, |_| Some(super::Label::Question));
+        write_prompt(false);
+        assert!(super::status_question_denial(&event, &state).unwrap().contains("먼저 질문에 답하세요"));
+        write_prompt(true);
+        assert!(super::status_question_denial(&event, &state).is_none());
+        std::fs::write(project.join(".ai/changes/261114.task.md"), "# 작업\n").unwrap();
+        write_prompt(false);
+        assert!(super::status_question_denial(&event, &state).is_none());
+        eprintln!("[verify-step] range-check start=23 mid=45 end=67");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn ai_write_redirects_ignore_quoted_operators_but_check_quoted_targets() {
+        let event = |command: &str| serde_json::json!({
+            "tool_name": "Bash",
+            "cwd": "/home/tree/ai/scripts",
+            "session_id": "meg-write-redirect-regression",
+            "tool_input": {"command": command},
+        });
+        let empty_state = std::env::temp_dir().join("meg-write-redirect-regression-no-rows");
+        for command in [
+            "ls -la --time-style=long-iso /home/tree/.codex/sessions/2026/11/13 | awk 'NR>3{print $7}' | cut -c1-2",
+            "rg -n \"fn own_changes\" -A 70 task-complete/src/main.rs | rg -n \"free|> |cargo\" | head -40",
+            "rg -n 'a>b' main-edit-gate/src/main.rs",
+        ] {
+            assert!(!super::writes_ai(&event(command)), "allowed: {command}");
+            assert!(super::ai_write_before_root_row_at(&event(command), &empty_state).is_none(), "allowed: {command}");
+        }
+        for command in [
+            "echo x > ~/ai/x",
+            "printf a > \"$HOME/ai/x\"",
+            "sed -i 's/a/b/' ~/ai/rules/Agents.md",
+        ] {
+            assert!(super::writes_ai(&event(command)), "denied: {command}");
+            let reason = super::ai_write_before_root_row_at(&event(command), &empty_state).expect("PreToolUse deny reason");
+            assert!(reason.contains("~/ai를 수정할 수 없어요"), "denied: {command}");
+        }
+        println!("[verify-step] range-check start=3 mid=7 end=12");
+    }
+
+    #[test]
+    fn blackbox_query_is_allowed_and_external_stop_commands_are_recognized() {
+        for command in ["kill -INT 303", "pkill -f codex", "killall codex", "tmux kill-pane -t %305", "tmux kill-window -t 308", "tmux kill-session -t work", "tmux send-keys -t %311 C-c"] {
+            assert!(super::stop_command(command), "{command}");
+        }
+        for command in ["echo kill -INT 303", "tmux list-panes", "rg -n 'kill' src"] {
+            assert!(!super::stop_command(command), "{command}");
+        }
+        println!("[verify-step] range-check start=303 mid=308 end=311");
+    }
+    #[test]
+    fn ai_write_requires_session_root_row_before_first_change() {
+        let state = std::env::temp_dir().join(format!("meg-root-row-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        std::fs::create_dir_all(state.join("session_rows")).unwrap();
+        std::fs::create_dir_all(state.join("session_projects")).unwrap();
+        let event = |tool: &str, path: &str| serde_json::json!({"tool_name":tool,"cwd":"/home/tree/extensions","session_id":"s2","tool_input": if tool == "Bash" { serde_json::json!({"command":path}) } else { serde_json::json!({"file_path":path}) }});
+        let write = event("Edit", "/home/tree/ai/scripts/main-edit-gate/src/main.rs");
+        assert!(super::ai_write_before_root_row_at(&write, &state).unwrap().contains("request-record → task-add"));
+        assert!(super::ai_write_before_root_row_at(&event("Bash", "rg -n foo ~/ai/scripts/main-edit-gate/src/main.rs"), &state).is_none());
+        std::fs::write(state.join("session_rows/s2.json"), "[853]").unwrap();
+        std::fs::write(state.join("session_projects/s2.json"), "{\"853\":\"/home/tree/extensions/grist_video_maker\"}").unwrap();
+        assert!(super::ai_write_before_root_row_at(&write, &state).is_some());
+        std::fs::write(state.join("session_rows/s2.json"), "[853,881]").unwrap();
+        std::fs::write(state.join("session_projects/s2.json"), "{\"853\":\"/home/tree/extensions/grist_video_maker\",\"881\":\"/home/tree/extensions\"}").unwrap();
+        assert!(super::ai_write_before_root_row_at(&write, &state).is_none());
+        let _ = std::fs::remove_dir_all(state);
+    }
+
+    #[test]
     fn intervention_ai_write_requires_new_root_row() {
         let state = std::env::temp_dir().join(format!("meg-intervention-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&state);
@@ -1269,6 +1705,7 @@ mod tests {
         std::fs::write(&transcript, "{\"type\":\"USER_INPUT\",\"content\":\"작업 과정 오류를 수정해\"}\n").unwrap();
         std::fs::write(state.join("session_rows/s1.json"), "[860]").unwrap();
         std::fs::write(state.join("session_projects/s1.json"), "{\"860\":\"/home/tree/extensions\"}").unwrap();
+        super::prompt_decision::decision_with(&state, "s1", "작업 과정 오류를 수정해", |_| Some(super::Label::Improvement));
         let event = |tool: &str, command: &str| serde_json::json!({"tool_name":tool,"cwd":"/home/tree/extensions","session_id":"s1","transcript_path":transcript,"tool_input": if tool == "Bash" { serde_json::json!({"command":command}) } else { serde_json::json!({"file_path":command}) }});
         assert!(super::ai_write_before_intervention_row_at(&event("Bash", "rg -n foo ~/ai/scripts/main-edit-gate/src/main.rs"), &state).is_none());
         assert!(super::ai_write_before_intervention_row_at(&event("Edit", "/home/tree/ai/scripts/main-edit-gate/src/main.rs"), &state).unwrap().contains("request-record → task-add"));
@@ -1284,16 +1721,6 @@ mod tests {
         std::fs::remove_dir_all(state).unwrap();
     }
 
-    #[test]
-    fn complaints_do_not_kill_or_block_fix_work() {
-        for prompt in ["왜 개선자를 안 부르고 냅두지?", "토큰낭비는 쳐하면서 왜 규칙은 안 따르냐", "불필요한 개선 작업 왜 쳐하고 있나?", "실수로 정지시켰으니까 계속 작업해"] {
-            assert!(!super::is_stop_or_kill_demand(prompt));
-            assert!(!super::is_pure_status_question(prompt));
-        }
-        for prompt in ["중지", "중단", "정지", "바로 쳐닫", "kill로 쳐닫", "쳐닫으라", "기다리고 자빠졌"] {
-            assert!(super::is_stop_or_kill_demand(prompt));
-        }
-    }
 
     #[test]
     fn process_correction_allows_fix_and_blocks_product_reentry() {
@@ -1302,27 +1729,34 @@ mod tests {
         std::env::set_var("TASK_COMPLETE_STATE_DIR", &dir);
         let transcript = dir.join("transcript.jsonl");
         std::fs::write(&transcript, "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>과정 오류를 왜 수정하지 않았어?</USER_REQUEST>\"}\n").unwrap();
+        super::prompt_decision::decision_with(&dir, "unknown", "과정 오류를 왜 수정하지 않았어?", |_| Some(super::Label::Improvement));
         let event = |command: &str| serde_json::json!({"tool_name":"Bash","tool_input":{"command":command},"transcript_path":transcript});
-        assert!(!super::is_pure_status_question("과정 오류를 왜 수정하지 않았어?"));
         assert!(super::process_correction_denial(&event("rg -n foo /home/tree/ai/scripts/task-complete/src/main.rs")).is_none());
         assert!(super::process_correction_denial(&event("rg -n foo /home/tree/ai/scripts/dispatch-agent/src/main.rs")).is_none());
         assert!(super::process_correction_denial(&event("dispatch-agent --role improver --row 860")).is_none());
         assert!(super::process_correction_denial(&event("/home/tree/ai/scripts/bin/task-complete --hook <<'JSON'\n{\"cwd\":\"/home/tree/extensions\",\"message\":\"제품 작업을 재개하지 않았어요\"}\nJSON")).is_none());
-        assert!(super::process_correction_denial(&event("python3 - <<'PY'\ntext = '/home/tree/extensions/web_save_current_page/src/main.ts'\nPY")).is_none());
-        assert!(super::process_correction_denial(&event("python3 - <<'PY'\nprint('ok')\nPY\nrg -n foo /home/tree/extensions/web_save_current_page/src/main.ts")).unwrap().contains("manage-intervention"));
+        assert!(super::process_correction_denial(&event("python3 - <<'PY'\ntext = '/home/tree/extensions/grist_mindmap/src/main.js'\nPY")).is_none());
+        assert!(super::process_correction_denial(&event("python3 - <<'PY'\nprint('ok')\nPY\nrg -n foo /home/tree/extensions/grist_mindmap/src/main.js")).unwrap().contains("manage-intervention"));
         let ai_diff = super::normalize_codex_event(serde_json::json!({"tool_name":"exec_command","tool_input":{"cmd":"git diff -- scripts/dispatch-agent/src/main.rs","workdir":"/home/tree/ai"},"cwd":"/home/tree/extensions","transcript_path":transcript}));
         assert!(super::process_correction_denial(&ai_diff).is_none());
         assert!(super::process_correction_denial(&event("ls -la ~/x/hooks 2>/dev/null | head -3")).is_none());
         assert!(super::process_correction_denial(&event("rg -n x ~/y.json 2>/dev/null >/tmp/out")).is_none());
         assert!(super::process_correction_denial(&event("cargo build --release -p dispatch-agent 2>&1 | tail -n1")).is_none());
         assert!(super::process_correction_denial(&event("rg -n \"codex/hooks/|join\" ~/ai/scripts/agent-rules/src")).is_none());
-        assert!(super::process_correction_denial(&event("rg -n foo /home/tree/extensions/web_save_current_page/src/main.ts")).unwrap().contains("manage-intervention"));
-        assert!(super::process_correction_denial(&event("rg -n foo web_save_current_page/src/main.ts")).is_some());
+        assert!(super::process_correction_denial(&event("rg -n foo /home/tree/extensions/obsidian_daily_manager/.ai/changes")).is_none());
+        assert!(super::process_correction_denial(&event("rg -n foo /home/tree/extensions/grist_mindmap/src/main.js")).unwrap().contains("manage-intervention"));
+        println!("[verify-step] range-check start=2 mid=5 end=9");
+        assert!(super::process_correction_denial(&event("rg -n foo grist_video_maker/AGENTS.md")).is_some());
+        // relative words that name nothing on disk are not product paths (sed script, URL, tool path from a product cwd)
+        assert!(super::process_correction_denial(&event("rg -no '^[A-Z_]*MODEL' ~/ai/x.env | sed 's/=.*/=x/'")).is_none());
+        assert!(super::process_correction_denial(&event("curl -s localhost:11434/api/tags | head -c 600")).is_none());
+        assert!(super::process_correction_denial(&event("rg -n fn scripts/dispatch-agent/src/main.rs")).is_none());
         assert!(super::process_correction_denial(&event("dispatch-agent --role verifier --row 853")).is_some());
         // the spaced-out wording is the same turn kind; task-complete reads the state this call wrote
         std::fs::write(&transcript, "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>~/Report.md를 보고 작업과정의 문제를 개선해</USER_REQUEST>\"}\n").unwrap();
-        assert!(super::process_correction_denial(&event("rg -n foo web_save_current_page/src/main.ts")).is_some());
-        assert!(std::fs::read_to_string(dir.join("process_turn/unknown")).unwrap().lines().nth(1) == Some("1"));
+        super::prompt_decision::decision_with(&dir, "unknown", "~/Report.md를 보고 작업과정의 문제를 개선해", |_| Some(super::Label::Improvement));
+        assert!(super::process_correction_denial(&event("rg -n foo grist_video_maker/AGENTS.md")).is_some());
+        assert!(std::fs::read_to_string(dir.join("process_turn/unknown")).unwrap().lines().nth(1) == Some("개선"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1385,13 +1819,14 @@ mod tests {
 
     #[test]
     fn second_version_bump_in_open_flow_is_denied() {
-        let project = Path::new(EXTENSIONS).join(format!("blender_scene_creator/test/tmp/zz_meg_test_{}", std::process::id()));
+        let project = Path::new(EXTENSIONS).join(format!("win_key_fixer/test/tmp/zz_meg_test_{}", std::process::id()));
         std::fs::create_dir_all(project.join(".ai/changes")).unwrap();
         std::fs::create_dir_all(project.join(".ai/gate")).unwrap();
         std::fs::write(project.join("AGENTS.md"), "").unwrap();
         std::fs::write(project.join(".ai/changes/261107.a.md"), "# 작업\n1. [🌍] x (#9001)\n\n# 완료\n").unwrap();
         std::fs::write(project.join("package.json"), "{\n  \"version\": \"0.3.6\"\n}").unwrap();
         std::fs::write(project.join("Cargo.toml"), "[package]\nversion = \"0.3.7\"\n").unwrap();
+        std::fs::write(project.join(".ai/gate/9001.row"), "H=검증 | I=").unwrap();
         let bash = |command: &str| json!({"tool_name":"Bash","cwd":project.to_string_lossy(),"tool_input":{"command":command}});
         let bump = "sed -i '4s/\"0.3.6\"/\"0.3.7\"/' package.json";
         assert!(version_bump_denial(&bash(bump)).is_none(), "first bump allowed");
@@ -1402,6 +1837,7 @@ mod tests {
         std::fs::write(project.join(".ai/gate/9001.row"), "H=확인 | I=").unwrap();
         assert!(version_bump_denial(&bash(bump)).is_none(), "bump allowed after flow rows confirmed");
         std::fs::write(project.join(".ai/changes/261107.a.md"), "# 작업\n1. [🌍] x (#9001)\n2. [🌍] y (#9002)\n").unwrap();
+        std::fs::write(project.join(".ai/gate/9002.row"), "H=검증 | I=").unwrap();
         std::fs::write(project.join(".ai/gate/version-flow-Cargo.toml"), "9003").unwrap();
         let both = "sed -i '4s/0.3.7/0.3.8/' package.json; sed -i '3s/0.3.7/0.3.8/' Cargo.toml";
         assert!(version_bump_denial(&bash(both)).is_some(), "denied on the second file");
@@ -1411,8 +1847,10 @@ mod tests {
 
     #[test]
     fn scaffolded_first_version_does_not_consume_release_bump() {
-        let project = Path::new(EXTENSIONS).join(format!("blender_scene_creator/test/tmp/zz_meg_scaffold_{}", std::process::id()));
+        let project = Path::new(EXTENSIONS).join(format!("win_key_fixer/test/tmp/zz_meg_scaffold_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
         std::fs::create_dir_all(project.join(".ai/changes")).unwrap();
+        std::fs::create_dir_all(project.join(".ai/gate")).unwrap();
         std::fs::write(project.join("AGENTS.md"), "").unwrap();
         std::fs::write(project.join(".ai/changes/261110.a.md"), "# 작업\n1. [🌍] x (#9001)\n").unwrap();
         let event = |command: &str| json!({"tool_name":"Bash","cwd":project.to_string_lossy(),"tool_input":{"command":command}});
@@ -1420,9 +1858,28 @@ mod tests {
         assert!(version_bump_denial(&event(command)).is_none());
         assert!(!project.join(".ai/gate/version-flow-Cargo.toml").exists());
         std::fs::write(project.join("Cargo.toml"), "[package]\nversion = \"0.0.1\"\n").unwrap();
+        std::fs::write(project.join(".ai/gate/9001.row"), "H=검증 | I=").unwrap();
         assert!(version_bump_denial(&event(command)).is_none());
         std::fs::write(project.join("Cargo.toml"), "[package]\nversion = \"0.0.2\"\n").unwrap();
         assert!(version_bump_denial(&event(command)).is_some());
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn version_bump_waits_for_every_row_submit() {
+        let project = Path::new(EXTENSIONS).join(format!("win_key_fixer/test/tmp/zz_meg_stage_{}", std::process::id()));
+        std::fs::create_dir_all(project.join(".ai/changes")).unwrap();
+        std::fs::create_dir_all(project.join(".ai/gate")).unwrap();
+        std::fs::write(project.join("AGENTS.md"), "").unwrap();
+        std::fs::write(project.join(".ai/changes/261113.a.md"), "# 작업\n1. x (#9001)\n2. y (#9002)\n").unwrap();
+        std::fs::write(project.join(".ai/gate/9001.row"), "H=검증 | I=").unwrap();
+        std::fs::write(project.join(".ai/gate/9002.row"), "H=작업 | I=").unwrap();
+        std::fs::write(project.join("Cargo.toml"), "[package]\nversion = \"0.0.5\"\n").unwrap();
+        let event = json!({"tool_name":"Bash","cwd":project.to_string_lossy(),"tool_input":{"command":"sed -i 's/0.0.5/0.0.6/' Cargo.toml"}});
+        assert!(version_bump_denial(&event).unwrap().contains("#9002"));
+        assert!(!project.join(".ai/gate/version-flow-Cargo.toml").exists());
+        std::fs::write(project.join(".ai/gate/9002.row"), "H=검증 | I=").unwrap();
+        assert!(version_bump_denial(&event).is_none());
         std::fs::remove_dir_all(project).unwrap();
     }
 
@@ -1615,6 +2072,9 @@ mod tests {
         assert!(!main_heavy_work(&json!({"tool_name":"Bash","tool_input":{"command":"npm test"}})));
         assert!(!main_heavy_work(&json!({"tool_name":"Bash","tool_input":{"command":"agent-rules replace --new '메인은 run_cdp·stagehand.mjs·.ai/dispatch/1.log를 하지 않는다'"}})));
         assert!(main_heavy_work(&json!({"tool_name":"Bash","tool_input":{"command":"cd x; T=1 run_cdp --url u"}})));
+        assert!(!main_heavy_work(&json!({"tool_name":"Read","tool_input":{"file_path":"/home/tree/.claude/projects/x/memory/MEMORY.md"}})));
+        assert!(!main_heavy_work(&json!({"tool_name":"Bash","tool_input":{"command":"docker ps --format '{{.Names}}' | cat"}})));
+        assert!(!main_heavy_work(&json!({"tool_name":"Bash","tool_input":{"command":"rg -n 'dispatch/929.log' /home/tree/.claude/projects/x/memory/MEMORY.md"}})));
     }
 
     #[test]
@@ -1663,7 +2123,14 @@ mod tests {
     }
 
     #[test]
-    fn source_slice_and_verifier_cdp_reconnect_limits_enforced() {
+    fn tilde_tool_paths_are_not_product_source_from_project_cwd() {
+        let cwd = Path::new("/home/tree/extensions/grist_video_maker");
+        assert!(!product_source("~/ai/skills/access-stagehand/scripts/stagehand.mjs", cwd));
+        assert!(product_source("src/grist.ts", cwd));
+    }
+
+    #[test]
+    fn source_slice_limit_enforced() {
         let dir = std::env::temp_dir().join(format!("meg-slice-cdp-{}", std::process::id()));
         let read = |file: &str, offset: u64| json!({"tool_name":"Read","cwd":EXTENSIONS,"session_id":"s1","tool_input":{"file_path":file,"offset":offset,"limit":20}});
         assert!(!source_slice_denied(&read("/home/tree/extensions/grist_video_maker/src/grist.ts", 1), &dir));
@@ -1672,11 +2139,6 @@ mod tests {
         assert!(source_slice_denied(&read("/home/tree/extensions/grist_video_maker/src/grist.ts", 41), &dir));
         assert!(!source_slice_denied(&read("/home/tree/extensions/grist_video_maker/src/App.tsx", 1), &dir));
 
-        let cdp = json!({"tool_name":"Bash","session_id":"v1","tool_input":{"command":"node -e 'import { openStagehand } from \"./stagehand.mjs\"; await openStagehand();'"}});
-        for _ in 0..VERIFIER_CDP_LIMIT {
-            assert!(!verifier_cdp_reconnect_denied(&cdp, &dir));
-        }
-        assert!(verifier_cdp_reconnect_denied(&cdp, &dir));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1810,83 +2272,10 @@ mod tests {
         assert!(target(&event("/home/tree/ai/scripts/main-edit-gate/src/main.rs")).is_none());
     }
 
-    #[test]
-    fn status_question_blocks_search_until_replied_and_allows_single_status_read() {
-        let dir = std::env::temp_dir().join(format!("meg-statusq-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let tp = dir.join("transcript.jsonl");
-        let earlier = "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n작업해\\n</USER_REQUEST>\"}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"진행 중이에요.\"}\n";
-        std::fs::write(&tp, earlier.to_string() + "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n뭐가 이렇게 시간이 오래 처걸리고 있지?\\n</USER_REQUEST>\"}\n").unwrap();
-        let tp_str = tp.to_string_lossy().into_owned();
-        let dispatch = json!({"tool_name":"Bash","tool_input":{"command":"~/ai/scripts/bin/dispatch-agent --agent codex --row 1"},"session_id":"sq1","transcript_path":tp_str});
-        assert!(super::status_question_denial(&dispatch, &dir).unwrap().contains("먼저 이유부터"));
-        let rg = json!({"tool_name":"Bash","tool_input":{"command":"rg -n foo src"},"session_id":"sq1","transcript_path":tp_str});
-        assert!(super::status_question_denial(&rg, &dir).is_some());
-        let status = json!({"tool_name":"Bash","tool_input":{"command":"~/ai/scripts/bin/grist task 843 --project /home/tree/extensions/blender_camera_control"},"session_id":"sq1","transcript_path":tp_str});
-        assert!(super::status_question_denial(&status, &dir).is_none());
-        std::fs::write(&tp, "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n뭐가 이렇게 시간이 오래 처걸리고 있지?\\n</USER_REQUEST>\"}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"이유는 다음과 같아요.\"}\n").unwrap();
-        assert!(super::status_question_denial(&dispatch, &dir).is_none());
-        assert!(super::status_question_denial(&rg, &dir).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
-    #[test]
-    fn first_question_of_session_allows_read_only_tools() {
-        let dir = std::env::temp_dir().join(format!("meg-first-q-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let tp = dir.join("transcript.jsonl");
-        std::fs::write(&tp, "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n설정메뉴에 grist table을 설정하는 메뉴는 왜있지?\\n</USER_REQUEST>\"}\n").unwrap();
-        let tp_str = tp.to_string_lossy().into_owned();
-        let call = |tool: &str, input: serde_json::Value| json!({"tool_name":tool,"tool_input":input,"transcript_path":tp_str});
-        assert!(super::status_question_denial(&call("Bash", json!({"command":"rg -n -i table . 2>/dev/null | head"})), &dir).is_none());
-        assert!(super::status_question_denial(&call("Read", json!({"file_path":"/home/tree/extensions/web_save_current_page/options.js"})), &dir).is_none());
-        assert!(super::status_question_denial(&call("Bash", json!({"command":"dispatch-agent --agent codex --row 1"})), &dir).is_some());
-        assert!(super::status_question_denial(&call("Bash", json!({"command":"echo x > a.txt"})), &dir).is_some());
-        assert!(super::status_question_denial(&call("Edit", json!({"file_path":"a.js"})), &dir).is_some());
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
-    #[test]
-    fn explicit_fix_first_without_explanation_allows_tools() {
-        let dir = std::env::temp_dir().join(format!("meg-fix-first-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let transcript = dir.join("transcript.jsonl");
-        let prompt = "왜 아직 안 고쳤어? 이유설명은 그만하고 먼저 고쳐";
-        std::fs::write(&transcript, format!("{{\"type\":\"USER_INPUT\",\"content\":\"{prompt}\"}}\n")).unwrap();
-        let event = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"rg -n foo src"},"transcript_path":transcript});
-        assert!(super::fix_without_explanation(prompt));
-        assert!(super::status_question_denial(&event, &dir).is_none());
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
-    #[test]
-    fn question_pointing_out_process_error_allows_fix_tools() {
-        let dir = std::env::temp_dir().join(format!("meg-process-question-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let transcript = dir.join("transcript.jsonl");
-        let prompt = "이미 검증한 로컬 CLI 훅을 왜 재위임했어?";
-        std::fs::write(&transcript, format!("{{\"type\":\"USER_INPUT\",\"content\":\"{prompt}\"}}\n")).unwrap();
-        let event = serde_json::json!({"tool_name":"Bash","tool_input":{"command":"rg -n foo src"},"transcript_path":transcript});
-        assert!(!super::is_pure_status_question(prompt));
-        assert!(super::status_question_denial(&event, &dir).is_none());
-        let _ = std::fs::remove_dir_all(dir);
-    }
 
-    #[test]
-    fn process_complaint_blocks_win_smoke_until_replied() {
-        let dir = std::env::temp_dir().join(format!("meg-win-smoke-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let tp = dir.join("transcript.jsonl");
-        let command = json!({"tool_name":"Bash","tool_input":{"command":"~/ai/scripts/bin/win-smoke --project p --script s.py"},"transcript_path":tp});
-        for prompt in ["몇년을 기다려야 해?", "몇년 걸리는 거야?", "왜 쳐걸려?", "왜 처걸려?", "비교분석하라고 한 적 없어. 왜 실행해?"] {
-            std::fs::write(&tp, format!("{{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n{prompt}\\n</USER_REQUEST>\"}}\n")).unwrap();
-            assert!(super::is_process_complaint(prompt));
-            assert!(super::status_question_denial(&command, &dir).unwrap().contains("win-smoke"));
-        }
-        std::fs::write(&tp, "{\"type\":\"USER_INPUT\",\"content\":\"<USER_REQUEST>\\n왜 쳐걸려?\\n</USER_REQUEST>\"}\n{\"type\":\"PLANNER_RESPONSE\",\"content\":\"원인을 설명했어요.\"}\n").unwrap();
-        assert!(super::status_question_denial(&command, &dir).is_none());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     #[test]
     fn off_project_search_denies_drives_browser_profiles_and_sibling_runtime() {
@@ -1898,7 +2287,7 @@ mod tests {
         assert!(super::off_project_search(&ev("ls -lt /mnt/d /mnt/e /mnt/h")));
         assert!(super::off_project_search(&ev("rg -n foo /mnt/h/code")));
         assert!(super::off_project_search(&ev("rg -n foo /mnt/h/code/side_prompt_gallery/download-contract.js")));
-        assert!(super::off_project_search(&ev("rg -n foo /home/tree/extensions/.ai/changes/")));
+        assert!(!super::off_project_search(&ev("rg -n foo /home/tree/extensions/.ai/changes/")));
         assert!(super::off_project_search(&ev("ls -lt /mnt/c/Users/tende/Downloads")));
         assert!(super::off_project_search(&ev("rg -o path '/mnt/c/Users/tende/AppData/Local/Google/Chrome/User Data/Default/Preferences'")));
         assert!(!super::off_project_search(&ev("rg -n foo /home/tree/extensions/web_prompt_runner/.ai/changes/")));
@@ -1906,7 +2295,190 @@ mod tests {
         let rejected = ev("rg -n 'matches|content_scripts|version|action' /mnt/h/code/save_current_page/manifest.json | head -n 20");
         let reason = super::pre_worker_denial(&rejected).unwrap();
         assert!(reason.contains("runtime :` 두 번째 경로"));
+        assert!(reason.contains("공용 Chromium 다운로드는 ~/Downloads"));
         assert!(reason.contains("run-cdp 흐름 검증을 계속"));
         assert!(super::pre_worker_denial(&ev("rg -n 'matches|content_scripts|version|action' /mnt/h/code/web_prompt_runner/manifest.json | head -n 20")).is_none());
+        assert_eq!(super::role_denial(&ev("rg -n err /home/tree/extensions/.ai/logs/api.log"), None), Some(super::LOG_BEFORE_CHANGES_REASON));
+        // 261114 #949: n8n DB·Grist 이력·docker logs·세션 기록도 changes 선행 대조 대상이다.
+        for raw in ["sqlite3 /mnt/d/n8n/data/database.sqlite 'select 1'", "docker logs grist --since 2026-11-10", "rg -l 1405 /home/tree/.codex/sessions/2026/11/10", "sqlite3 doc.grist 'select body from _gristsys_ActionHistory'"] {
+            assert_eq!(super::role_denial(&ev(raw), None), Some(super::LOG_BEFORE_CHANGES_REASON), "{raw}");
+        }
+        assert_eq!(super::role_denial(&ev("rg -n 햇반 /home/tree/extensions/obsidian_daily_manager/.ai/changes/261110.a.md"), None), None);
+        let tp = std::env::temp_dir().join(format!("meg-changes-first-{}.jsonl", std::process::id()));
+        // git status·설명 속 글자만으로는 changes를 읽은 것으로 보지 않는다.
+        std::fs::write(&tp, "M ../.ai/changes/261110.공모마감일.md\n").unwrap();
+        let prose = json!({"tool_name":"Bash","tool_input":{"command":"rg -n err /home/tree/extensions/.ai/logs/api.log"},"transcript_path":tp.to_str().unwrap()});
+        assert_eq!(super::role_denial(&prose, None), Some(super::LOG_BEFORE_CHANGES_REASON));
+        std::fs::write(&tp, r#"{"type":"tool_use","input":{"command":"rg -n 햇반 /home/tree/extensions/.ai/changes/261110.공모마감일.md","description":"x"}}"#).unwrap();
+        let with_tp = json!({"tool_name":"Bash","tool_input":{"command":"rg -n err /home/tree/extensions/.ai/logs/api.log"},"transcript_path":tp.to_str().unwrap()});
+        assert_eq!(super::role_denial(&with_tp, None), None);
+        let _ = std::fs::remove_file(&tp);
+        println!("[verify-step] range-check start=2 mid=5 end=9");
+    }
+
+    #[test]
+    fn main_cannot_write_new_tool_feature_but_may_patch_small_defect() {
+        let big = (0..40).map(|i| format!("line{i}")).collect::<Vec<_>>().join("\n");
+        let ev = |tool: &str, input: Value| json!({"tool_name": tool, "cwd": "/home/tree/extensions", "tool_input": input});
+        assert!(super::main_tool_feature_denial(&ev("Write", json!({"file_path": "/home/tree/.config/fish/functions/zz_new_tool.fish", "content": "function x\nend"}))).is_some());
+        assert!(super::main_tool_feature_denial(&ev("Edit", json!({"file_path": "/home/tree/.config/fish/functions/zz_new_tool.fish", "old_string": "", "new_string": "function x\nend"}))).is_some());
+        assert!(super::main_tool_feature_denial(&ev("Bash", json!({"command": format!("cat > ~/ai/scripts/main-edit-gate/src/main.rs <<'EOF'\n{big}\nEOF")}))).is_some());
+        let patch = format!("apply_patch *** Begin Patch\n*** Update File: /home/tree/ai/scripts/main-edit-gate/src/main.rs\n@@\n{}\n*** End Patch", big.lines().map(|line| format!("+{line}")).collect::<Vec<_>>().join("\n"));
+        assert!(super::main_tool_feature_denial(&ev("Bash", json!({"command": patch}))).is_some());
+        assert!(super::main_tool_feature_denial(&ev("Edit", json!({"file_path": "/home/tree/ai/scripts/main-edit-gate/src/main.rs", "old_string": "a", "new_string": "a\nb\nc"}))).is_none());
+        assert!(super::main_tool_feature_denial(&ev("Write", json!({"file_path": "/home/tree/ai/skills/run-cdp/SKILL.md", "content": big}))).is_none());
+        assert!(super::main_tool_feature_denial(&ev("Bash", json!({"command": "sed -i 's/a/b/' ~/ai/scripts/main-edit-gate/src/main.rs"}))).is_none());
+        assert!(super::main_tool_feature_denial(&ev("Bash", json!({"command": "rg -n foo ~/ai/scripts/main-edit-gate/src/main.rs > /dev/null"}))).is_none());
+    }
+
+
+    #[test]
+    fn verifier_blocks_adhoc_tmp_cdp_scripts_and_open_stagehand_while_allowing_relay() {
+        let bash = |cmd: &str| json!({"tool_name":"Bash","tool_input":{"command":cmd}});
+        let write = |p: &str| json!({"tool_name":"Write","tool_input":{"file_path":p}});
+        assert_eq!(role_denial(&write("test/tmp/check.mjs"), Some("verifier")), Some(VERIFIER_SCRIPT_REASON));
+        assert_eq!(role_denial(&write("/home/tree/extensions/p/test/tmp/probe.js"), Some("verifier")), Some(VERIFIER_SCRIPT_REASON));
+        assert_eq!(role_denial(&bash("node test/tmp/check.mjs"), Some("verifier")), Some(VERIFIER_SCRIPT_REASON));
+        assert_eq!(role_denial(&bash("cat <<'EOF' > test/tmp/probe.mjs\nconsole.log(1)\nEOF"), Some("verifier")), Some(VERIFIER_SCRIPT_REASON));
+        assert_eq!(role_denial(&bash("node -e \"import('/home/tree/ai/skills/access-stagehand/scripts/stagehand.mjs').then(m => m.openStagehand())\""), Some("verifier")), Some(VERIFIER_SCRIPT_REASON));
+        assert_eq!(role_denial(&bash("node ~/ai/skills/access-stagehand/scripts/stagehand.mjs relay '{\"op\":\"read\",\"selector\":\"#k\"}'"), Some("verifier")), None);
+        assert_eq!(role_denial(&bash("node ~/ai/skills/access-stagehand/scripts/stagehand.mjs serve --detach"), Some("verifier")), None);
+        assert_eq!(role_denial(&write("test/tmp/evidence.png"), Some("verifier")), None);
+    }
+
+    #[test]
+    fn verifier_cannot_launch_windows_process_or_poll_webview_from_shell() {
+        let bash = |cwd: &str, cmd: &str| json!({"tool_name":"Bash","cwd":cwd,"tool_input":{"command":cmd}});
+        let project = "/home/tree/extensions/win_key_fixer";
+        for cmd in [
+            "/mnt/h/code/win_key_fixer/win_key_fixer.exe &",
+            "powershell.exe -NoProfile -Command Start-Process win_key_fixer.exe",
+            "curl http://127.0.0.1:19339/json",
+        ] {
+            assert_eq!(role_denial(&bash(project, cmd), Some("verifier")), Some(VERIFIER_WINDOWS_SHELL_REASON), "{cmd}");
+        }
+        for cmd in [
+            "rg -n '19339' .ai/docs/role-verifier.md",
+            "stat /mnt/h/code/win_key_fixer/win_key_fixer.exe",
+            "cargo test --manifest-path src-tauri/Cargo.toml",
+        ] {
+            assert_eq!(role_denial(&bash(project, cmd), Some("verifier")), None, "{cmd}");
+        }
+        assert_eq!(role_denial(&bash("/home/tree/extensions/other", "powershell.exe -Command Get-Date"), Some("verifier")), Some(VERIFIER_WINDOWS_SHELL_REASON));
+    }
+
+    #[test]
+    fn hidden_cdp_requires_an_observable_network_or_storage_goal() {
+        let event = |cmd: &str| json!({"tool_name":"Bash","cwd":"/home/tree/extensions/web_save_current_page","tool_input":{"command":cmd}});
+        let storage = event("node ~/ai/skills/access-stagehand/scripts/stagehand.mjs relay '{\"op\":\"storage\",\"keys\":[\"apiKey\"]}'");
+        let screen = event("node ~/ai/skills/access-stagehand/scripts/stagehand.mjs relay '{\"op\":\"read\",\"selector\":\"#saved\"}'");
+        assert!(super::hidden_cdp_call(&storage));
+        assert!(super::hidden_cdp_call(&event("node $R relay '{\"op\": \"storage\", \"keys\": [\"apiKey\"]}'")));
+        assert!(super::hidden_cdp_call(&event("run_cdp --replace")));
+        assert!(!super::hidden_cdp_call(&screen));
+        assert!(!super::hidden_cdp_call(&event("rg -n run-cdp SKILL.md")));
+        assert!(super::goal_needs_hidden_cdp("1. [수정] 설정 저장 클릭 ⇒ chrome.storage.local obsidianApiKey ▷ abc"));
+        assert!(super::goal_needs_hidden_cdp("3. [기능] 저장 클릭 ⇒ 확장 저장소 obsidianApiKey·gristApiKey ▷ 입력한 값"));
+        assert!(!super::goal_needs_hidden_cdp("1. [기능] 저장 클릭 ▷ 화면에 저장됨 표시"));
+        assert!(!super::goal_needs_hidden_cdp("2. [수정] 목표에 네트워크·스토리지 값이 없는 행의 run-cdp 호출 ▷ 거부"));
+    }
+
+
+    #[test]
+    fn intervention_confirmed_allows_product_resume_in_same_turn() {
+        println!("[verify-step] range-check start=2 mid=4 end=7");
+        let dir = std::env::temp_dir().join(format!("meg-int-resume-{}", std::process::id()));
+        let root = dir.join("ext");
+        std::fs::create_dir_all(dir.join("session_rows")).unwrap();
+        std::fs::create_dir_all(dir.join("session_projects")).unwrap();
+        std::fs::create_dir_all(root.join(".ai/changes")).unwrap();
+        std::fs::write(dir.join("session_rows/s1.json"), "[\"925\",\"928\"]").unwrap();
+        std::fs::write(dir.join("session_projects/s1.json"), "{\"925\":\"/home/tree/extensions\",\"928\":\"/home/tree/extensions\"}").unwrap();
+        std::fs::write(root.join(".ai/changes/261114.a.md"), "# 작업\n1. x (#928)\n# 완료\n1. y (#925)\n").unwrap();
+        assert!(!super::intervention_confirmed_at(&dir, &root, "s1", &["925".to_string()]));
+        std::fs::write(root.join(".ai/changes/261114.a.md"), "# 작업\n# 완료\n1. y (#925)\n2. x (#928)\n").unwrap();
+        assert!(super::intervention_confirmed_at(&dir, &root, "s1", &["925".to_string()]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn n8n_write_commands_cover_cli_rest_and_sql_without_blocking_reads() {
+        for command in [
+            "n8n import:workflow --input=/tmp/flow.json",
+            "docker exec n8n n8n update:workflow --id=7 --active=true",
+            "curl -X PUT http://localhost:5760/rest/workflows/7",
+            "curl --request=PATCH https://example.test/api/v1/workflows/7",
+            "wget --method DELETE http://localhost:5760/api/v1/workflows/7",
+            "curl --data '{}' http://localhost:5760/rest/workflows",
+            "sqlite3 /mnt/d/n8n/data/database.sqlite 'UPDATE workflow_entity SET name=\"x\" WHERE id=7;'",
+            "sqlite3 /mnt/d/n8n/data/database.sqlite 'INSERT INTO workflow_entity VALUES (7);'",
+            "sqlite3 /mnt/d/n8n/data/database.sqlite 'DELETE FROM workflow_entity WHERE id=7;'",
+            "sqlite3 /mnt/d/n8n/data/database.sqlite 'REPLACE INTO workflow_entity VALUES (7);'",
+        ] { assert!(super::n8n_write_command(command), "{command}"); }
+        for command in [
+            "n8n export:workflow --id=7 --output=/tmp/flow.json",
+            "curl -X GET http://localhost:5760/rest/workflows/7",
+            "sqlite3 /mnt/d/n8n/data/database.sqlite 'SELECT * FROM workflow_entity;'",
+            "rg -n 'n8n import:workflow' src/main.rs",
+        ] { assert!(!super::n8n_write_command(command), "{command}"); }
+        println!("[verify-step] range-check start=3 mid=7 end=12");
+    }
+
+    #[test]
+    fn n8n_requires_active_session_row_and_kst_dated_export_then_marks_project() {
+        use serde_json::json;
+        let dir = std::path::PathBuf::from("/home/tree/extensions/test/tmp")
+            .join(format!("n8n-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let state = dir.join("state");
+        let project = dir.join("project");
+        let backups = dir.join("backup");
+        std::fs::create_dir_all(state.join("session_rows")).unwrap();
+        std::fs::create_dir_all(state.join("session_projects")).unwrap();
+        std::fs::create_dir_all(project.join(".ai/gate")).unwrap();
+        std::fs::create_dir_all(&backups).unwrap();
+        let event = json!({"tool_name":"Bash","session_id":"n8n-test","tool_input":{"command":"n8n import:workflow --input=/tmp/flow.json"}});
+        let now = 1794582000;
+        let denied = super::n8n_denial_at(&event, &state, &backups, now).unwrap();
+        assert!(denied.contains("열린 행"));
+        std::fs::write(state.join("session_rows/n8n-test.json"), "[3,7,12]").unwrap();
+        std::fs::write(state.join("session_projects/n8n-test.json"), json!({"3":project,"7":project,"12":project}).to_string()).unwrap();
+        for (id, stage) in [(3,"H=확인"),(7,"H=검증"),(12,"H=교정")] {
+            std::fs::write(project.join(format!(".ai/gate/{id}.row")), stage).unwrap();
+        }
+        let denied = super::n8n_denial_at(&event, &state, &backups, now).unwrap();
+        assert!(denied.contains("n8n export:workflow --id=<workflowId>"));
+        assert!(!project.join(".ai/gate/12.n8n").exists());
+        std::fs::write(backups.join("261113-12.json"), "{}").unwrap();
+        assert!(super::n8n_denial_at(&event, &state, &backups, now).is_some());
+        std::fs::write(backups.join("261114-12.json"), "{}").unwrap();
+        assert!(super::n8n_denial_at(&event, &state, &backups, now).is_none());
+        assert_eq!(std::fs::read_to_string(project.join(".ai/gate/12.n8n")).unwrap(), "261114\n");
+        // 검증(배포) 단계 행도 메인의 n8n 배포를 허용한다.
+        std::fs::write(project.join(".ai/gate/12.row"), "H=확인").unwrap();
+        assert!(super::n8n_denial_at(&event, &state, &backups, now).is_none());
+        assert!(project.join(".ai/gate/7.n8n").exists());
+        std::fs::write(project.join(".ai/gate/7.row"), "H=확인").unwrap();
+        assert!(super::n8n_denial_at(&event, &state, &backups, now).unwrap().contains("열린 행"));
+        std::fs::remove_dir_all(dir).unwrap();
+        println!("[verify-step] range-check start=3 mid=7 end=12");
+    }
+
+    #[test]
+    fn n8n_webhook_post_is_not_a_workflow_write() {
+        assert!(!super::n8n_write_command("curl -s -X POST http://127.0.0.1:5760/webhook/find-new-contest -d '{}'"));
+        assert!(super::n8n_write_command("curl -s -X PUT http://127.0.0.1:5760/rest/workflows/abc -d @x.json"));
+        assert!(super::n8n_write_command("curl -s -X POST http://localhost:5760/api/v1/workflows -d @x.json"));
+    }
+
+    #[test]
+    fn n8n_kst_backup_date_handles_utc_day_and_calendar_boundaries() {
+        for (seconds, expected) in [
+            (1794582000, "261114"), // KST 00:00, UTC previous day
+            (1794614340, "261114"), // KST 08:59
+            (1794614400, "261114"), // KST 09:00
+            (1798727400, "261231"), // KST year end
+            (1709217000, "240229"), // leap day
+        ] { assert_eq!(super::n8n_kst_date(seconds), expected); }
     }
 }

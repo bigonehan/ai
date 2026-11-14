@@ -1,29 +1,41 @@
 {
   "extensions-gates": {
-    "SessionStart": [
+    "PostToolUse": [
       {
-        "type": "command",
-        "command": "~/ai/scripts/bin/agy-hook manifest agy ensure",
-        "timeout": 120
+        "hooks": [
+          {
+            "command": "~/ai/scripts/bin/agy-hook manifest agy post-architecture",
+            "timeout": 20,
+            "type": "command"
+          }
+        ],
+        "matcher": "run_command"
+      }
+    ],
+    "PreInvocation": [
+      {
+        "command": "~/ai/scripts/bin/agy-hook manifest agy prompt-architecture",
+        "timeout": 20,
+        "type": "command"
       },
       {
-        "type": "command",
-        "command": "~/ai/scripts/bin/agy-hook manifest agy architecture",
-        "timeout": 20
+        "command": "~/ai/scripts/bin/agy-hook manifest agy blackbox-prompt",
+        "timeout": 20,
+        "type": "command"
       },
       {
-        "type": "command",
-        "command": "~/ai/scripts/bin/agy-hook manifest agy snapshot",
-        "timeout": 20
+        "command": "~/ai/scripts/bin/agy-hook manifest agy touch",
+        "timeout": 20,
+        "type": "command"
       }
     ],
     "PreToolUse": [
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/agy-hook manifest agy gate",
-            "timeout": 20
+            "timeout": 20,
+            "type": "command"
           }
         ],
         "matcher": "run_command|read_file|view_file|edit_file|write_file|write_to_file|replace_file_content|multi_replace_file_content|invoke_subagent|define_subagent|manage_subagents"
@@ -31,58 +43,61 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/agy-hook manifest agy ask",
-            "timeout": 45
+            "timeout": 45,
+            "type": "command"
           }
         ],
         "matcher": "ask_question"
       }
     ],
-    "PreInvocation": [
+    "SessionStart": [
       {
-        "type": "command",
-        "command": "~/ai/scripts/bin/agy-hook manifest agy prompt-architecture",
-        "timeout": 20
+        "command": "~/ai/scripts/bin/agy-hook manifest agy ensure",
+        "timeout": 120,
+        "type": "command"
       },
       {
-        "type": "command",
-        "command": "~/ai/scripts/bin/agy-hook manifest agy touch",
-        "timeout": 20
+        "command": "~/ai/scripts/bin/agy-hook manifest agy blackbox",
+        "timeout": 20,
+        "type": "command"
+      },
+      {
+        "command": "~/ai/scripts/bin/agy-hook manifest agy architecture",
+        "timeout": 20,
+        "type": "command"
+      },
+      {
+        "command": "~/ai/scripts/bin/agy-hook manifest agy snapshot",
+        "timeout": 20,
+        "type": "command"
       }
     ],
     "Stop": [
       {
-        "type": "command",
         "command": "~/ai/scripts/bin/agy-hook manifest agy grist-sync",
-        "timeout": 60
+        "timeout": 60,
+        "type": "command"
       },
       {
-        "type": "command",
+        "command": "~/ai/scripts/bin/agy-hook manifest agy blackbox-stop",
+        "timeout": 20,
+        "type": "command"
+      },
+      {
         "command": "~/ai/scripts/bin/agy-hook manifest agy initialization",
-        "timeout": 60
+        "timeout": 60,
+        "type": "command"
       },
       {
-        "type": "command",
         "command": "~/ai/scripts/bin/agy-hook manifest agy completion",
-        "timeout": 90
+        "timeout": 90,
+        "type": "command"
       },
       {
-        "type": "command",
         "command": "~/ai/scripts/bin/agy-hook manifest agy stop-notify",
-        "timeout": 20
-      }
-    ],
-    "PostToolUse": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/ai/scripts/bin/agy-hook manifest agy post-architecture",
-            "timeout": 20
-          }
-        ],
-        "matcher": "run_command"
+        "timeout": 20,
+        "type": "command"
       }
     ]
   }

@@ -16,6 +16,7 @@
 
 - 메인 세션(위임자)이 `dispatch-agent`를 백그라운드로 실행하고 턴을 종료할 때(`DurationSeconds=180`), 또는 구현자·검증자가 Antigravity 세션 안에서 백그라운드 검증 명령(`task-*`)을 기다리며 턴을 종료할 때(`DurationSeconds=300`)는 백그라운드 취소·프로세스 정체에 대비해 `schedule`(`TimerCondition="<task-id>"`) 조기 종료 깨우기 타이머를 함께 건다.
 
-## 4. Hook 어댑터 및 트랜스크립트 (`agy-hook`)
+## 4. Hook 어댑터·트랜스크립트(`agy-hook`) 및 전역 MCP 배포
 
 - Antigravity의 camelCase 이벤트(`toolCall`, `WaitMsBeforeAsync`, `ask_question`, `USER_INPUT`, `PLANNER_RESPONSE`, `truncated_fields`)와 공통 게이트 사이의 변환 및 전용 차단은 `~/ai/scripts/agy-hook`이 전담한다.
+- 전역 MCP 서버(`blender`, `windows-mcp`)는 `~/ai/codex/hook-manifest.json`의 `mcpServers`를 원본으로 `agent-rules sync`·`ensure`가 `~/.gemini/config/mcp_config.json`·`~/.gemini/settings.json`·`~/.gemini/antigravity-cli/settings.json`에 동기화한다. 세션 시작 시점에 `windows-mcp`가 아직 주입되지 않은 상태에서 실행 중인 Windows GUI 앱의 오류·화면 확인이 필요하면 정적 파일 추측이나 수동 해결책 안내로 넘기지 않고 `dispatch-agent --agent codex`로 위임해 `windows-mcp` 실측을 수행한다.

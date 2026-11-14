@@ -1,0 +1,28 @@
+patch: completed
+diff --git a/web_save_current_page/test/tmp/verify-873-874-flow.mjs b/web_save_current_page/test/tmp/verify-873-874-flow.mjs
+new file mode 100644
++const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
++const check = (value, message) => { if (!value) throw new Error(message); };
++const session = await openStagehand({ url: pageUrl, extensions: [extensionDir] });
++const loaded = await session.page.evaluate(() => Boolean(globalThis.__saveCurrentPageLoaded));
++check(loaded, "extension content script not ready");
++console.log("[verify-step] extension-ready version=0.0.33 content-script=true");
++await cdp("Extensions.triggerAction", { id: extensionId, targetId: tab.targetId });
++await pause(1200);
++check((await session.page.evaluate(() => document.querySelectorAll("[data-save-current-page-root]").length)) === 1, "settings action did not open modal");
++console.log("[verify-step] start-action extension toolbar settings opened");
++const screenshot = await session.page.screenshot({ type: "png" });
++const image = Buffer.from(screenshot);
++check(image.length > 1000, "settings screenshot empty");
++const worker = (await cdp("Target.getTargets", { filter: [{}] })).targetInfos.find((item) => item.type === "service_worker");
++check(worker, "extension worker target absent");
++const attached = await cdp("Target.attachToTarget", { targetId: worker.targetId, flatten: true });
++const workerSession = attached.sessionId;
++await pause(1500);
++await pause(1500);
++await pause(1500);
++await pause(1500);
++await pause(1500);
++await pause(1500);
++await pause(1500);
++await pause(1500);

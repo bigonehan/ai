@@ -22,6 +22,8 @@ node $H status                                   # runtime version, model, wheth
 node $H install                                  # (re)install the pinned runtime
 node $H open --url <URL> [--extension <dir>]     # visible session, prints mode/browser/headless/title
 node $H browser [--replace] [--extension a,b] [--url URL] [--detach]  # start/attach the shared browser (run_cdp calls this)
+node $H serve [--detach]                         # start/warm resident CDP relay daemon on /tmp/access-stagehand-locks/relay.sock
+node $H relay '<json>'                           # send 1-line JSON op (open|click|type|read|wait|screenshot|storage|eval), get 1-line [verify-step] relay
 node $H stats [--last N]                         # p50/p90 per open stage and top error boundaries
 node $H doctor [--restart-runtime] [--close-hung]  # manual probe only; openStagehand already does this
 ```

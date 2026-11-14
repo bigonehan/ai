@@ -67,6 +67,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn main_session_gets_stage_start_flow_rules_only() {
+        let card = "# 초안\n앞부분\n## 요청 기록 → 행 분리\n0. 요청 기록 [🚿] 기호\n2. 목표 작성 규칙\n3. **에이전트 배정\n뒷부분";
+        let out = stage_start_context(None, Some(card));
+        assert!(out.contains("0. 요청 기록 [🚿] 기호") && out.contains("2. 목표 작성 규칙"));
+        assert!(!out.contains("앞부분") && !out.contains("에이전트 배정"));
+        assert!(stage_start_context(Some("worker"), Some(card)).is_empty());
+        assert!(stage_start_context(None, None).is_empty());
+    }
+
+    #[test]
     fn extensions_root_is_a_project() {
         assert_eq!(project_from(ROOT).as_deref(), Some(ROOT));
         assert_eq!(project_from("/tmp"), None);
@@ -304,6 +314,21 @@ fn schema_context(role: Option<&str>, schema: Option<&str>) -> String {
         .map(|text| text.trim_end().to_owned()).unwrap_or_default()
 }
 
+/// 메인 세션 시작에 manage-project 요청 기록·행 분리·목표 규칙(stage-start Flow 0~2)을 넣는다.
+/// 261114 세션이 이 카드를 읽지 않고 행을 만들어 세부 사항 기호·목표 형식을 어겼다.
+fn stage_start_context(role: Option<&str>, card: Option<&str>) -> String {
+    if role.is_some_and(|role| !role.is_empty()) { return String::new(); }
+    let Some(card) = card else { return String::new() };
+    let lines: Vec<&str> = card.lines().collect();
+    let Some(start) = lines.iter().position(|line| line.starts_with("## 요청 기록")) else { return String::new() };
+    let end = lines.iter().skip(start).position(|line| line.starts_with("3. **에이전트 배정")).map_or(lines.len(), |n| start + n);
+    format!("# manage-project 시작 절차(stage-start)\n{}", lines[start..end].join("\n").trim_end())
+}
+
+fn stage_start_file() -> PathBuf {
+    PathBuf::from(env::var_os("HOME").unwrap_or_default()).join("ai/skills/manage-project/references/stage-start.md")
+}
+
 fn schema_file() -> PathBuf {
     env::var_os("RULE_SCHEMA_FILE").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(env::var_os("HOME").unwrap_or_default()).join("ai/rules/rule_schema.md")
@@ -399,6 +424,9 @@ fn main() {
     let schema = fs::read_to_string(schema_file()).ok();
     let schema = schema_context(env::var("T26_ROLE").ok().as_deref(), schema.as_deref());
     let context = if schema.is_empty() { context } else { format!("{context}\n{schema}") };
+    let card = fs::read_to_string(stage_start_file()).ok();
+    let stage = stage_start_context(env::var("T26_ROLE").ok().as_deref(), card.as_deref());
+    let context = if stage.is_empty() { context } else { format!("{context}\n{stage}") };
     let output = render_context(&event, &args[1], &context, &state_dir);
     if !output.is_empty() { println!("{output}"); }
 }

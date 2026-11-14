@@ -25,7 +25,7 @@ description: build-ui 내부 Skill — Oat(https://oat.ink, `@knadh/oat`) 설치
 
 ## 4. Preset
 - 프리셋은 `Presets/color/<이름>.json`(+ `<이름>.theme.css`)과 `Presets/icon/<이름>.json`이다. 사용자가 다른 프리셋을 지정하지 않으면 color·icon 모두 `basic`을 쓴다.
-- color: `Presets/color/basic.theme.css`의 `:root` 변수를 프로젝트 테마로 쓴다(Oat CSS 뒤에 로드하거나 그 값으로 `:root`를 재정의). Chromium 123 미만이면 `light-dark()`를 2절 변환본과 같은 방식(lightningcss)으로 풀어 넣는다.
+- color: `Presets/color/<이름>.theme.css`(`basic`, `melange_me`)의 `:root` 변수를 프로젝트 테마로 쓴다(Oat CSS 뒤에 로드하거나 그 값으로 `:root`를 재정의). Chromium 123 미만이면 `light-dark()`를 2절 변환본과 같은 방식(lightningcss)으로 풀어 넣는다.
 - icon: `Presets/icon/basic.json`의 라이브러리·SVG 속성·기능별 아이콘(`actions`)·모달 닫기·메뉴 규칙을 따른다(build-ui `## Icon`과 값이 다르면 이 파일이 우선이며 둘을 함께 고친다).
 
 ## 5. 기록

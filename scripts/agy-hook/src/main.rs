@@ -32,17 +32,48 @@ fn workspace(event: &Value) -> String {
     paths.first().and_then(Value::as_str).unwrap_or("").to_string()
 }
 
+fn edit_target_dir(event: &Value, is_gemini: bool) -> Option<String> {
+    let args = if is_gemini { event.get("tool_input") } else { event.get("toolCall").and_then(|call| call.get("args")) };
+    let target = args.and_then(|a| a.get("file_path").or_else(|| a.get("path")).or_else(|| a.get("Path"))
+        .or_else(|| a.get("AbsolutePath")).or_else(|| a.get("TargetFile")))
+        .and_then(Value::as_str)?;
+    let absolute = if Path::new(target).is_absolute() {
+        Path::new(target).to_path_buf()
+    } else {
+        let base = if is_gemini { first_str(event, "cwd").to_string() } else { workspace(event) };
+        if !Path::new(&base).is_absolute() { return None; }
+        Path::new(&base).join(target)
+    };
+    absolute.parent().map(|path| path.to_string_lossy().into_owned())
+}
+
+fn stop_block_marker(cid: &str) -> Option<std::path::PathBuf> {
+    if cid.is_empty() { return None; }
+    let safe: String = cid.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '_' | '-') { c } else { '_' }).collect();
+    let dir = std::env::var_os("AGY_STOP_STATE_DIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".codex/tmp/task_complete/agy_stop_blocked"));
+    Some(dir.join(safe))
+}
+fn set_stop_blocked(cid: &str, blocked: bool) {
+    let Some(path) = stop_block_marker(cid) else { return };
+    if blocked {
+        if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+        let _ = std::fs::write(path, b"1");
+    } else { let _ = std::fs::remove_file(path); }
+}
+
 /// agy input ⇒ snake_case input for the Claude/Codex gates.
 pub fn to_snake(event: &Value, hook_event_name: &str) -> String {
     let mut o = Vec::new();
-    obj_set(&mut o, "session_id", s(first_str(event, "conversationId")));
+    let cid = first_str(event, "conversationId");
+    obj_set(&mut o, "session_id", s(cid));
     obj_set(&mut o, "cwd", s(workspace(event)));
     obj_set(&mut o, "transcript_path", s(first_str(event, "transcriptPath")));
     obj_set(&mut o, "hook_event_name", s(hook_event_name));
     if let Some(prompt) = event.get("lastUserInput").and_then(Value::as_str) {
         obj_set(&mut o, "prompt", s(prompt));
     }
-    if event.get("executionNum").and_then(Value::as_i64).is_some_and(|n| n >= 2) {
+    if hook_event_name == "Stop" && stop_block_marker(cid).is_some_and(|p| p.is_file()) {
         obj_set(&mut o, "stop_hook_active", Value::Bool(true));
     }
     dumps(&Value::Obj(o))
@@ -109,7 +140,7 @@ pub fn read_event(event: &Value) -> String {
 /// agy `edit_file`·`write_file` ⇒ 공통 PreToolUse gate의 Edit 입력.
 pub fn edit_event(event: &Value) -> String {
     let args = event.get("toolCall").and_then(|call| call.get("args"));
-    let path = args.and_then(|args| args.get("Path").or_else(|| args.get("TargetFile"))).and_then(Value::as_str).unwrap_or("");
+    let path = args.and_then(|args| args.get("Path").or_else(|| args.get("AbsolutePath")).or_else(|| args.get("TargetFile"))).and_then(Value::as_str).unwrap_or("");
     let mut input = Vec::new();
     obj_set(&mut input, "file_path", s(path));
     let mut output = Vec::new();
@@ -230,13 +261,17 @@ fn close_idle_dispatch_windows() {
         let (Some(id), Some(name), Some(created)) = (fields.next(), fields.next(), fields.next().and_then(|x| x.parse::<u64>().ok())) else { continue; };
         if id.is_empty() { continue; }
         if name.starts_with("starting-") {
-            if idle_window(name, created, now, "") { let _ = Command::new("tmux").args(["kill-window", "-t", id]).output(); }
+            if idle_window(name, created, now, "") {
+                let _ = run_status("cli_watch_blackbox", &["mark", "--cause", "hook_stop", "--actor", "agy-hook", "--detail", &format!("close_idle_dispatch_windows {id} {name}")], "");
+                let _ = Command::new("tmux").args(["kill-window", "-t", id]).output();
+            }
             continue;
         }
         if !name.starts_with("dispatch-") { continue; }
         let Ok(panes) = Command::new("tmux").args(["list-panes", "-t", id, "-F", "#{@dispatch-agent}\t#{pane_dead}"]).output() else { continue };
         if !panes.status.success() { continue; }
         if idle_window(name, created, now, &String::from_utf8_lossy(&panes.stdout)) {
+            let _ = run_status("cli_watch_blackbox", &["mark", "--cause", "hook_stop", "--actor", "agy-hook", "--detail", &format!("close_idle_dispatch_windows {id} {name}")], "");
             let _ = Command::new("tmux").args(["kill-window", "-t", id]).output();
         }
     }
@@ -306,6 +341,20 @@ fn gemini_common(event: &Value) -> String {
     dumps(&Value::Obj(out))
 }
 
+fn gemini_waiting_on_schedule(event: &Value) -> bool {
+    let tp = first_str(event, "transcript_path");
+    let Ok(text) = std::fs::read_to_string(tp) else { return false };
+    let mut scheduled = false;
+    for line in text.lines() {
+        if line.contains("\"type\":\"USER_INPUT\"") || line.contains("\"type\":\"SYSTEM\"") {
+            scheduled = false;
+        } else if line.contains("\"type\":\"PLANNER_RESPONSE\"") && line.contains("\"tool_calls\":[") {
+            scheduled = line.contains("\"name\":\"schedule\"");
+        }
+    }
+    scheduled
+}
+
 fn gemini_lifecycle(event: &Value, hook: &str) -> String {
     let mut out = Vec::new();
     for key in ["cwd", "session_id", "transcript_path", "prompt"] {
@@ -320,6 +369,18 @@ fn manifest_action(target: &str, id: &str, event: &Value) -> Result<String, Stri
     let is_gemini = target == "gemini";
     let lifecycle = |hook: &str| if is_gemini { gemini_lifecycle(event, hook) } else { to_snake(event, hook) };
     match id {
+        "blackbox" => run("cli_watch_blackbox", &["hook-session-start"], &lifecycle("SessionStart")).map(|_| "{}".into()),
+        "blackbox-prompt" => {
+            let output = run("cli_watch_blackbox", &["hook-prompt"], &lifecycle("UserPromptSubmit"))?;
+            Ok(if is_gemini { output } else { session_output(&output) })
+        }
+        "blackbox-stop" => {
+            let mut payload = parse(&lifecycle("Stop")).unwrap_or(Value::Obj(vec![]));
+            if let Value::Obj(ref mut fields) = payload {
+                obj_set(fields, "terminationReason", s(first_str(event, "terminationReason")));
+            }
+            run("cli_watch_blackbox", &["hook-stop"], &dumps(&payload)).map(|_| "{}".into())
+        }
         "gate" => {
             let name = if is_gemini { first_str(event, "tool_name") } else { event.get("toolCall").and_then(|x| x.get("name")).and_then(Value::as_str).unwrap_or("") };
             if name.contains("subagent") { return Ok(pre_tool("deny", "내장 subagent 호출은 dispatch-agent로 맡기세요.")); }
@@ -331,7 +392,9 @@ fn manifest_action(target: &str, id: &str, event: &Value) -> Result<String, Stri
             let gate = pre_command_output(&run("main-edit-gate", &[], &payload)?);
             if gate.contains("\"deny\"") { return Ok(gate); }
             if name.contains("edit") || name.contains("write") || name.contains("replace") {
-                let cwd = if is_gemini { first_str(event, "cwd").to_string() } else { workspace(event) };
+                let cwd = edit_target_dir(event, is_gemini).unwrap_or_else(|| {
+                    if is_gemini { first_str(event, "cwd").to_string() } else { workspace(event) }
+                });
                 if in_workflow(&cwd) { return run("grist", &["gate", "--cwd", &cwd], "").map(|o| pre_edit_output(&o)); }
             }
             Ok(gate)
@@ -347,6 +410,7 @@ fn manifest_action(target: &str, id: &str, event: &Value) -> Result<String, Stri
             Ok(if is_gemini { output } else { session_output(&output) })
         }
         "snapshot" | "touch" => {
+            if id == "snapshot" && !is_gemini { set_stop_blocked(first_str(event, "conversationId"), false); }
             let (arg, hook) = if id == "snapshot" { ("--session-start", "SessionStart") } else { ("--session-touch", "UserPromptSubmit") };
             run("task-complete", &[arg], &lifecycle(hook)).map(|_| "{}".into())
         }
@@ -356,6 +420,8 @@ fn manifest_action(target: &str, id: &str, event: &Value) -> Result<String, Stri
             Ok("{}".into())
         }
         "initialization" | "completion" | "stop-notify" => {
+            let cid = first_str(event, "conversationId");
+            if is_gemini && gemini_waiting_on_schedule(event) { return Ok("{}".into()); }
             if !is_gemini {
                 close_idle_dispatch_windows();
                 let reason = first_str(event, "terminationReason");
@@ -366,11 +432,15 @@ fn manifest_action(target: &str, id: &str, event: &Value) -> Result<String, Stri
             let name = if id == "initialization" { "initialization-gate" } else if id == "completion" { "task-complete" } else { "ask-notify" };
             let output = run(name, &[], &lifecycle("Stop"))?;
             if let Some(block) = stop_output(&output) {
+                if !is_gemini && id != "stop-notify" { set_stop_blocked(cid, true); }
                 if is_gemini {
                     let reason = parse(&block).ok().and_then(|v| v.get("reason").and_then(Value::as_str).map(str::to_owned)).unwrap_or_default();
                     Ok(pre_tool("deny", &reason))
                 } else { Ok(block) }
-            } else { Ok("{}".into()) }
+            } else {
+                if !is_gemini && id == "completion" { set_stop_blocked(cid, false); }
+                Ok("{}".into())
+            }
         }
         _ => Err(format!("unknown manifest action {id}")),
     }
@@ -387,7 +457,10 @@ fn main() {
             let id = std::env::args().nth(3).unwrap_or_default();
             manifest_action(&target, &id, &event)
         }
-        "session-start" => lifecycle_context(&event, "SessionStart", "--session-start", run),
+        "session-start" => {
+            let _ = manifest_action("agy", "blackbox", &event);
+            lifecycle_context(&event, "SessionStart", "--session-start", run)
+        },
         "pre-invocation" => lifecycle_context(&event, "UserPromptSubmit", "--session-touch", run),
         "post-command" => {
             Ok("{}".into())
@@ -430,6 +503,7 @@ fn main() {
         "pre-command" => run("main-edit-gate", &[], &command_event(&event))
             .map(|output| pre_command_output(&output)),
         "stop" => {
+            let _ = manifest_action("agy", "blackbox-stop", &event);
             close_idle_dispatch_windows();
             let reason = first_str(&event, "terminationReason");
             if reason == "USER_CANCELED" || reason == "ERROR" || event.get("fullyIdle") == Some(&Value::Bool(false)) {
@@ -438,12 +512,14 @@ fn main() {
                 Ok("{}".into())
             } else {
                 (|| -> Result<String, String> {
+                    let cid = first_str(&event, "conversationId");
                     let snake = to_snake(&event, "Stop");
                     let initialization = run("initialization-gate", &[], &snake)?;
-                    if let Some(block) = stop_output(&initialization) { return Ok(block); }
+                    if let Some(block) = stop_output(&initialization) { set_stop_blocked(cid, true); return Ok(block); }
                     let completion = run("task-complete", &[], &snake)?;
-                    if let Some(block) = stop_output(&completion) { return Ok(block); }
-                    let _ = run("ask-notify", &[], &snake);
+                    if let Some(block) = stop_output(&completion) { set_stop_blocked(cid, true); return Ok(block); }
+                    set_stop_blocked(cid, false);
+                    let _ = run("ask-notify", &[], &to_snake(&event, "Stop"));
                     Ok("{}".into())
                 })()
             }
@@ -589,11 +665,35 @@ mod tests {
     }
 
     #[test]
+    fn edit_gate_uses_target_project_when_workspace_is_extensions_root() {
+        for (name, key) in [("edit_file", "Path"), ("write_file", "AbsolutePath"), ("replace_file_content", "TargetFile")] {
+            let raw = format!(r#"{{"toolCall":{{"name":"{name}","args":{{"{key}":"/home/tree/extensions/app/src/deep/a.ts"}}}},"workspacePaths":["/home/tree/extensions"]}}"#);
+            let event = parse(&raw).unwrap();
+            assert_eq!(edit_target_dir(&event, false).as_deref(), Some("/home/tree/extensions/app/src/deep"));
+            let payload = parse(&edit_event(&event)).unwrap();
+            assert_eq!(payload.get("tool_input").and_then(|v| v.get("file_path")).and_then(Value::as_str), Some("/home/tree/extensions/app/src/deep/a.ts"));
+            assert_eq!(workspace(&event), "/home/tree/extensions");
+        }
+        let gemini = parse(r#"{"tool_name":"replace","tool_input":{"file_path":"/home/tree/extensions/app/src/deep/a.ts"},"cwd":"/home/tree/extensions"}"#).unwrap();
+        assert_eq!(edit_target_dir(&gemini, true).as_deref(), Some("/home/tree/extensions/app/src/deep"));
+        let relative = parse(r#"{"toolCall":{"name":"edit_file","args":{"Path":"app/src/deep/a.ts"}},"workspacePaths":["/home/tree/extensions"]}"#).unwrap();
+        assert_eq!(edit_target_dir(&relative, false).as_deref(), Some("/home/tree/extensions/app/src/deep"));
+    }
+
+    #[test]
     fn agy_invocation_and_tool_variants_keep_gate_inputs() {
-        let event = parse(r#"{"conversationId":"agy-1","workspacePaths":["/home/tree/extensions"],"lastUserInput":"수정해 주세요","executionNum":2}"#).unwrap();
-        let mapped = parse(&to_snake(&event, "UserPromptSubmit")).unwrap();
+        let state = std::env::temp_dir().join(format!("agy-stop-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        unsafe { std::env::set_var("AGY_STOP_STATE_DIR", &state); }
+        let event = parse(r#"{"conversationId":"agy-1","workspacePaths":["/home/tree/extensions"],"lastUserInput":"수정해 주세요","executionNum":8}"#).unwrap();
+        let mapped = parse(&to_snake(&event, "Stop")).unwrap();
         assert_eq!(mapped.get("prompt").and_then(Value::as_str), Some("수정해 주세요"));
-        assert_eq!(mapped.get("stop_hook_active"), Some(&Value::Bool(true)));
+        assert_eq!(mapped.get("stop_hook_active"), None, "executionNum>=2 alone must not suppress stop-notify nf");
+        set_stop_blocked("agy-1", true);
+        assert_eq!(parse(&to_snake(&event, "Stop")).unwrap().get("stop_hook_active"), Some(&Value::Bool(true)));
+        set_stop_blocked("agy-1", false);
+        assert_eq!(parse(&to_snake(&event, "Stop")).unwrap().get("stop_hook_active"), None);
+        let _ = std::fs::remove_dir_all(&state);
 
         let view = parse(r#"{"conversationId":"agy-1","workspacePaths":["/home/tree/extensions"],"toolCall":{"name":"view_file","args":{"AbsolutePath":"/home/tree/extensions/app/src/a.ts","EndLine":20}}}"#).unwrap();
         let read = parse(&read_event(&view)).unwrap();

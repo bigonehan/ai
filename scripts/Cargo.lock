@@ -60,8 +60,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "cli_watch_blackbox"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "dispatch-agent"
-version = "0.0.12"
+version = "0.0.13"
 dependencies = [
  "serde",
  "serde_json",
@@ -257,7 +264,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "jev"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "regex",
  "serde_json",
@@ -513,10 +520,11 @@ dependencies = [
 
 [[package]]
 name = "task-complete"
-version = "0.0.26"
+version = "0.0.27"
 dependencies = [
  "grist",
  "read-architecture",
+ "serde_json",
 ]
 
 [[package]]

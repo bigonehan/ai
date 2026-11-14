@@ -13,8 +13,8 @@ pub const CONFIRMED_STAGE: &str = "확인";
 pub const STAGE_START_CARD: &str = "~/ai/skills/manage-project/references/stage-start.md";
 pub const STAGE_WORK_CARD: &str = "~/ai/skills/manage-project/references/stage-work.md";
 pub const STAGE_VERIFY_CARD: &str = "~/ai/skills/manage-project/references/stage-verify.md";
-/// `task-confirm` 뒤 다음 카드: 행 확인마다 `improve_process`로 `## 개선 요구`를 처리한다.
-pub const IMPROVE_PROCESS_CARD: &str = "~/ai/skills/improve_process/SKILL.md";
+/// `task-confirm` 뒤 다음 카드: 행 확인마다 `manage_improve`로 `## 개선 요구`를 처리한다.
+pub const IMPROVE_PROCESS_CARD: &str = "~/ai/skills/manage_improve/SKILL.md";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -145,7 +145,7 @@ impl TaskStore for GateStore {
         state.remove("flow_wait");
         state.remove("verifier_recorded");
         state.insert(ctx.prep_kind.into(), Value::Object(ctx.prepared.clone()));
-        state.insert("submit".into(), json!({"purpose": ctx.purpose, "test": ctx.test, "exit": 0, "output": ctx.output, "changed": ctx.changed}));
+        state.insert("submit".into(), json!({"purpose": ctx.purpose, "test": ctx.test, "exit": 0, "output": ctx.output, "changed": ctx.changed, "snapshot": gate::snapshot(&dir)}));
         state.insert("hidden".into(), json!([]));
         gate::gate_save(&dir, ctx.raw_id, &state)
     }
@@ -276,17 +276,32 @@ pub fn check(project_dir: &Path, raw_id: i64) -> R<CheckOutcome> {
     let goal_count = match_goal_count(&goal);
     let judgment = gate::jev("match", Some(raw_id), &[("goal", &goal), ("output", &output)]);
     require_j1_pass(&judgment, goal_count).map_err(|e| Exit::Fail("COMPLETE_TASK".into(), format!("#{raw_id} {e}")))?;
-    // manage-project references/plan.md §3「마감 (요청 대조)」의 기계 강제(261110 #813에서 이 절차를 건너뛰고
-    // 목표만 맞춘 채 `확인`): 같은 근거를 changes `# 요청` 블록과도 J1로 대조한다.
-    if let Some(request_goal) = request_as_goal(project_dir, raw_id) {
-        let count = match_goal_count(&request_goal);
-        let judgment = gate::jev("match", Some(raw_id), &[("goal", &request_goal), ("output", &output)]);
-        require_j1_pass(&judgment, count).map_err(|e| Exit::Fail("COMPLETE_TASK".into(),
-            format!("#{raw_id} 요청 목적 미충족({e}) — changes `# 요청`의 요구가 실제 결과 근거로 확인되지 않았어요")))?;
-    }
     let mut ctx = TaskCtx { project_dir: Some(project_dir.to_path_buf()), raw_id, stage, ..Default::default() };
     TaskChain::standard(Step::Check).run(Step::Check, &mut ctx)?;
     Ok(CheckOutcome::Completed)
+}
+
+/// Compare a split request with the combined confirmation evidence once, after its rows pass.
+/// A single row already passed J3 at creation and J1 against its goal above.
+pub fn check_request(project_dir: &Path, raw_ids: &[i64]) -> R<()> {
+    if raw_ids.len() < 2 { return Ok(()); }
+    let mut blocks = Vec::new();
+    let mut outputs = Vec::new();
+    for &raw_id in raw_ids {
+        let Some(record) = records::item_file(project_dir, raw_id) else { continue };
+        let Ok(text) = std::fs::read_to_string(record) else { continue };
+        let title = records::item_title_in(&text, raw_id);
+        if let Some(block) = records::request_for_item_in(&text, title.as_deref()) {
+            let scoped = records::scope_request_block(&block, title.as_deref());
+            if !blocks.contains(&scoped) { blocks.push(scoped); }
+        }
+        outputs.push(format!("#{raw_id}\n{}", confirmation_output(project_dir, raw_id)?));
+    }
+    let Some(goal) = request_goal_lines(&blocks.join("\n")) else { return Ok(()) };
+    let count = match_goal_count(&goal);
+    let judgment = gate::jev("match", None, &[("goal", &goal), ("output", &outputs.join("\n"))]);
+    require_j1_pass(&judgment, count).map_err(|e| Exit::Fail("COMPLETE_TASK".into(),
+        format!("요청 목적 미충족({e}) — changes `# 요청`의 요구가 실제 결과 근거로 확인되지 않았어요")))
 }
 
 fn code_evidence(project_dir: &Path, raw_id: i64, stage: &str, state: &Map<String, Value>) -> R<String> {
@@ -326,9 +341,10 @@ pub(crate) fn runtime_evidence_marker(project_dir: &Path, raw_id: i64, evidence:
     let agents = std::fs::read_to_string(project_dir.join("AGENTS.md")).ok()?;
     let runtime = agents.lines().find_map(|line| line.trim().strip_prefix("runtime :").map(str::trim))?;
     if runtime.starts_with("없음") || text_only_row(project_dir, raw_id) { return None; }
-    const MARKERS: [&str; 9] = [
+    const MARKERS: [&str; 12] = [
         "단위 테스트", "경계·통합 테스트", "통합 테스트만", "로그인 필요", "로그인이 필요",
         "검증 중단", "확인하지 못", "미검증", "mock",
+        "핸들러를 호출", "핸들러 호출", "opensettingsfortab",
     ];
     let lower = evidence.to_lowercase();
     MARKERS.into_iter().find(|marker| lower.contains(marker))
@@ -889,10 +905,14 @@ mod tests {
         let dir = tmp_project("unverified-runtime");
         std::fs::write(dir.join("AGENTS.md"), "runtime : 브라우저 확장\n").unwrap();
         let path = dir.join(".ai/changes/261023.light.md");
-        for marker in ["단위 테스트", "경계·통합 테스트", "통합 테스트만", "로그인 필요", "로그인이 필요", "검증 중단", "확인하지 못", "미검증", "MOCK"] {
-            std::fs::write(&path, format!(
+        for marker in ["단위 테스트", "경계·통합 테스트", "통합 테스트만", "로그인 필요", "로그인이 필요", "검증 중단", "확인하지 못", "미검증", "MOCK", "핸들러를 호출", "핸들러 호출", "openSettingsForTab"] {
+            let confirmation = format!(
                 "## [구현] [📐] 코드 (#303)\n### 구현\n- 상태 : 검증\n#### 확인 (#303)\n- 요약 : 입력 ⇒ 결과\n- [x] 최종 소비 확인\n  결과 : 성공\n  상세 : 실제 값 확인\n- 근거 1 : {marker}\n"
-            )).unwrap();
+            );
+            std::fs::write(&path, &confirmation).unwrap();
+            if ["핸들러를 호출", "핸들러 호출", "openSettingsForTab"].contains(&marker) {
+                assert_eq!(runtime_evidence_marker(&dir, 303, &confirmation), Some(if marker == "openSettingsForTab" { "opensettingsfortab" } else { marker }));
+            }
             let err = code_evidence(&dir, 303, api::SUBMITTED_STAGE, &code_state(Some(1))).unwrap_err();
             assert!(exit_message(&err).contains("unverified evidence"), "{marker}");
         }

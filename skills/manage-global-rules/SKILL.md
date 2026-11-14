@@ -1,6 +1,6 @@
 ---
 name: manage-global-rules
-description: Own the global agent rules and settings — read or change `~/ai/rules/Agents.md` through the `agent-rules` CLI, apply settings to Claude·Codex·Gemini together, and handle the user's complaints about global rules or settings by first finding the existing rule and enforcing it with a hook or script instead of adding text. Use whenever the user mentions 전역 규칙·전역설정·설정·"앞으로" rules, points out that a rule or setting was not followed, or asks to read, add, replace, or remove a global rule line. Not for project `AGENTS.md` edits.
+description: Own the global agent rules and settings — read or change `~/ai/rules/Agents.md` through the `agent-rules` CLI, apply settings to Claude·Codex·Gemini together, and handle the user's complaints about global rules or settings by first finding the existing rule and fixing the procedure that produced the wrong behavior (session-start injection, Skill card, tool action) before adding any blocking hook. Use whenever the user mentions 전역 규칙·전역설정·설정·"앞으로" rules, points out that a rule or setting was not followed, or asks to read, add, replace, or remove a global rule line. Not for project `AGENTS.md` edits.
 ---
 
 # Manage Global Rules
@@ -12,8 +12,8 @@ description: Own the global agent rules and settings — read or change `~/ai/ru
 사용자가 전역 규칙이나 설정이 지켜지지 않았다고 지적하거나 바꾸라고 하면 문구를 추가하기 전에 아래 순서를 따른다.
 
 1. **기존 규칙 찾기:** `agent-rules read`·`rg -n "<키워드>" ~/ai/rules/Agents.md ~/ai/skills`로 같은 내용의 규칙이 전역 규칙·Skill에 이미 있는지 확인한다.
-2. **이미 있으면 강제 수단으로 바꾼다:** 같은 문구를 다시 쓰거나 강조하지 않는다. 그 규칙을 기계적으로 막거나 수행하는 hook·script를 찾아 고치거나 새로 만든다.
-   - 후보: PreToolUse 거부(`~/ai/scripts/main-edit-gate`), Stop 판정(`task-complete`), CLI 검증(`grist`·`agent-rules`·`dispatch-agent`의 인자·상태 검사), 알림(`ask-notify`).
+2. **이미 있으면 절차부터 고친다:** 같은 문구를 다시 쓰거나 강조하지 않는다. 먼저 어긋난 동작을 만든 절차(세션 시작 주입·Skill 카드·도구가 올바른 동작을 직접 수행하게 하는 hook·script)를 고친다. 거부·Stop 차단 같은 차단 규칙은 절차를 고친 뒤에도 같은 위반이 남을 때만 추가한다(261114 시작 절차 미주입 상태에서 차단만 추가해 작업이 반복 정지).
+   - 절차 후보: SessionStart·UserPromptSubmit 주입(`architecture-context`), 도구가 대신 수행(`grist`·`dispatch-agent`), 알림(`ask-notify`). 차단 후보(절차 수정 뒤에만): PreToolUse 거부(`~/ai/scripts/main-edit-gate`), Stop 판정(`task-complete`), CLI 검증(`grist`·`agent-rules`·`dispatch-agent`의 인자·상태 검사).
    - 강제가 들어가면 그 규칙 문구는 전역 규칙에서 지우거나 "hook이 거부한다" 한 줄로 줄인다(예: `nf` 직접 실행 금지 → `main-edit-gate`가 거부).
    - hook·script는 작업 도구이므로 대행자에게 위임하지 않고 메인이 직접 고치며, `create-skill`의 위치·링크 규칙을 따른다. 실제 hook 환경에서 거부·통과 사례를 확인한다.
    - 기계적으로 판정할 수 없는 규칙(말투·판단 기준 등)만 문구 수정으로 처리하고, 그 이유를 보고에 한 줄로 적는다.

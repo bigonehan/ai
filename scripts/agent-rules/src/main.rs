@@ -4,6 +4,7 @@ use agent_rules::{self as rules, Paths, State, SIZE_LIMIT, TARGETS};
 use std::io::Read;
 use std::process::ExitCode;
 mod deployment;
+mod cache;
 
 const USAGE: &str = "사용법: agent-rules <명령>
   path                                원본 경로
@@ -16,7 +17,8 @@ const USAGE: &str = "사용법: agent-rules <명령>
   sync [--target <이름>] [--force] [--quiet]
                                       기존 생성본을 백업하고 원본에서 전부 재생성
   status                              규칙·Skill·hook·바이너리 어긋남 목록(있으면 exit 3)
-  ensure                              SessionStart에서 어긋나면 sync --force
+  ensure                              SessionStart에서 어긋나면 sync --force, crate별 3개 이상·5일 초과 빌드 캐시 정리
+  prune-cache                         crate별 3개 이상·5일 초과 빌드 캐시 즉시 정리
 수정 명령(add·replace·remove·write)은 끝나면 모든 대상을 sync한다.
 대상: codex(~/.codex/AGENTS.md), claude(~/.claude/CLAUDE.md),
       antigravity(~/.gemini/GEMINI.md), antigravity-cli(~/.gemini/antigravity-cli/GEMINI.md)";
@@ -156,9 +158,27 @@ fn run(cmd: &str, mut a: Args) -> rules::Result<()> {
             if TARGETS.iter().any(|t| rules::inspect(&p, &text, t).0 != State::Synced) || !deployment::inspect(&p)?.is_empty() {
                 return Err(rules::Error { code: 3, msg: "sync 후에도 어긋남이 남았다".into() });
             }
+            prune_cache(&p)?;
+            let blackbox = p.home.join("ai/scripts/bin/cli_watch_blackbox");
+            if blackbox.is_file() { let _ = std::process::Command::new(blackbox).arg("gc").status(); }
+        }
+        "prune-cache" => {
+            a.done()?;
+            prune_cache(&p)?;
         }
         _ => return Err(usage(&format!("알 수 없는 명령 `{cmd}`"))),
     }
+    Ok(())
+}
+
+fn prune_cache(p: &Paths) -> rules::Result<()> {
+    if cache::build_active() {
+        println!("빌드 캐시 정리 건너뜀: Cargo/Rust 컴파일 진행 중");
+        return Ok(());
+    }
+    let (units, bytes) = cache::prune(&p.home, std::time::SystemTime::now())
+        .map_err(|e| rules::Error { code: 1, msg: format!("빌드 캐시 정리: {e}") })?;
+    if units > 0 { println!("crate별 3개 이상·5일 초과 빌드 캐시 정리: {units}개 묶음, {bytes}바이트"); }
     Ok(())
 }
 

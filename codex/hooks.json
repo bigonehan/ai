@@ -1,41 +1,24 @@
 {
   "hooks": {
-    "SessionStart": [
+    "PostToolUse": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "~/ai/scripts/bin/agent-rules ensure",
-            "timeout": 120
-          }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
             "command": "~/ai/scripts/bin/architecture-context",
-            "timeout": 20
+            "timeout": 20,
+            "type": "command"
           }
-        ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/ai/scripts/bin/task-complete --session-start",
-            "timeout": 20
-          }
-        ]
+        ],
+        "matcher": "Skill|Bash"
       }
     ],
     "PreToolUse": [
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/main-edit-gate",
-            "timeout": 20
+            "timeout": 20,
+            "type": "command"
           }
         ],
         "matcher": "Edit|Write|MultiEdit|NotebookEdit|Read|Bash|Agent|Task|exec_command|apply_patch|functions.exec_command|functions.apply_patch"
@@ -43,30 +26,48 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/ask-notify",
-            "timeout": 45
+            "timeout": 45,
+            "type": "command"
           }
         ],
         "matcher": "AskUserQuestion|ExitPlanMode"
       }
     ],
-    "UserPromptSubmit": [
+    "SessionStart": [
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "~/ai/scripts/bin/architecture-context",
-            "timeout": 20
+            "command": "~/ai/scripts/bin/agent-rules ensure",
+            "timeout": 120,
+            "type": "command"
           }
         ]
       },
       {
         "hooks": [
           {
-            "type": "command",
-            "command": "~/ai/scripts/bin/task-complete --session-touch",
-            "timeout": 20
+            "command": "~/ai/scripts/bin/cli_watch_blackbox hook-session-start",
+            "timeout": 20,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "~/ai/scripts/bin/architecture-context",
+            "timeout": 20,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "~/ai/scripts/bin/task-complete --session-start",
+            "timeout": 20,
+            "type": "command"
           }
         ]
       }
@@ -75,50 +76,76 @@
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/grist sync --cwd \"$PWD\" >/dev/null 2>&1 || true",
-            "timeout": 60
+            "timeout": 60,
+            "type": "command"
           }
         ]
       },
       {
         "hooks": [
           {
-            "type": "command",
+            "command": "~/ai/scripts/bin/cli_watch_blackbox hook-stop",
+            "timeout": 20,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
             "command": "~/ai/scripts/bin/initialization-gate",
-            "timeout": 60
+            "timeout": 60,
+            "type": "command"
           }
         ]
       },
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/task-complete",
-            "timeout": 90
+            "timeout": 90,
+            "type": "command"
           }
         ]
       },
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/ask-notify",
-            "timeout": 20
+            "timeout": 20,
+            "type": "command"
           }
         ]
       }
     ],
-    "PostToolUse": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
-            "type": "command",
             "command": "~/ai/scripts/bin/architecture-context",
-            "timeout": 20
+            "timeout": 20,
+            "type": "command"
           }
-        ],
-        "matcher": "Skill|Bash"
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "~/ai/scripts/bin/cli_watch_blackbox hook-prompt",
+            "timeout": 20,
+            "type": "command"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "command": "~/ai/scripts/bin/task-complete --session-touch",
+            "timeout": 20,
+            "type": "command"
+          }
+        ]
       }
     ]
   }

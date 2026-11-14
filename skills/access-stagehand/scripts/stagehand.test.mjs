@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { acquireRuntimeLock, attachExtension, browserArgs, browserCdp, cleanupBrowserLogs, closeRuntimeSession, connectAndCreate, createWithRuntimeWorker, enableProfileExtensions, enhanceStagehandPage, ensureBrowser, ensureExtensions, extensionIdFor, formatSessionSummary, holdRuntimeWorker, openStagehand, optionalStateWrite, runDoctor, runtimeLockDir, runtimeResetForRecoveredOwner, sessionStats, STAGEHAND_EXTENSION_DIR } from "./stagehand.mjs";
+import { acquireRuntimeLock, attachExtension, browserArgs, browserCdp, cleanupBrowserLogs, closeRuntimeSession, connectAndCreate, createWithRuntimeWorker, enableProfileExtensions, enhanceStagehandPage, ensureBrowser, ensureExtensions, extensionIdFor, formatSessionSummary, holdRuntimeWorker, openStagehand, optionalStateWrite, runDoctor, runtimeLockDir, runtimeResetForRecoveredOwner, sessionStats, STAGEHAND_EXTENSION_DIR, createRelay, relayLine, serveRelay, relayRequest } from "./stagehand.mjs";
 
 test("browser log sweep removes only expired port logs", () => {
   const dir = mkdtempSync(join(tmpdir(), "run-cdp-sweep-"));
@@ -863,4 +863,108 @@ test("enhanceStagehandPage polyfills locator.evaluate and evaluateAll including 
   assert.equal(crossOrigin, "video-maker-init-overlay-backdrop");
   const allResult = await enhanced.locator("button").evaluateAll((els) => els.length);
   assert.equal(allResult, 1);
+});
+
+// --- CDP relay -------------------------------------------------------------
+
+/** Fake CDP: a document with an input inside a closed shadow root and an iframe document. */
+function relayFakeCdp({ value = "" } = {}) {
+  const calls = [];
+  let typed = value;
+  const tree = {
+    nodeId: 1, nodeType: 9, children: [
+      { nodeId: 2, nodeType: 1, nodeName: "SETTINGS-PANEL", children: [], shadowRoots: [
+        { nodeId: 3, nodeType: 11, shadowRootType: "closed", children: [{ nodeId: 4, nodeType: 1, nodeName: "INPUT", children: [] }] },
+      ] },
+      { nodeId: 5, nodeType: 1, nodeName: "IFRAME", children: [], contentDocument: {
+        nodeId: 6, nodeType: 9, children: [{ nodeId: 7, nodeType: 1, nodeName: "BUTTON", children: [] }],
+      } },
+    ],
+  };
+  const selectors = { 3: { "input.key": 4 }, 1: { "settings-panel": 2, iframe: 5 }, 6: { "button.save": 7 } };
+  return {
+    calls,
+    call: async (method, params = {}, sessionId) => {
+      calls.push({ method, params, sessionId });
+      const ok = (result = {}) => ({ result });
+      switch (method) {
+        case "Target.createTarget": return ok({ targetId: "t1" });
+        case "Target.attachToTarget": return ok({ sessionId: "s1" });
+        case "DOM.getDocument": assert.equal(params.pierce, true); return ok({ root: tree });
+        case "DOM.querySelector": return ok({ nodeId: selectors[params.nodeId]?.[params.selector] || 0 });
+        case "DOM.getBoxModel": return ok({ model: { content: [10, 20, 0, 0, 30, 40, 0, 0] } });
+        case "Input.dispatchKeyEvent": if (params.type === "keyDown") typed += params.text; return ok();
+        case "DOM.resolveNode": return ok({ object: { objectId: `o${params.nodeId}` } });
+        case "Runtime.callFunctionOn": return ok({ result: { value: typed } });
+        case "Runtime.evaluate": return ok({ result: { value: params.expression === "document.readyState" ? "complete" : "http://localhost/settings?token=x" } });
+        default: return ok();
+      }
+    },
+  };
+}
+
+test("relay types real key events into an input inside a closed shadow root and reads it back", async () => {
+  const cdp = relayFakeCdp();
+  const relay = createRelay(cdp, { sleep: async () => {} });
+  const typed = await relay.handle({ op: "type", target: "input.key", text: "abc" });
+  assert.deepEqual(typed, { ok: true, value: "typed 3" });
+  const keyDowns = cdp.calls.filter((c) => c.method === "Input.dispatchKeyEvent" && c.params.type === "keyDown").map((c) => c.params.text);
+  assert.deepEqual(keyDowns, ["a", "b", "c"]);
+  assert.ok(cdp.calls.filter((c) => /^(DOM|Input|Runtime)\./.test(c.method)).every((c) => c.sessionId === "s1"));
+  assert.deepEqual(await relay.handle({ op: "read", target: "input.key" }), { ok: true, value: "abc" });
+  assert.equal(relayLine({ op: "read", target: "input.key" }, { ok: true, value: "abc" }), "[verify-step] relay op=read target=input.key ok=true value=abc");
+});
+
+test("relay steps into an iframe with `>>`, strips the query on open, and stops the same failed measurement at two", async () => {
+  const relay = createRelay(relayFakeCdp(), { sleep: async () => {} });
+  assert.deepEqual(await relay.handle({ op: "click", target: "iframe >> button.save" }), { ok: true, value: "clicked" });
+  assert.deepEqual(await relay.handle({ op: "open", url: "http://localhost/settings" }), { ok: true, value: "http://localhost/settings" });
+  const first = await relay.handle({ op: "read", target: "input.missing" });
+  assert.equal(first.ok, false);
+  assert.ok(!first.reason.startsWith("measure-failed"));
+  const second = await relay.handle({ op: "read", target: "input.missing" });
+  assert.ok(second.reason.startsWith("measure-failed (2회)"), second.reason);
+  assert.equal((await relay.handle({ op: "nope" })).reason, "unknown op nope");
+  const long = relayLine({ op: "eval" }, { ok: true, value: "x".repeat(900) });
+  assert.ok(long.length < 360);
+});
+
+test("relay reads extension storage while the MV3 service worker is idle", async () => {
+  const { ext, clean } = fixture();
+  try {
+    const id = extensionIdFor(ext);
+    const calls = [];
+    const cdp = { call: async (method, params = {}, sessionId) => {
+      calls.push({ method, params, sessionId });
+      if (method === "Target.getTargets") return { result: { targetInfos: [] } };
+      if (method === "Target.createTarget") return { result: { targetId: "manifest-page" } };
+      if (method === "Target.attachToTarget") return { result: { sessionId: "manifest-session" } };
+      if (method === "Runtime.evaluate") return { result: { result: { value: params.expression.startsWith("Boolean(") ? true : { saveCurrentPageSecrets: { obsidianApiKey: "abc", gristApiKey: "abc" } } } } };
+      return { result: {} };
+    } };
+    const relay = createRelay(cdp, { sleep: async () => {} });
+    assert.deepEqual(await relay.handle({ op: "storage", extensionDir: ext, key: "saveCurrentPageSecrets" }), {
+      ok: true, value: { obsidianApiKey: "abc", gristApiKey: "abc" },
+    });
+    assert.equal(calls.find((call) => call.method === "Target.createTarget").params.url, `chrome-extension://${id}/manifest.json`);
+    assert.equal(calls.find((call) => call.method === "Runtime.evaluate" && call.params.expression.startsWith("chrome.storage")).sessionId, "manifest-session");
+    assert.equal(calls.filter((call) => call.method === "Target.detachFromTarget").length, 1);
+    assert.equal(calls.filter((call) => call.method === "Target.closeTarget").length, 1);
+  } finally { clean(); }
+});
+
+test("relay server answers one line per request over its socket and is reused when already running", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "relay-sock-"));
+  const socketPath = join(dir, "relay.sock");
+  try {
+    const served = await serveRelay({ socketPath, cdpFactory: async () => relayFakeCdp({ value: "k" }) });
+    assert.equal(served.started, true);
+    const reply = await relayRequest({ op: "read", target: "input.key" }, { socketPath, start: false });
+    assert.deepEqual(reply, { ok: true, value: "k" });
+    const again = await serveRelay({ socketPath, cdpFactory: async () => relayFakeCdp() });
+    assert.equal(again.started, false);
+    await new Promise((done) => served.server.close(done));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

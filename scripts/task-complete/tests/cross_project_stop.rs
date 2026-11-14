@@ -17,9 +17,12 @@ fn stop_hook_keeps_other_project_pending_after_process_row_is_confirmed() {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&mock, fs::Permissions::from_mode(0o755)).unwrap();
     let event = format!(r#"{{"cwd":"{}","session_id":"stop-cross","transcript_path":"{}","last_assistant_message":"완료했어요"}}"#, root.display(), transcript.display());
+    let decision = fixture.join("manage_decision");
+    fs::write(&decision, "#!/bin/sh\ncat >/dev/null\nexit 2\n").unwrap(); // 재개 지시는 판정하지 않음: CLI 실패 = 판정 건너뜀
+    fs::set_permissions(&decision, fs::Permissions::from_mode(0o755)).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_task-complete"))
         .arg("--hook").env_clear().env("HOME", "/home/tree").env("PATH", "/usr/bin:/bin")
-        .env("GRIST_BIN", &mock).env("TASK_COMPLETE_STATE_DIR", &fixture)
+        .env("GRIST_BIN", &mock).env("MANAGE_DECISION_BIN", &decision).env("TASK_COMPLETE_STATE_DIR", &fixture)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(event.as_bytes()).unwrap();
     let output = child.wait_with_output().unwrap();
@@ -32,7 +35,7 @@ fn stop_hook_keeps_other_project_pending_after_process_row_is_confirmed() {
     fs::set_permissions(&jev, fs::Permissions::from_mode(0o755)).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_task-complete"))
         .arg("--hook").env_clear().env("HOME", "/home/tree").env("PATH", "/usr/bin:/bin")
-        .env("GRIST_BIN", &mock).env("JEV_BIN", &jev).env("TASK_COMPLETE_STATE_DIR", &fixture)
+        .env("GRIST_BIN", &mock).env("JEV_BIN", &jev).env("MANAGE_DECISION_BIN", &decision).env("TASK_COMPLETE_STATE_DIR", &fixture)
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     child.stdin.take().unwrap().write_all(event.as_bytes()).unwrap();
     let output = child.wait_with_output().unwrap();

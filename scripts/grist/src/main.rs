@@ -180,9 +180,10 @@ fn run(argv: &[String]) -> R<Value> {
         }
         "add" => {
             let table = args.pos_str(0, "table")?;
-            let fields = parse_fields_obj(args.flag_req("fields")?, "--fields")?;
+            let mut fields = parse_fields_obj(args.flag_req("fields")?, "--fields")?;
             if table == TASK_TABLE {
                 api::validate_task_fields(&fields)?;
+                fields = records::task_add_fields(fields);
             }
             api::add(table, &fields)
         }
@@ -353,7 +354,9 @@ fn run(argv: &[String]) -> R<Value> {
             let project = args.flag_req("project")?;
             let goal_file = args.flag_req("goal-file")?;
             let summary = args.flag_req("summary")?;
-            with_row_state(gate::task_goal(row_id, project, goal_file, summary)?, Some(project))
+            let out = gate::task_goal(row_id, project, goal_file, summary)?;
+            records::blackbox("bind-row", row_id, Some(Path::new(project)));
+            with_row_state(out, Some(project))
         }
         "task-red" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -365,7 +368,9 @@ fn run(argv: &[String]) -> R<Value> {
             let detail = args.flag_opt("detail").unwrap_or("");
             let env_agent = std::env::var("T26_AGENT_ID").ok().filter(|v| !v.trim().is_empty());
             let agent_id = args.flag_opt("agent-id").or(env_agent.as_deref());
-            gate::task_red(row_id, project, test, &paths, &tests, purpose, detail, agent_id)
+            let result = gate::task_red(row_id, project, test, &paths, &tests, purpose, detail, agent_id);
+            if result.is_ok() { records::blackbox("bind-row", row_id, Some(Path::new(project))); }
+            result
         }
         "task-ready" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -376,7 +381,9 @@ fn run(argv: &[String]) -> R<Value> {
             let purpose = args.flag_req("purpose")?;
             let env_agent = std::env::var("T26_AGENT_ID").ok().filter(|v| !v.trim().is_empty());
             let agent_id = args.flag_opt("agent-id").or(env_agent.as_deref());
-            gate::task_ready(row_id, project, test, &paths, &tests, purpose, agent_id)
+            let result = gate::task_ready(row_id, project, test, &paths, &tests, purpose, agent_id);
+            if result.is_ok() { records::blackbox("bind-row", row_id, Some(Path::new(project))); }
+            result
         }
         "task-hidden" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -393,7 +400,8 @@ fn run(argv: &[String]) -> R<Value> {
         }
         "flow-wait" => {
             let project = args.flag_req("project")?;
-            gate::flow_wait(project)
+            let row = args.flag_i64_opt("row")?;
+            gate::flow_wait(project, row)
         }
         "task-show" => {
             let row_id = args.pos_i64(0, "row_id")?;
@@ -407,17 +415,13 @@ fn run(argv: &[String]) -> R<Value> {
             let line = args.flag_req("line")?;
             records::task_memo(project, row_id, line)
         }
-        "improve-note" => {
-            let row_id = args.pos_i64(0, "row_id")?;
+        "improve-entry" => {
+            let action = args.pos_str(0, "action")?;
+            let row_id = args.pos_i64(1, "row_id")?;
             let project = args.flag_req("project")?;
-            let text = args.flag_req("text")?;
-            records::improve_record(project, row_id, "note", text)
-        }
-        "improve-done" => {
-            let row_id = args.pos_i64(0, "row_id")?;
-            let project = args.flag_req("project")?;
-            let text = args.flag_req("text")?;
-            records::improve_record(project, row_id, "done", text)
+            let text = args.flag_opt("text").unwrap_or("");
+            let recurrence = args.flag_opt("recurrence").unwrap_or("");
+            records::improve_entry(project, row_id, action, text, recurrence)
         }
         "task-step" => {
             let row_id = args.pos_i64(0, "row_id")?;

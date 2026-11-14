@@ -5,7 +5,7 @@ description: Windows 데스크톱 앱(Blender 등) 런타임을 WSL에서 헤드
 
 # Build Win
 
-Windows 데스크톱 앱의 헤드리스 런타임 확인은 위임자가 `win-smoke`로 실행한다. 실행 중인 GUI 앱에 입력하거나 화면을 확인하는 검증자는 `role-verifier/references/runtime-app.md`에 따라 사용 가능한 Windows MCP 도구를 쓴다. Codex sandbox는 Windows 실행 파일을 돌리지 못하고, `blender.exe` 직접 실행은 세션이 닫히지 않아 `main-edit-gate`가 거부한다.
+Windows 데스크톱 앱의 헤드리스 런타임 확인은 위임자가 `win-smoke`로 실행한다. 실행 중인 GUI 앱의 화면·오류·상태 확인이나 입력 검증은 디스크의 저장본(`.blend` 등)만 읽고 추측성 수동 해결책을 안내하지 않고, `role-verifier/references/runtime-app.md`에 따라 `windows-mcp`(현재 세션에 MCP 도구가 미적재된 경우 `dispatch-agent --agent codex` 위임)로 실행 중인 창을 먼저 실측한다. Codex sandbox는 Windows 실행 파일을 직접 셸로 돌리지 못하고, `blender.exe` 직접 실행은 세션이 닫히지 않아 `main-edit-gate`가 거부한다.
 
 ## 실행
 
